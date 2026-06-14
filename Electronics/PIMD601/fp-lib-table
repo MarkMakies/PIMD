@@ -1,0 +1,5 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "RP2040Z")(type "KiCad")(uri "${KIPRJMOD}/RaspberryPi_Pico/Module_RaspberryPi_Pico.pretty")(options "")(descr ""))
+  (lib (name "_MM-footprints")(type "KiCad")(uri "${KIPRJMOD}/_MM-footprints.pretty")(options "")(descr ""))
+)

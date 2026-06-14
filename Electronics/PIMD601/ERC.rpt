@@ -1,0 +1,40 @@
+ERC report (2024-03-20T10:53:08+1100, Encoding UTF8)
+
+***** Sheet /
+[lib_symbol_issues]: Symbol 'LTC2508CDKD-32' has been modified in library 'Analog_ADC'
+    ; warning
+    @(8050.00 mils, 5600.00 mils): Symbol U9 [LTC2508CDKD-32]
+[pin_not_connected]: Pin not connected
+    ; error (excluded)
+    @(10100.00 mils, 1200.00 mils): Symbol COIL1 Pin  [AB, Passive, Line]
+[lib_symbol_issues]: Symbol 'Transformer_1P_1S' has been modified in library 'Device'
+    ; warning (excluded)
+    @(9550.00 mils, 1400.00 mils): Symbol COIL1 [Transformer_1P_1S]
+[lib_symbol_issues]: Symbol 'RFShield_OnePiece' has been modified in library 'Device'
+    ; warning (excluded)
+    @(9500.00 mils, 1350.00 mils): Symbol J3 [RFShield_OnePiece]
+[pin_not_connected]: Pin not connected
+    ; error (excluded)
+    @(10100.00 mils, 1600.00 mils): Symbol COIL1 Pin  [AA, Passive, Line]
+[pin_not_connected]: Pin not connected
+    ; error (excluded)
+    @(9100.00 mils, 1600.00 mils): Symbol COIL1 Pin  [SB, Passive, Line]
+[lib_symbol_issues]: Symbol 'RP2040-Zero' has been modified in library '_MM'
+    ; warning
+    @(9500.00 mils, 2900.00 mils): Symbol U4 [RP2040-Zero]
+[multiple_net_names]: Both GND and RX-COIL-NEG are attached to the same items; GND will be used in the netlist
+    ; warning
+    @(7100.00 mils, 4850.00 mils): Symbol #PWR044 Hidden pin 1 [GND, Power input, Line]
+    @(7200.00 mils, 900.00 mils): Label 'RX-COIL-NEG'
+[lib_symbol_issues]: Symbol 'LT1762-2.5' has been modified in library 'Regulator_Linear'
+    ; warning
+    @(1000.00 mils, 7050.00 mils): Symbol U10 [LT1762-2.5]
+[pin_to_pin]: Pins of type Power output and Power output are connected
+    ; error (excluded)
+    @(1400.00 mils, 6500.00 mils): Symbol U10 Pin 2 [OUT, Power output, Line]
+    @(1400.00 mils, 6600.00 mils): Symbol U10 Pin 3 [OUT, Power output, Line]
+[lib_symbol_issues]: Symbol 'LT6657BHMS8-5' has been modified in library 'Reference_Voltage'
+    ; warning
+    @(3650.00 mils, 4100.00 mils): Symbol U6 [LT6657BHMS8-5]
+
+ ** ERC messages: 11  Errors 4  Warnings 7
