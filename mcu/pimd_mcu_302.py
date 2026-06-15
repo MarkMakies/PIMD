@@ -14,6 +14,9 @@
 #
 # v202 refactored using o3-mini
 # v3.02 back to outputing uV - rearranged calc to ensure accuracy
+# v3.03 added V/L/P/M scan-profile commands (raw-path acquisition,
+#       FAST_TRACK/CLASSIFY/SCOPE_CAL profiles); P<n> rejected while
+#       S telemetry running (avoids DRL-wait hang, send E first)
 #
 ###############################################################################
 
@@ -27,7 +30,7 @@ from utime import sleep_ms, sleep_us, ticks_ms
 from machine import Pin, PWM, SPI, unique_id
 
 # Print program title and board ID
-FW_VERSION = '3.02'
+FW_VERSION = '3.03'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -126,6 +129,13 @@ PROFILES = (
         'pulses_us': (8.0, 20.0, 40.0),
         'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0),
         'x': 32,
+    },
+    {  # Profile 2: scope-correlated delay sweep at fixed pulse width, x=1 (no averaging)
+        'name': 'SCOPE_CAL',
+        'freq_hz': 5000,
+        'pulses_us': (10.0,),
+        'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0),
+        'x': 1,
     },
 )
 NUM_PROFILES = len(PROFILES)
@@ -358,7 +368,8 @@ def check_for_commands():
             widths x y delays), averages per point (x), and name.
       - 'P' or 'p' followed by an index: e.g. "P1" validates, runs, and
             streams the full z x y grid of profile 1 as one 'M...' record,
-            then restores the held configuration.
+            then restores the held configuration. Rejected (Command Input
+            ERROR) while 'S' telemetry is running - send 'E' first.
     """
     global state, sample_frequency_hz, pulse_width_us, sample_delay_us, down_sample
     global active_profile_index
@@ -423,6 +434,9 @@ def check_for_commands():
                         idx, profile['freq_hz'] / 1000, len(profile['pulses_us']),
                         len(profile['delays_us']), profile['x'], profile['name']))
             elif cmd in ('P', 'p'):
+                if state == 'running':
+                    print('Command Input ERROR: P<n> rejected while running (send E first)')
+                    return
                 try:
                     idx = int(line[1:])
                 except ValueError:
