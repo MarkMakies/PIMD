@@ -304,6 +304,41 @@ def acquire_raw_average(x):
     return mean_uV, std_uV
 
 
+def validate_profile(profile):
+    """
+    Check every (pulse_width, sample_delay) combination in profile against
+    the period budget via compute_pulse_duties/pulse_duties_valid. Returns
+    None if all are valid, else the first invalid
+    (pulse, delay, drive_duty, sample_duty) tuple.
+    """
+    for pulse in profile['pulses_us']:
+        for delay in profile['delays_us']:
+            drive_duty, sample_duty = compute_pulse_duties(pulse, delay, profile['freq_hz'])
+            if not pulse_duties_valid(drive_duty, sample_duty):
+                return pulse, delay, drive_duty, sample_duty
+    return None
+
+
+def run_profile(profile):
+    """
+    Run the full z x y grid for profile, reprogramming the PWM for each
+    point and boxcar-averaging x raw samples there. Caller is responsible
+    for validating the profile and for saving/restoring the held config.
+    Returns a list of (mean_uV, std_uV), pulse-width-major (z outer, y inner).
+    """
+    global sample_frequency_hz, pulse_width_us, sample_delay_us
+
+    sample_frequency_hz = profile['freq_hz']
+    results = []
+    for pulse in profile['pulses_us']:
+        for delay in profile['delays_us']:
+            pulse_width_us = pulse
+            sample_delay_us = delay
+            update_pulse_configuration()
+            results.append(acquire_raw_average(profile['x']))
+    return results
+
+
 def check_for_commands():
     """
     Check for incoming commands from the serial interface.
@@ -321,8 +356,12 @@ def check_for_commands():
       - 'L': list scan profiles - replies with one 'L...' record per entry
             in PROFILES, giving its index, frequency, grid shape (z pulse
             widths x y delays), averages per point (x), and name.
+      - 'P' or 'p' followed by an index: e.g. "P1" validates, runs, and
+            streams the full z x y grid of profile 1 as one 'M...' record,
+            then restores the held configuration.
     """
     global state, sample_frequency_hz, pulse_width_us, sample_delay_us, down_sample
+    global active_profile_index
 
     try:
         if serial_poll.poll(1):  # Non-blocking poll for input
@@ -383,6 +422,36 @@ def check_for_commands():
                     print('L{0:d},{1:1.1f},{2:d},{3:d},{4:d},{5}'.format(
                         idx, profile['freq_hz'] / 1000, len(profile['pulses_us']),
                         len(profile['delays_us']), profile['x'], profile['name']))
+            elif cmd in ('P', 'p'):
+                try:
+                    idx = int(line[1:])
+                except ValueError:
+                    idx = -1
+                if not 0 <= idx < NUM_PROFILES:
+                    print('Command Input ERROR: invalid profile index (P{0})'.format(line[1:].strip()))
+                else:
+                    profile = PROFILES[idx]
+                    invalid = validate_profile(profile)
+                    if invalid:
+                        print('Command Input ERROR: profile {0} point (pw={1:1.1f}, delay={2:1.1f}) invalid '
+                              '(drive_duty={3}, sample_duty={4})'.format(idx, *invalid))
+                    else:
+                        elapsed_time = ticks_ms() - base_time_ms
+                        saved = (sample_frequency_hz, pulse_width_us, sample_delay_us)
+                        results = run_profile(profile)
+                        sample_frequency_hz, pulse_width_us, sample_delay_us = saved
+                        update_pulse_configuration()
+                        active_profile_index = idx
+
+                        fields = ['M{0:d}'.format(idx), '{0:d}'.format(elapsed_time),
+                                  '{0:1.1f}'.format(profile['freq_hz'] / 1000),
+                                  '{0:d}'.format(len(profile['pulses_us'])),
+                                  '{0:d}'.format(len(profile['delays_us']))]
+                        fields += ['{0:1.1f}'.format(p) for p in profile['pulses_us']]
+                        fields += ['{0:1.1f}'.format(d) for d in profile['delays_us']]
+                        for mean_uV, std_uV in results:
+                            fields += ['{0:d}'.format(mean_uV), '{0:d}'.format(std_uV)]
+                        print(','.join(fields))
             else:
                 print('Command Input ERROR')
     except Exception as e:
