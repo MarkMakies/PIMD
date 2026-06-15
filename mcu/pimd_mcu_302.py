@@ -28,7 +28,6 @@ from machine import Pin, PWM, SPI, unique_id
 
 # Print program title and board ID
 FW_VERSION = '3.02'
-NUM_PROFILES = 2
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -109,6 +108,27 @@ pulse_width_us = 10     # in microseconds
 sample_delay_us = 10    # in microseconds
 sample_frequency_hz = 10000
 down_sample = 256
+
+# ---------------------------------------------------------------------------
+# Scan Profiles (fixed, compiled-in - see CLAUDE.md "Control model")
+# ---------------------------------------------------------------------------
+PROFILES = (
+    {  # Profile 0: fast single-point tracking
+        'name': 'FAST_TRACK',
+        'freq_hz': 5000,
+        'pulses_us': (40.0,),
+        'delays_us': (8.4,),
+        'x': 8,
+    },
+    {  # Profile 1: 3 pulse widths x 8 log-spaced delays, classification grid
+        'name': 'CLASSIFY',
+        'freq_hz': 10000,
+        'pulses_us': (8.0, 20.0, 40.0),
+        'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0),
+        'x': 32,
+    },
+)
+NUM_PROFILES = len(PROFILES)
 
 # ---------------------------------------------------------------------------
 # Operational State
@@ -298,6 +318,9 @@ def check_for_commands():
       - 'V', 'v', or '?': identify - replies with one 'V...' record containing
             the firmware version, board ID, profile count, active profile
             index, and the current held configuration.
+      - 'L': list scan profiles - replies with one 'L...' record per entry
+            in PROFILES, giving its index, frequency, grid shape (z pulse
+            widths x y delays), averages per point (x), and name.
     """
     global state, sample_frequency_hz, pulse_width_us, sample_delay_us, down_sample
 
@@ -355,6 +378,11 @@ def check_for_commands():
                     FW_VERSION, board_id_hex, NUM_PROFILES, active_profile_index,
                     sample_frequency_hz / 1000, pulse_width_us, sample_delay_us, down_sample)
                 print(record)
+            elif cmd == 'L':
+                for idx, profile in enumerate(PROFILES):
+                    print('L{0:d},{1:1.1f},{2:d},{3:d},{4:d},{5}'.format(
+                        idx, profile['freq_hz'] / 1000, len(profile['pulses_us']),
+                        len(profile['delays_us']), profile['x'], profile['name']))
             else:
                 print('Command Input ERROR')
     except Exception as e:
