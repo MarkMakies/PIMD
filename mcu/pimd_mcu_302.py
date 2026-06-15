@@ -27,10 +27,12 @@ from utime import sleep_ms, sleep_us, ticks_ms
 from machine import Pin, PWM, SPI, unique_id
 
 # Print program title and board ID
-print('Pulse Induction Metal Detector v3.02')
+FW_VERSION = '3.02'
+NUM_PROFILES = 2
+print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
-print('On RP2040 Waveshare RP2040-Zero Pico-like, ID: ' +
-      ubinascii.hexlify(board_id).upper().decode())
+board_id_hex = ubinascii.hexlify(board_id).upper().decode()
+print('On RP2040 Waveshare RP2040-Zero Pico-like, ID: ' + board_id_hex)
 
 # ---------------------------------------------------------------------------
 # PWM Initialization for drive and sample coil pulses
@@ -112,6 +114,7 @@ down_sample = 256
 # Operational State
 # ---------------------------------------------------------------------------
 state = 'ready'
+active_profile_index = -1
 
 
 def compute_pulse_duties(pulse_width_us, sample_delay_us, sample_frequency_hz):
@@ -292,6 +295,9 @@ def check_for_commands():
       - 'A' or 'a' followed by a count: e.g. "A32" acquires 32 boxcar-averaged
             raw samples at the current pulse_width/sample_delay and replies
             with one 'R...' record.
+      - 'V', 'v', or '?': identify - replies with one 'V...' record containing
+            the firmware version, board ID, profile count, active profile
+            index, and the current held configuration.
     """
     global state, sample_frequency_hz, pulse_width_us, sample_delay_us, down_sample
 
@@ -344,6 +350,11 @@ def check_for_commands():
                             elapsed_time, mean_uV, std_uV, x,
                             sample_frequency_hz / 1000, pulse_width_us, sample_delay_us)
                         print(record)
+            elif cmd in ('V', 'v', '?'):
+                record = 'V{0},{1},{2},{3},{4:1.1f},{5:1.1f},{6:1.1f},{7:d}'.format(
+                    FW_VERSION, board_id_hex, NUM_PROFILES, active_profile_index,
+                    sample_frequency_hz / 1000, pulse_width_us, sample_delay_us, down_sample)
+                print(record)
             else:
                 print('Command Input ERROR')
     except Exception as e:
