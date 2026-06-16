@@ -1,7 +1,8 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** *6.04* · **Firmware:** v4.00 · **PC GUI:** v4.00 · **Coil:** v4 (2025-02)
+**Hardware rev:** 6.04 · **Firmware:** v4.0x · **PC tools:** v4.00 · **Coil:** v4
+**Last bench update:** 2026-06-16 (front-end rework + Mode-2 first light)
 
 > This README is written to be self-contained: it should let a new reader — human or
 > AI — pick up the project cold and understand the whole system without the rest of
@@ -24,8 +25,11 @@ controllable, not just sensitive.
 
 **Current status:** working and field-tested. It discriminates ferrous from
 non-ferrous targets in real soil, reliably to roughly 20 cm before the noise floor
-dominates. The remaining work is refinement (thermal drift, supply noise), not
-bring-up.
+dominates. **Mode 1 (filtered) is mature and was used for all baselines/field tests
+here.** Mode 2 (raw profile sweep, the decay-curve/ML path) is newly working and under
+active development — first confirmed metal-detection response 2026-06-16. The RX front
+end was reworked in June 2026 (see §6). Remaining work is refinement (thermal drift,
+supply noise) and finishing Mode 2, not bring-up.
 
 ---
 
@@ -50,9 +54,9 @@ a **negative** spike (opposing eddy currents weaken the field).
 ```
  5x LiPo (16.5–21 V)
         │  F1 2A ─ D4 reverse-prot
-        ├── U1 LM7815 ──► +15 V  (coil drive rail)
-        ├── U2 L7812  ──► +12 V  (analogue rail)
-        ├── U9 LM7805 ──► +5 V   (digital) ──► RP2040 onboard LDO ──► +3V3
+        ├── U1 L7815CV ──► +15 V  (coil drive rail)
+        ├── U2 L7812CV  ──► +12 V  (analogue rail)
+        ├── U9 L7805CV ──► +5 V   (digital) ──► RP2040 onboard LDO ──► +3V3
         └── U7 LT1762-2.5 ──► +2V5 (ADC)         U5 LTC6655-5 ──► +5V precision ref
 
  RP2040-Zero (U10)
@@ -117,19 +121,25 @@ amplitude for earlier access to the decay.
   (annotated stages [1.7] → [1.7–3.4] → [1.6–10.7] V). Earlier breadboard revisions
   used a discrete bipolar totem-pole; the design intent throughout is fast,
   non-linear FET switching with parasitic-capacitance management.
-- **Gate / damping network:** R10 270 Ω 5 W, R11 220 Ω 5 W (damping), R12/R13 4.7 Ω 5 W.
-  These power resistors are the main heat source and the main thermal-drift culprit.
-- **Flyback (measured):** TX ≈ **251 V**, RX ≈ **176 V**. No dedicated TVS/clamp diode;
-  energy is absorbed by the resistive damping network and the FET's avalanche capability
-  within the stated duty limits.
+- **Gate / damping network:** R10 270 Ω, R11 220 Ω 5 W (damping). **R12/R13 (originally
+  4.7 Ω 5 W) are now 0 Ω** — they were added on expert advice to slow the gate edge for
+  SOA, but in this build the detector performs better without them (schematic v6.04
+  annotation). Q1 note: drain/gate were reversed on an earlier PCB; corrected in the
+  current revision.
+- **Gate-drive turn-off (measured, bible 2026-06-16, 10 kHz / 40 µs):** gate falls
+  **11.47 V → 0.44 V in 733 ns** — a clean, fast turn-off.
+- **Flyback (measured, bible 2026-06-16):** TX coil **−18 V to +265 V**; RX coil
+  **−15 V to +135 V**. No dedicated TVS; energy is absorbed by the resistive damping and
+  the FET's avalanche capability within the stated duty limits. *(Supersedes the earlier
+  251 V / 176 V figures, which were taken at the 5 kHz / 40 µs operating point.)*
 
 ---
 
 ## 6. Receive / acquisition chain
 
-### RX front end — current verified design (2026-06, supersedes the rev-6.01 schematic)
+### RX front end — current verified design (2026-06, supersedes the rev-6.01 schematic; now captured in schematic v6.04)
 The RX input network was reworked during a bench session after the detector was pulled
-out of storage. Confirmed topology (hand sketch IMG_0665):
+out of storage. Confirmed topology (schematic v6.04 / `pics/Scematic_Baseline.jpg`):
 
 ```
 RX coil ─┬─ R1 1.3k ─ GND        (shunt = damping)
@@ -142,8 +152,8 @@ RX coil ─┬─ R1 1.3k ─ GND        (shunt = damping)
   the RX coil rings ~25 µs (+100 V/−50 V) at 25k and **critically damps at ≈ 1.3–1.4k**,
   which also cleans up TX via the mutual coupling. *(measured)*
 - **R9 = 4.7k (series) is the clamp current-limit only** — it is NOT a damping element.
-  At the measured damped peaks it limits clamp current to ≈ 9.6 mA (+50 V peak) and
-  ≈ 3.7 mA (−18 V charge-phase swing), both well inside the LT6203 input rating.
+  At the measured damped peaks it limits clamp current to ≈ 9.6 mA (+50 V positive peak)
+  and a few mA on the negative swing, both well inside the LT6203 input rating.
 - **D2 = 1N4732 (4.7 V zener):** positive clamp. **D3 = 1N5819 (Schottky, 40 V):**
   negative clamp. They are in series across the post-R9 node and only conduct on
   excursions outside ~0–5 V; between the rails the diodes are off and R1 does the
@@ -151,15 +161,26 @@ RX coil ─┬─ R1 1.3k ─ GND        (shunt = damping)
 - **47 Ω** sits between the LT6203 output and the ADC input (limits current into the
   ADC's internal protection on any over-range).
 
+**Bible measurements (2026-06-16, 10 kHz / 40 µs — these supersede all earlier RX-chain voltages):**
+| Node | Range | Note |
+|------|-------|------|
+| Node after R9 (4.7k) | **−0.48 V to +5.11 V** | clamped by D2/D3, settled |
+| ADC input | settles **~5.0 V**; transient edge ring peaks **+5.30 V / −0.69 V** | overshoot only |
+
+The ADC-input overshoot to +5.30 V / −0.69 V is a brief (~300–400 ns) edge ring, not a
+settled level — confirmed on scope (`pics/Screenshot_2026-06-16_13-34-49.jpg`): the trace
+rings then settles cleanly to ~5.0 V and holds flat. The peaks graze the LTC2508 abs-max
+(≈ −0.3 to +5.3 V) but are current-limited by the 47 Ω into the ADC's internal protection
+diodes (rated 100 mA; actual « that), so it is harmless. Front-end recovery (ring → flat)
+is ~300–700 ns, i.e. early sampling is preserved.
+
 **What the clamp actually protects (important):** the **LT6203 runs on a single +12 V
-supply**, so a +50 V flyback does not threaten the op-amp's survival. The clamp's real
+supply**, so a +135 V flyback does not threaten the op-amp's survival. The clamp's real
 job is to keep the op-amp's *output* under the **LTC2508 input abs-max (REF + 0.3 ≈
-5.3 V)** downstream, and to keep the amp out of saturation so it recovers fast.
-*(measured: worst-case op-amp output is **5.189 V** with the 1N4732 fitted — ≈ 0.11 V
-under the 5.3 V ADC abs-max, ~3.6× the 0.03 V margin the old 5.1 V zener gave at
-5.27 V.)* This is why the zener stays and why 4.7 V is the right value — it buys ADC
-headroom; it does NOT slow acquisition (the zener voltage sets the clamp ceiling, not
-the sample timing, which is set by damping + recovery).
+5.3 V)** downstream, and to keep the amp out of saturation so it recovers fast. This is
+why the zener stays and why 4.7 V is the right value — it buys ADC headroom; it does NOT
+slow acquisition (the zener voltage sets the clamp ceiling, not the sample timing, which
+is set by damping + recovery).
 
 **Key diagnostic insight from the rework:** the old RX used **R1 = 20 k**, which is
 ~11× the ~1.4k critical value — i.e. the RX was **chronically under-damped**, and the
@@ -202,13 +223,11 @@ masked; the zener is in a defensible spot. Confirm on the scope (see "to measure
   precision; warmed-up standard deviation typically < 100 µV.)*
 
 ### RX front-end — still to measure
-- **Clip-release timing** with the new R9 = 4.7k (vs the old ~4 µs at the 10 µs-pulse
-  air baseline) — a larger R9 plus diode capacitance can push recovery later; confirm
-  the earliest valid sample point did not regress.
 - **Actual RX coil L and C** — the old 3.9 mH / 311 pF was *inferred* from a resonant
-  frequency and is probably stale (the measured ~1.3k critical-damping value implies
+  frequency and is now stale (the measured ~1.3k critical-damping value implies
   √(L/C) ≈ 2.6k, not the ~3.5k the old figures gave). Re-measure the RX self-resonant
-  frequency to pin L and C.
+  frequency to pin L and C. *(Clip-release/recovery has since been measured — see the
+  ADC-input overshoot note above: ~300–700 ns ring-to-settle, no regression.)*
 
 ---
 
@@ -229,28 +248,22 @@ masked; the zener is in a defensible spot. Confirm on the scope (see "to measure
 - **Meter:** differential PWM drives an analogue panel meter (`METER-POS`/`METER-NEG`).
 - **Front-panel:** 4 pots (POT-0..3), 2 buttons (SW-0/1), 12 test points, RF shield.
 
-### Serial protocol (v4.00 — two non-concurrent modes)
+### Serial protocol — two non-concurrent modes (v4.0x)
 
-**Mode 1 — filtered / interrupt-driven** (unchanged from v3.x)
-- `S` / `s` — start streaming filtered telemetry
-- `E` / `e` — stop either mode, enter safe state
-- `*<freq_kHz>,<pulse_us>,<sample_delay_us>,<downsample>` — configure, e.g. `*5,40,8.4,256`
-- Output (per DRL cycle): `*<time_ms>,<value_uV>,<stddev_uV>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
-- Rate: pulse_freq / downsample (~20/s at 5 kHz / 256)
-- Scaling: `raw32 * 5_000_000 // 2**31`
+The firmware exposes two mutually-exclusive acquisition modes over one serial link:
+- **Mode 1 — filtered / interrupt-driven** (the mature path, unchanged from v3.x): the
+  32-bit filtered ADC output, streamed at ~20/s. **This is the mode used for all the
+  baseline captures and field tests in this document, and is working well.**
+- **Mode 2 — raw interleaved moving-average sweep** (new in v4.00, *still under
+  development/testing*): cycles a profile's z×y (pulse-width × delay) grid one PWM period
+  per cell, keeps a rolling average of depth x per cell, and streams a per-cell vector.
+  This is the decay-curve / ML acquisition path (rationale in §13). Metal-detection
+  response via Mode 2 was first confirmed 2026-06-16 (profile 3, TRACK_25K).
 
-**Mode 2 — raw interleaved moving-average sweep** (v4.00, confirmed 2026-06-16)
-- `Q<n>` — select profile n (validates; n = 0..3)
-- `G` / `g` — start Mode 2 streaming (rejected while Mode 1 running)
-- `E` / `e` — stop (shared with Mode 1)
-- Output: `W<profile_idx>,<time_ms>,<mean_ch0_uV>,<mean_ch1_uV>,...`
-- Rate: min(100 Hz, profile_freq / (z×y)); means only (no std dev — compact for high-rate)
-- Scaling: `raw14 * 10_000_000 / 2**14` (±5 V span, 14-bit signed)
-
-**Common commands (both modes)**
-- `V` / `v` / `?` — identify: `V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
-- `L` — list profiles: one `L<idx>,<freq_kHz>,<z>,<y>,<x>,<name>` line each
-- `A<x>` — boxcar-average x raw samples at held config (idle / Mode 1 only)
+> The exact command set, record formats, scaling constants, and the compiled profile
+> table are the firmware↔tooling contract and live in **`CLAUDE.md`** (kept there to
+> avoid drift between this narrative and the wire format). This README does not duplicate
+> them — see CLAUDE.md "Serial protocol" and "Scan Profiles".
 
 ---
 
@@ -258,9 +271,9 @@ masked; the zener is in a defensible spot. Confirm on the scope (see "to measure
 
 | Rail | Source | Purpose |
 |------|--------|---------|
-| +15 V | U1 LM7815 | coil drive |
-| +12 V | U2 L7812 | analogue |
-| +5 V | U9 LM7805 | digital |
+| +15 V | U1 L7815CV | coil drive |
+| +12 V | U2 L7812CV | analogue |
+| +5 V | U9 L7805CV | digital |
 | +3V3 | RP2040-Zero onboard LDO | MCU/logic |
 | +2V5 | U7 LT1762-2.5 | ADC |
 | 5 V ref | U5 LTC6655-5 | precision reference |
@@ -293,21 +306,6 @@ glitch every ~15 s and was abandoned for precision use.
   path for the precision measurement.
 
 ---
-
-## 10. Current optimal operating point *(measured, 2025-02)*
-
-- TX pulse: **40 µs**, peak current ≈ **7 A**
-- Sample delay: **8.4 µs** (the point at which the 100 V+ signal has damped to ≈ 3 V)
-- Pulse rate: **5 kHz**, decimation **256** → **20 samples/s** output
-- Reliable detection to ≈ 20 cm before noise dominates
-
----
-
-## 11. Reference waveforms (measured)
-
-Two scope captures that define what healthy behaviour looks like. Use them as the
-"known-good" baseline when diagnosing a regression — if turn-off, flyback, or
-clip-release stops matching these, something has changed.
 
 ### v512 — single pulse, air baseline (10 µs pulse)
 Rigol, HiRes, CH1/CH2 5 V/div, CH3 50 V/div; trigger on the conditioned ADC input at
@@ -363,13 +361,30 @@ Captured in the PC GUI at the actual operating point (DS 256), bench/air. 2 mV/d
 > slow baseline wander in that frame is ground/lift-off signal — the reference a future
 > two-gate ground-balance scheme would subtract (see §12).
 
+### Post-rework baselines (2026-06-16, after the RX front-end rework — current reference)
+Three captures taken once the reworked front end (§6) was running, Mode 1 / v4.00:
+- **App baseline** (`pics/App_Baseline.jpg`) — 10 kHz / 20 µs / 10 µs / DS 1024. Clean
+  polarity discrimination: the **positive spike is a steel spanner (ferrous)**, the
+  **negative spike is an aluminium bar (non-ferrous)**, against a quiet baseline with
+  **noise well under 500 µV**. Confirms the front-end rework preserved discrimination and
+  a healthy noise floor.
+- **Scope baseline** (`pics/Oscilloscope_Mode_1_Baseline.jpeg`) — 10 kHz / 40 µs, four
+  traces: **yellow = across TX coil, aqua = RX coil, cyan = ADC input (conditioned),
+  blue (rising) = sample point / MCLK**. The blue MCLK edge shows *where in the decay the
+  sample is taken* relative to the conditioned ADC-input trace — i.e. the visual link
+  between sample-delay and clip-release. This frame is the source of the §6 bible voltages.
+- **ADC-input edge detail** (`pics/Screenshot_2026-06-16_13-34-49.jpg`) — the edge ring
+  peaking +5.30 V / −0.69 V and settling to ~5.0 V within ~300 ns (front-end recovery;
+  see §6).
+
 ---
 
 ## 12. Open problems (priority order)
 
-1. **Thermal drift.** Wider pulses heat R10/R11/R12/R13; the drive circuit drifts and
-   the sensitive RX side drifts with it. This is the main ceiling on using pulse-width
-   as a discrimination axis. Likely a thermal-design / compensation problem.
+1. **Thermal drift.** Wider pulses heat the TX damping/gate resistors (R10 270 Ω, R11
+   220 Ω 5 W — R12/R13 are now 0 Ω); the drive circuit drifts and the sensitive RX side
+   drifts with it. This is the main ceiling on using pulse-width as a discrimination axis.
+   Likely a thermal-design / compensation problem.
    *Current measured baseline: ≈ **−89 µV/s** at the 5 kHz / 40 µs operating point (air,
    §11). Target for any compensation work.*
 2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path is ~50 % noisier than USB
@@ -491,35 +506,30 @@ Refinements: adaptive x (light on high-SNR points, heavy near the floor), and tw
 cadences — a cheap single point every cycle for position tracking, the full y×z matrix
 every few hundred ms for classification.
 
-### Control model — fixed compiled profiles (MCU stays simple)
-The MCU does not get a scan engine driven by chatty PC commands. Instead:
-- **Fixed scan profiles** are compiled into the firmware (a table, selected by index).
-  Each profile is a self-contained recipe: frequency, pulse-width list (z), per-PW
-  delays (y), averaging counts (x, possibly adaptive). Changing a profile = reflash
-  (accepted; keeps the MCU deterministic).
-- Running a profile is **one command in, one matrix out** — the MCU runs the whole y×z
-  scan locally and streams the result. This kills the per-point serial round-trip
-  latency (the actual speed concern) and is transport-independent (helps even more over
-  a future LoRa/UART link).
-- Profiles are **RAM/compiled constants only — never written to flash** (flash writes
-  spiked the noise floor ~10×, §8). Profiles are a control-plane change and do **not**
-  affect the noise floor.
-- The existing `*freq,pw,delay,ds` / `S` / `E` **manual commands stay** for debug and
-  tuning. New commands are additive: `Q<n>` select profile, `G` start streaming,
-  `L` list profiles, `V`/`?` identify/report. (The v3.x `P<n>` one-shot command has
-  been removed — it caused PWM ping-pong when polled repeatedly; `Q<n>` + `G` replaces
-  it with a true streaming model that never restores a default PWM config.)
-- Because each profile's scan **geometry is fixed**, the ML feature-vector shape is
-  constant per profile → **classifiers are trained per-profile**, and the `L` listing /
-  record metadata is the contract between firmware and ML.
-- Transport is USB-serial during development (tethered laptop) heading to untethered
-  later; the firmware keeps a single read-line/write-line seam so the swap is one place.
+### Control model — why fixed compiled profiles (rationale)
+The orchestration choice (the *mechanics* — command set, the interleaved sweep loop, and
+the compiled `PROFILES` table — live in **`CLAUDE.md`**; this is the *why*):
+- **Keep the MCU a simple primitive engine**, not a PC-driven scan engine. A scan is a
+  **fixed, compiled-in profile** the MCU runs locally, so the link carries "run profile
+  n / stream" rather than dozens of per-point round-trips. That kills the serial
+  round-trip latency that was the real speed concern, and is transport-independent (helps
+  even more over a future LoRa/UART link, the path to an untethered unit).
+- **No flash writes** — profiles are compiled constants. Writing to flash spiked the
+  noise floor ~10× (§8), so the profile mechanism deliberately avoids it. Profiles are a
+  control-plane change and do **not** affect the noise floor.
+- **Manual Mode-1 commands stay** for debug/tuning; the profile commands are additive.
+- **Fixed per-profile geometry → ML trained per profile.** Because a profile's z×y grid
+  is constant, the feature-vector shape is constant, so a classifier is trained per
+  profile and the profile listing is the firmware↔ML contract.
 
 ### Two unsolved sub-questions parked here
+- Mode 2 / profile acquisition is **working but still under active development and
+  testing** — only profile 3 (single-point 25 kHz tracker) has confirmed metal-detection
+  response so far; the multi-cell classification profiles (0–2) are not yet bench-validated.
 - The decay-curve capture is the firmware enabler; the **per-profile feature reduction
   and classifier** are PC/app-side and not yet built.
-- Whether wide-pulse ferrous discrimination justifies the separate low-rate burst pass
-  is an open empirical question (needs ground-vs-air captures).
+- Whether wide-pulse ferrous discrimination justifies a separate low-rate burst pass is
+  an open empirical question (needs ground-vs-air captures).
 
 ---
 
@@ -527,7 +537,7 @@ The MCU does not get a scan engine driven by chatty PC commands. Instead:
 
 | File | Role |
 |------|------|
-| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware v4.00 — both modes, all profiles (active) |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (header v4.01; `FW_VERSION='4.00'` string — reconcile) — both modes, all profiles |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | PC PyQt6 GUI v4.00 — Mode 1 filtered telemetry display *(not bench-tested v4.00)* |
 | `src/pimd_scope.py` | PC PyQt6 scope v4.00 — Mode 2 raw streaming visualiser (metal detection confirmed 2026-06-16) |
@@ -541,6 +551,10 @@ The MCU does not get a scan engine driven by chatty PC commands. Instead:
 | `docs/reference/v512_baseline.jpeg` | *Reference scope capture: 10 µs pulse, air (see §11)* |
 | `docs/reference/v513_pulse_width_response_test.jpeg` | *Reference scope capture: pulse-width family 1–100 µs (see §11)* |
 | `docs/reference/operating_point_ferrous_nonferrous_drift.jpg` | *GUI capture: operating-point air, ferrous vs non-ferrous, drift −89 µV/s (see §11)* |
+| `pics/Scematic_Baseline.jpg` | Schematic export, **rev 6.04** (current front-end + R12/R13=0Ω + field annotations) |
+| `pics/Oscilloscope_Mode_1_Baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 40 µs: yellow=TX coil, aqua=RX coil, cyan=ADC input, blue=sample point/MCLK |
+| `pics/App_Baseline.jpg` | App baseline, Mode 1 v4.00, 10 kHz / 20 µs / 10 µs / DS1024: steel spanner (+) vs aluminium bar (−), noise < 500 µV |
+| `pics/Screenshot_2026-06-16_13-34-49.jpg` | Scope: ADC-input edge ring (+5.30/−0.69 V) settling to ~5.0 V in ~300 ns (front-end recovery; see §6) |
 | `Screenshot_2025-02-28_13-42-12.png` | *GUI capture: field test in rough dirt, 5 targets discriminated by polarity (see §11)* |
 | `docs/reference/target_characterisation_montage.jpg` | *Target-characterisation montage: 8 metals, decay response at 10 µs vs 100 µs (coil v2) — ML signature reference (see §13)* |
 | `data/P2702-113819.csv` | *Example telemetry log, single-scalar-per-pulse format (see §13)* |

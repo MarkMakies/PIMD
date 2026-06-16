@@ -4153,6 +4153,17 @@
 		)
 		(uuid "fe097146-5db8-4289-932a-aee3016cc6a1")
 	)
+	(text "16/06/2026\ncopied unused symobols and nets to this page, \nHOWEVER it reannotated all the references.  \nNeeds correction from v6.01 schem"
+		(exclude_from_sim no)
+		(at 189.484 38.354 0)
+		(effects
+			(font
+				(size 2.032 2.032)
+			)
+			(justify left bottom)
+		)
+		(uuid "0e733708-87f4-46e9-a7da-aebdf8c2c4ca")
+	)
 	(label "SW-1"
 		(at 186.69 177.8 180)
 		(effects

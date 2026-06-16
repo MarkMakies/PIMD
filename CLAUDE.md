@@ -9,11 +9,16 @@ concrete defect justifies it.
 
 ## Measured operating envelope (treat as ground truth)
 
-- TX pulse 40 µs, peak ≈ 7 A; sample delay 8.4 µs; pulse rate 5 kHz; decimation 256
-  → 20 samples/s.
-- Flyback measured: TX ≈ 251 V, RX ≈ 176 V. FET Q1 limits: < 10 A, < 300 µs, < 2 % duty.
+- Two operating points in use: **5 kHz / 40 µs / 8.4 µs** (filtered Mode 1, all baselines
+  & field tests) and **10 kHz / 40 µs** (front-end bench bible, below).
+- Flyback (**bible, 2026-06-16, 10 kHz / 40 µs**): TX coil **−18 V to +265 V**, RX coil
+  **−15 V to +135 V**. Gate turn-off 11.47 V→0.44 V in **733 ns**. *(Supersedes earlier
+  251 V/176 V at 5 kHz.)* FET Q1 limits: < 10 A, < 300 µs, < 2 % duty.
+- RX front end reworked June 2026 (R1 1.3k damp, R9 4.7k limit, D2 1N4732, D3 1N5819,
+  47 Ω into ADC, LT6203 on single +12 V). Node-after-R9 −0.48/+5.11 V; ADC input settles
+  ~5.0 V, edge ring peaks +5.30/−0.69 V (harmless, current-limited). See README §6.
 - Filtered path noise ≈ ±450 µV; raw ≈ ±1400 µV; warmed-up σ < 100 µV; precision ≈ 10 µV.
-- Sample-timing precision ≈ 15–20 ns.
+- Sample-timing precision ≈ 15–20 ns. Thermal drift ≈ −89 µV/s at 5 kHz / 40 µs.
 
 If your analysis implies the detector "can't work" the way it's built, you are missing
 context — the builder has scope captures proving otherwise. Flag the concern, don't
@@ -21,7 +26,9 @@ assert a contradiction.
 
 ## Hardware facts the firmware depends on (verified)
 
-- MCU: Waveshare RP2040-Zero, MicroPython.
+- MCU: Waveshare RP2040-Zero, MicroPython. Firmware `mcu/pimd_mcu.py` — header comment
+  says v4.01, but `FW_VERSION = '4.00'` (reported by `V`/`?`). Reconcile these on the
+  next edit; bump both together.
 - **TX pulse and sample trigger MUST stay on the same PWM slice** (GPIO4 = PWM2A,
   GPIO5 = PWM2B, slice 2). This phase-locking is the core timing mechanism. **Never**
   refactor these onto different slices or replace with independent timers.
@@ -52,7 +59,7 @@ assert a contradiction.
     - out: `W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...`
     - rate: min(100 Hz, profile_freq / (z×y)); `S` rejected while Mode 2 running
   - **Both modes:** `V`/`v`/`?` identify, `L` list profiles, `A<x>` raw boxcar average
-    (idle/Mode 1 only)
+    (idle/Mode 1 only) → returns one `R<time_ms>,<mean_uV>,<std_uV>,<x>,<freq_kHz>,<pulse_us>,<delay_us>` line
   - `E` is universal stop; modes are mutually exclusive (start of one requires `E` first)
 
 
