@@ -1,7 +1,7 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.01 (2024-03-19) · **Firmware:** v3.02 · **PC GUI:** v3.02 · **Coil:** v4 (2025-02)
+**Hardware rev:** *6.04* · **Firmware:** v4.00 · **PC GUI:** v4.00 · **Coil:** v4 (2025-02)
 
 > This README is written to be self-contained: it should let a new reader — human or
 > AI — pick up the project cold and understand the whole system without the rest of
@@ -60,9 +60,10 @@ a **negative** spike (opposing eddy currents weaken the field).
    GPIO5  PWM2B ─ SAMPLE/MCLK ───────────────────────────────────► LTC2508 conv start
    (GPIO4 & GPIO5 share PWM slice 2 → phase-locked TX pulse & sample trigger)
 
- TX coil ──(flyback, resistive damping)
- RX coil ─► clamp (D1/D3 Schottky + D2 zener) ─► LT6203 preamp/ADC driver (U3)
-          ─► LTC2508-32 ADC (U6) ─SPI─► RP2040
+ TX coil ──(flyback, resistive damping 220R)
+ RX coil ─► R1 1.3k damp ║ R9 4.7k series ─► clamp (D2 4.7V zener + D3 1N5819) ─► 47R
+          ─► LT6203 preamp/ADC driver (U3, single +12V) ─► LTC2508-32 ADC (U6)
+          ─SPI─► RP2040
                                    SDOA/SCKA/DRL  = 32-bit filtered/decimated  (SPI1)
                                    SDOB/SCKB/BUSY = no-latency raw output       (SPI0)
 
@@ -126,13 +127,64 @@ amplitude for earlier access to the decay.
 
 ## 6. Receive / acquisition chain
 
-- **Input clamp:** D1/D3 1N5817 Schottky + D2 1N4733 5.1 V zener + series R8 47 Ω
-  (with R9 10 k, R1 1k8). Builder flagged on the schematic *"? better response from
-  zener"* — the zener's junction capacitance is suspected of slowing RX recovery; the
-  Schottkys are the faster clamp. (Early breadboard used 1N4148/1N914 clipping to ±1 V.)
-- **Preamp / ADC driver:** U3 LT6203 (dual high-speed op-amp; BOM/symbol also references
-  LT6234 — reconcile). Earlier prototypes used NE5534 audio op-amps; these were replaced
-  because their ~13 V/µs slew was too slow to resolve the sweet spot after high gain.
+### RX front end — current verified design (2026-06, supersedes the rev-6.01 schematic)
+The RX input network was reworked during a bench session after the detector was pulled
+out of storage. Confirmed topology (hand sketch IMG_0665):
+
+```
+RX coil ─┬─ R1 1.3k ─ GND        (shunt = damping)
+         └─ R9 4.7k ──┬─ D2 1N4732 (4.7V zener) ─┐  (positive clamp)
+                      │  D3 1N5819 (Schottky) ───┘  (negative clamp)
+                      └─ 47R ─► LT6203 +input (single +12V supply)
+```
+
+- **R1 = 1.3k (shunt to GND) is the RX damping resistor.** Bench-measured: a pot across
+  the RX coil rings ~25 µs (+100 V/−50 V) at 25k and **critically damps at ≈ 1.3–1.4k**,
+  which also cleans up TX via the mutual coupling. *(measured)*
+- **R9 = 4.7k (series) is the clamp current-limit only** — it is NOT a damping element.
+  At the measured damped peaks it limits clamp current to ≈ 9.6 mA (+50 V peak) and
+  ≈ 3.7 mA (−18 V charge-phase swing), both well inside the LT6203 input rating.
+- **D2 = 1N4732 (4.7 V zener):** positive clamp. **D3 = 1N5819 (Schottky, 40 V):**
+  negative clamp. They are in series across the post-R9 node and only conduct on
+  excursions outside ~0–5 V; between the rails the diodes are off and R1 does the
+  damping.
+- **47 Ω** sits between the LT6203 output and the ADC input (limits current into the
+  ADC's internal protection on any over-range).
+
+**What the clamp actually protects (important):** the **LT6203 runs on a single +12 V
+supply**, so a +50 V flyback does not threaten the op-amp's survival. The clamp's real
+job is to keep the op-amp's *output* under the **LTC2508 input abs-max (REF + 0.3 ≈
+5.3 V)** downstream, and to keep the amp out of saturation so it recovers fast.
+*(measured: worst-case op-amp output is **5.189 V** with the 1N4732 fitted — ≈ 0.11 V
+under the 5.3 V ADC abs-max, ~3.6× the 0.03 V margin the old 5.1 V zener gave at
+5.27 V.)* This is why the zener stays and why 4.7 V is the right value — it buys ADC
+headroom; it does NOT slow acquisition (the zener voltage sets the clamp ceiling, not
+the sample timing, which is set by damping + recovery).
+
+**Key diagnostic insight from the rework:** the old RX used **R1 = 20 k**, which is
+~11× the ~1.4k critical value — i.e. the RX was **chronically under-damped**, and the
+large ring was simply being *clipped* by the diodes so it looked bounded on the ADC
+node. When D3 (then a 1N5817) failed **open**, the negative-peak clipping vanished and
+the under-damping became visible (free ring to −50 V). So the fix was to make a real
+~1.3k resistor do the damping and let the diodes do protection-only — a clean separation
+the original design lacked.
+
+**Failure history:** the original D3 (1N5817, 20 V reverse rating) went **open** —
+consistent with repetitive clamp over-stress and/or its low reverse rating. Replaced
+with **1N5819** (same Schottky drop, 40 V reverse, ~25 A surge). The earlier removal of
+a fast diode (old "D1") that clamped into the **5 V reference** was also retained — that
+clamp injected switching transients onto V_REF, which directly degraded ADC dynamic
+range; getting any clamp off the reference was the more important earlier fix.
+
+**Earlier-caution retraction:** an earlier note worried the zener would slow RX recovery
+via junction capacitance. With R9's series resistance ahead of it and the clamp now
+doing protection-only (not sitting across the bare RX input), that concern is largely
+masked; the zener is in a defensible spot. Confirm on the scope (see "to measure" below).
+
+- **Preamp / ADC driver:** U3 LT6203 (dual high-speed op-amp, single +12 V supply;
+  BOM/symbol also references LT6234 — reconcile). Earlier prototypes used NE5534 audio
+  op-amps; replaced because their ~13 V/µs slew was too slow to resolve the sweet spot
+  after high gain.
 - **ADC:** U6 **LTC2508-32**, 32-bit oversampling SAR with a configurable digital
   decimation filter **and** a no-latency output.
   - **SDOA (SPI1):** 32-bit filtered/decimated value, `DRL` = data-ready-low. This is
@@ -148,6 +200,15 @@ amplitude for earlier access to the decay.
 - **References:** U5 LTC6655-5 (precision 5 V), U7 LT1762-2.5 (low-noise 2.5 V for ADC).
 - **Theoretical resolution:** 32 bits over 5 V ≈ 1.2 nV LSB. *(measured ≈ 10 µV
   precision; warmed-up standard deviation typically < 100 µV.)*
+
+### RX front-end — still to measure
+- **Clip-release timing** with the new R9 = 4.7k (vs the old ~4 µs at the 10 µs-pulse
+  air baseline) — a larger R9 plus diode capacitance can push recovery later; confirm
+  the earliest valid sample point did not regress.
+- **Actual RX coil L and C** — the old 3.9 mH / 311 pF was *inferred* from a resonant
+  frequency and is probably stale (the measured ~1.3k critical-damping value implies
+  √(L/C) ≈ 2.6k, not the ~3.5k the old figures gave). Re-measure the RX self-resonant
+  frequency to pin L and C.
 
 ---
 
@@ -168,15 +229,28 @@ amplitude for earlier access to the decay.
 - **Meter:** differential PWM drives an analogue panel meter (`METER-POS`/`METER-NEG`).
 - **Front-panel:** 4 pots (POT-0..3), 2 buttons (SW-0/1), 12 test points, RF shield.
 
-### Serial protocol
-- **PC → MCU commands:**
-  - `S` / `s` — start running measurement cycles
-  - `E` / `e` — stop (enter safe state)
-  - `*<freq_kHz>,<pulse_us>,<sample_delay_us>,<downsample>` — set parameters,
-    e.g. `*5,40,8.4,256`
-- **MCU → PC telemetry (per sample):**
-  `*<time_ms>,<value_uV>,<stddev_uV>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
-- **Scaling:** filtered value to microvolts = `raw32 * 5_000_000 // 2**31`.
+### Serial protocol (v4.00 — two non-concurrent modes)
+
+**Mode 1 — filtered / interrupt-driven** (unchanged from v3.x)
+- `S` / `s` — start streaming filtered telemetry
+- `E` / `e` — stop either mode, enter safe state
+- `*<freq_kHz>,<pulse_us>,<sample_delay_us>,<downsample>` — configure, e.g. `*5,40,8.4,256`
+- Output (per DRL cycle): `*<time_ms>,<value_uV>,<stddev_uV>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
+- Rate: pulse_freq / downsample (~20/s at 5 kHz / 256)
+- Scaling: `raw32 * 5_000_000 // 2**31`
+
+**Mode 2 — raw interleaved moving-average sweep** (v4.00, confirmed 2026-06-16)
+- `Q<n>` — select profile n (validates; n = 0..3)
+- `G` / `g` — start Mode 2 streaming (rejected while Mode 1 running)
+- `E` / `e` — stop (shared with Mode 1)
+- Output: `W<profile_idx>,<time_ms>,<mean_ch0_uV>,<mean_ch1_uV>,...`
+- Rate: min(100 Hz, profile_freq / (z×y)); means only (no std dev — compact for high-rate)
+- Scaling: `raw14 * 10_000_000 / 2**14` (±5 V span, 14-bit signed)
+
+**Common commands (both modes)**
+- `V` / `v` / `?` — identify: `V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
+- `L` — list profiles: one `L<idx>,<freq_kHz>,<z>,<y>,<x>,<name>` line each
+- `A<x>` — boxcar-average x raw samples at held config (idle / Mode 1 only)
 
 ---
 
@@ -302,6 +376,12 @@ Captured in the PC GUI at the actual operating point (DS 256), bench/air. 2 mV/d
    power; cause unresolved.
 3. **General supply noise floor** (battery vs USB, flash penalty — partially mitigated).
 4. **Coil mechanical stability** — largely solved in v3/v4 (epoxy + Perspex).
+5. **RX front-end damping/clamp (resolved 2026-06)** — the RX was chronically
+   under-damped (R1 = 20 k vs ~1.3k critical), masked by clamp clipping; exposed when
+   the D3 Schottky failed open. Fixed: R1 → 1.3k (real damping), R9 → 4.7k (clamp
+   current-limit), D2 → 1N4732 4.7 V, D3 → 1N5819. Op-amp output now 5.189 V (under the
+   5.3 V ADC abs-max). See §6. Open sub-items: confirm clip-release didn't regress;
+   re-measure RX coil L/C.
 
 ---
 
@@ -388,10 +468,11 @@ rate (not the datasheet's 1 Msps headline):
 
 This matches the diary's original intent ("sample timing determined using the raw
 14-bit data," then filtered 32-bit for the measurement); the ML direction simply leans
-harder on the raw path. **Firmware note:** the current `pimd_mcu_302.py` initialises the
-raw SPI but never reads it — that dead path is exactly what to bring to life. SEL1 is
-also unwired (DF limited to 256/1024); the raw path is unaffected, but wire SEL1 if the
-4096/16384 filtered options are ever wanted.
+harder on the raw path. **Firmware note (v4.00):** the raw SPI path (SPI0/SDOB) is **now live** in
+`mcu/pimd_mcu.py`. Mode 2 uses it for all profile acquisition; metal detection response
+confirmed 2026-06-16. SEL1 is still unwired (DF limited to 256/1024 for the filtered
+path); the raw path is unaffected. Wire SEL1 if the 4096/16384 filtered options are
+ever wanted.
 
 ### Scan grid (x / y / z) at 10 kHz, slow movement
 A scan captures **x** raw averages per point, at **y** sample delays, for **z** pulse
@@ -424,8 +505,10 @@ The MCU does not get a scan engine driven by chatty PC commands. Instead:
   spiked the noise floor ~10×, §8). Profiles are a control-plane change and do **not**
   affect the noise floor.
 - The existing `*freq,pw,delay,ds` / `S` / `E` **manual commands stay** for debug and
-  tuning. New commands are additive: `P<n>` run profile, `L` list profiles, `V`/`?`
-  identify/report.
+  tuning. New commands are additive: `Q<n>` select profile, `G` start streaming,
+  `L` list profiles, `V`/`?` identify/report. (The v3.x `P<n>` one-shot command has
+  been removed — it caused PWM ping-pong when polled repeatedly; `Q<n>` + `G` replaces
+  it with a true streaming model that never restores a default PWM config.)
 - Because each profile's scan **geometry is fixed**, the ML feature-vector shape is
   constant per profile → **classifiers are trained per-profile**, and the `L` listing /
   record metadata is the contract between firmware and ML.
@@ -444,29 +527,34 @@ The MCU does not get a scan engine driven by chatty PC commands. Instead:
 
 | File | Role |
 |------|------|
-| `PIMD601.kicad_sch` | Schematic, KiCad 8, rev 6.01 (single sheet) |
-| `pimd_mcu_302.py` | RP2040 MicroPython acquisition firmware, v3.02 |
-| `pimd302.py` | PC-side PyQt6 GUI / telemetry scope, v3.02 |
-| `pimd111_ui.py` | Qt Designer-generated UI (imported by GUI; not yet reviewed) |
-| `PIMD___Mark_Makies.pdf` | 34-page work-in-progress diary (Nov 2023 – Feb 2025) |
-| `docs/reference/schematic_v601.jpg` | Schematic export, rev 6.01, for quick reference without opening KiCad |
-| `docs/reference/v512_baseline.jpeg` | Reference scope capture: 10 µs pulse, air (see §11) |
-| `docs/reference/v513_pulse_width_response_test.jpeg` | Reference scope capture: pulse-width family 1–100 µs (see §11) |
-| `docs/reference/operating_point_ferrous_nonferrous_drift.jpg` | GUI capture: operating-point air, ferrous vs non-ferrous, drift −89 µV/s (see §11) |
-| `Screenshot_2025-02-28_13-42-12.png` | GUI capture: field test in rough dirt, 5 targets discriminated by polarity (see §11) |
-| `docs/reference/target_characterisation_montage.jpg` | Target-characterisation montage: 8 metals, decay response at 10 µs vs 100 µs (coil v2) — ML signature reference (see §13) |
-| `data/P2702-113819.csv` | Example telemetry log, single-scalar-per-pulse format (see §13) |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware v4.00 — both modes, all profiles (active) |
+| `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
+| `src/pimd_gui.py` | PC PyQt6 GUI v4.00 — Mode 1 filtered telemetry display *(not bench-tested v4.00)* |
+| `src/pimd_scope.py` | PC PyQt6 scope v4.00 — Mode 2 raw streaming visualiser (metal detection confirmed 2026-06-16) |
+| `src/pimd302.py` | Legacy PC GUI v3.02 (superseded; kept for reference) |
+| `src/pimd111.ui` | Qt Designer UI source for legacy GUI *(pimd111_ui.py generation not re-tested)* |
+| `src/requirements.txt` | Python dependencies for PC tools |
+| `src/serial-speed-test.py` | Raw packet-rate/interval probe on /dev/ttyACM0 |
+| `Electronics/PIMD604/PIMD604.kicad_sch` | *Schematic, KiCad 8, rev 6.04 (multi-sheet)* |
+| `PIMD___Mark_Makies.pdf` | *34-page work-in-progress diary (Nov 2023 – Feb 2025)* |
+| `docs/reference/schematic_v601.jpg` | *Schematic export, rev 6.01, for quick reference without opening KiCad* |
+| `docs/reference/v512_baseline.jpeg` | *Reference scope capture: 10 µs pulse, air (see §11)* |
+| `docs/reference/v513_pulse_width_response_test.jpeg` | *Reference scope capture: pulse-width family 1–100 µs (see §11)* |
+| `docs/reference/operating_point_ferrous_nonferrous_drift.jpg` | *GUI capture: operating-point air, ferrous vs non-ferrous, drift −89 µV/s (see §11)* |
+| `Screenshot_2025-02-28_13-42-12.png` | *GUI capture: field test in rough dirt, 5 targets discriminated by polarity (see §11)* |
+| `docs/reference/target_characterisation_montage.jpg` | *Target-characterisation montage: 8 metals, decay response at 10 µs vs 100 µs (coil v2) — ML signature reference (see §13)* |
+| `data/P2702-113819.csv` | *Example telemetry log, single-scalar-per-pulse format (see §13)* |
 | `LTC2508-32.pdf` | ADC datasheet (Analog Devices) — source for the settling/bandwidth math in §13 |
-| `docs/build_notes.md` | PC GUI dev-environment setup, UI regeneration, and packaging/deploy notes |
+| `docs/build_notes.md` | *PC GUI dev-environment setup, UI regeneration, and packaging/deploy notes* |
 | `README.md` | This file |
 | `CLAUDE.md` | Agent-facing intent + operating envelope + invariants |
 | `REVIEW.md` | Design-review findings |
 
-> **Not yet provided to review (would close gaps):** the KiCad **PCB** layout
-> (`.kicad_pcb`) and Gerbers, the BOM, the full detection state-machine firmware (the
-> version here is the filtered-only runtime; the baseline/timing-search logic described
-> in the diary lives in another version), `pimd111_ui.py`, and scope captures of the
-> turn-off/decay and the 7805 noise event.
+> **Open gaps (would close understanding):** the KiCad **PCB** layout (`.kicad_pcb`)
+> and Gerbers; the BOM; a scope capture of the single stable ~7.6 µs edge in Mode 2 at
+> 25 kHz (to confirm no PWM ping-pong regression after v4.00 deploy); bench test of
+> profiles 0–2 and `pimd_gui.py` against v4.00 firmware; scope captures of the 7805
+> supply-noise event.
 
 ---
 
@@ -484,6 +572,8 @@ The MCU does not get a scan engine driven by chatty PC commands. Instead:
   the sample trigger are phase-locked.
 - **Sweet spot** — the post-pulse delay window giving the best target-vs-baseline
   signal-to-noise (currently ≈ 8.4 µs).
-- **Clip-release** — the instant the conditioned ADC input leaves the +5 V clamp rail
-  and enters the linear measurement window; this, not the trigger or TX cutoff, is the
-  true earliest-valid sample time.
+- **Clip-release** — the instant the conditioned signal leaves the clamp rail (now
+  ~4.7 V, set by D2) and enters the linear measurement window; this, not the trigger or
+  TX cutoff, is the true earliest-valid sample time. Measure it by triggering on TX
+  turn-off and reading the time until the ADC-input node drops off the clamp level into
+  the linear band.

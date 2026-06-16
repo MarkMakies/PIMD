@@ -11,11 +11,14 @@ dist/
 # Claude Code local permissions (machine-specific)
 .claude/settings.local.json
 
-# KiCad backups, caches, and lock files
-Electronics/PIMD601/*-backups/
-Electronics/PIMD601/fp-info-cache
-Electronics/PIMD601/*.lck
-Electronics/PIMD601/*-bak
+# KiCad backups, caches, lock files, and autosaves (all revisions)
+Electronics/**/*-backups/
+Electronics/**/fp-info-cache
+Electronics/**/*.lck
+Electronics/**/*-bak
+Electronics/**/_autosave-*
+Electronics/**/#auto_saved_files#
+Electronics/**/untitled.kicad_sch
 
 # Generated bench-test logs
 /data/

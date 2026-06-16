@@ -463,7 +463,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "PIMD601.kicad_pro",
+    "filename": "PIMD604.kicad_pro",
     "version": 1
   },
   "net_settings": {
@@ -694,6 +694,10 @@
     [
       "9538e4ed-27e6-4c37-b989-9859dc0d49e8",
       "Root"
+    ],
+    [
+      "9d632722-e2d3-455c-ba7e-2db2d2dce8cd",
+      "Miscellanious"
     ]
   ],
   "text_variables": {}
