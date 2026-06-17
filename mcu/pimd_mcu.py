@@ -1,5 +1,5 @@
 ###############################################################################
-# Pulse Induction Metal Detector, v4.04, coil v4
+# Pulse Induction Metal Detector, v4.06, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -38,6 +38,18 @@
 #       {bands: [(freq_hz, pulse_us, delays_us)…]} so each band can have its own
 #       frequency; acquire_mode2 updates the PWM slice freq at band boundaries;
 #       new profile 4 CLASSIFY_EP: 5 equal-power bands × 9 calibrated delays = 45 cells
+# v4.06 acquire_mode2: add BOUNDARY_PRIME (default 5) extra PWM periods of
+#       settling at each band boundary. Root cause of inter-band leakage: the
+#       first cell of each new band has only 1 period of drive at the new
+#       frequency before its SDOB is read; the previous band's coil energy
+#       (especially high-power→low-power transitions like B3→B4) cascades
+#       through cells 0–7 of the new band via initial conditions, locking a
+#       systematic offset into the rolling average. The last cell (cell 8) of
+#       each band reads correctly because its SDOB is read at the start of the
+#       next cycle's boundary processing — after a full sweep cycle of settling.
+#       Fix: extend the sleep at each boundary by BOUNDARY_PRIME periods so the
+#       coil reaches steady state before the first SDOB is taken. Tunable via
+#       BOUNDARY_PRIME; overhead ≈ 875 µs/cycle at default 5, emit rate unchanged.
 # v4.05 CLASSIFY_EP band frequencies updated to prime-ish actuals from §17.1
 #       power table (10601/17599/29201/43003/56992 Hz) — avoids beat-frequency
 #       noise, matches the measured equal-power sweep operating points.
@@ -58,7 +70,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id
 
-FW_VERSION = '4.05'
+FW_VERSION = '4.06'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -106,9 +118,11 @@ RAW_DIFF_MASK = 0x3FFF
 RAW_FULL_SCALE_UV = 10_000_000  # ±5 V differential span in µV
 
 # ---------------------------------------------------------------------------
-# Mode 2 output rate cap
+# Mode 2 output rate cap and band-boundary settling
 # ---------------------------------------------------------------------------
-MIN_EMIT_MS = 10  # emit W records at most every 10 ms (100 Hz max)
+MIN_EMIT_MS = 10      # emit W records at most every 10 ms (100 Hz max)
+BOUNDARY_PRIME = 5    # extra PWM periods to let coil settle after a band-freq change;
+                      # increase (try 10, 15) if std dev remains elevated in high-freq bands
 
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
@@ -391,8 +405,13 @@ def acquire_mode2(profile):
                     rolling[prev].pop(0)
 
             # Sleep out the remainder of this cell's period.
+            # At band boundaries add BOUNDARY_PRIME extra periods so the coil
+            # reaches steady state at the new frequency before the next cell
+            # reads this cell's SDOB, breaking the contamination cascade.
             elapsed = ticks_diff(ticks_us(), t0)
             remaining = period_i - elapsed - 2
+            if at_boundary:
+                remaining += period_i * BOUNDARY_PRIME
             if remaining > 0:
                 sleep_us(remaining)
 
