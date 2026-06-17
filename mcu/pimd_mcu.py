@@ -1,5 +1,5 @@
 ###############################################################################
-# Pulse Induction Metal Detector, v4.03, coil v4
+# Pulse Induction Metal Detector, v4.04, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -38,6 +38,15 @@
 #       {bands: [(freq_hz, pulse_us, delays_us)…]} so each band can have its own
 #       frequency; acquire_mode2 updates the PWM slice freq at band boundaries;
 #       new profile 4 CLASSIFY_EP: 5 equal-power bands × 9 calibrated delays = 45 cells
+# v4.05 CLASSIFY_EP band frequencies updated to prime-ish actuals from §17.1
+#       power table (10601/17599/29201/43003/56992 Hz) — avoids beat-frequency
+#       noise, matches the measured equal-power sweep operating points.
+# v4.04 acquire_mode2: at band boundaries read SDOB before calling pwm.freq().
+#       When freq increases, the new WRAP register is smaller; if the running
+#       counter already exceeds the new WRAP, the RP2040 PWM wraps immediately,
+#       generating a spurious MCLK falling edge that triggers a new ADC conversion
+#       and overwrites the previous cell's result. Fix: read SDOB first at every
+#       band boundary, then change freq, preserving CC-write-first for same-band cells.
 ###############################################################################
 
 # pyright: reportMissingImports=false
@@ -49,7 +58,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id
 
-FW_VERSION = '4.03'
+FW_VERSION = '4.05'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -161,11 +170,11 @@ PROFILES = (
         #   (delaycal 2026-06-17, equal-power combinations P ∝ pulse²×freq)
         'name': 'CLASSIFY_EP',
         'bands': (
-            (10600, 40.0, ( 8.56,  8.98,  9.37,  9.72, 10.08, 10.49, 10.96, 11.57, 12.53)),
-            (17600, 30.0, ( 8.12,  8.54,  8.92,  9.27,  9.63, 10.02, 10.50, 11.10, 12.03)),
-            (29200, 20.0, ( 7.62,  8.03,  8.40,  8.75,  9.11,  9.50,  9.96, 10.55, 11.46)),
-            (43000, 10.0, ( 6.80,  7.22,  7.58,  7.93,  8.28,  8.66,  9.11,  9.70, 10.57)),
-            (57000,  5.0, ( 6.03,  6.43,  6.78,  7.12,  7.46,  7.84,  8.28,  8.85,  9.71)),
+            (10601, 40.0, ( 8.56,  8.98,  9.37,  9.72, 10.08, 10.49, 10.96, 11.57, 12.53)),
+            (17599, 30.0, ( 8.12,  8.54,  8.92,  9.27,  9.63, 10.02, 10.50, 11.10, 12.03)),
+            (29201, 20.0, ( 7.62,  8.03,  8.40,  8.75,  9.11,  9.50,  9.96, 10.55, 11.46)),
+            (43003, 10.0, ( 6.80,  7.22,  7.58,  7.93,  8.28,  8.66,  9.11,  9.70, 10.57)),
+            (56992,  5.0, ( 6.03,  6.43,  6.78,  7.12,  7.46,  7.84,  8.28,  8.85,  9.71)),
         ),
         'averages': 32,
     },
@@ -309,11 +318,12 @@ def acquire_mode2(profile):
     enumerated band-major. The PWM slice frequency is updated only at band
     boundaries; within a band only CC (duty) is written each period.
 
-    Timing model (CC-write-first):
-      At each period start: update freq if band changed (~4 us, one slice write),
-      write CC (~2 us), then read SDOB for the previous period (~6-7 us SPI).
-      Minimum trigger for any profile cell is ≥ 10 us, so CC writes comfortably
-      precede any trigger regardless of SPI timing.
+    Timing model:
+      Non-boundary cells (CC-write-first): write CC (~2 us), then read SDOB
+      (~6-7 us SPI). Minimum trigger ≥ 6 us, so CC precedes any trigger.
+      Band-boundary cells (SDOB-first): read SDOB (~7 us), change freq (~4 us,
+      counter resets to 0), write CC (~2 us). CC is written ~2 us after counter
+      reset; minimum drive trigger ≥ 5 us, so CC still precedes the trigger.
 
     Prime fires cell[n-1] so iteration i=0 correctly stores the result in
     rolling[(0-1)%n] = rolling[n-1], eliminating the startup transient.
@@ -350,28 +360,37 @@ def acquire_mode2(profile):
             t0 = ticks_us()
 
             freq_i, period_i, dd, sd = cells[i]
+            prev = (i - 1) % n
+            at_boundary = freq_i != cells[prev][0]
 
-            # Step 1: update slice frequency at band boundaries only.
-            # Both channels share slice 2; one freq() call changes both.
-            if freq_i != cells[(i - 1) % n][0]:
+            # At band boundaries: read SDOB BEFORE calling pwm.freq().
+            # When freq increases, the RP2040 shrinks the PWM WRAP register;
+            # if the running counter already exceeds the new WRAP it wraps
+            # immediately, generating a spurious MCLK falling edge that starts
+            # a new ADC conversion and corrupts the previous cell's result.
+            # Reading first avoids this race. (Decreasing-freq boundaries are
+            # also read first for uniformity — they cannot wrap spuriously but
+            # early reads are always safe.)
+            if at_boundary:
+                raw = read_raw_sample()
+                rolling[prev].append(raw)
+                if len(rolling[prev]) > avg_depth:
+                    rolling[prev].pop(0)
                 drive_coil_pwm.freq(freq_i)
                 sample_coil_pwm.freq(freq_i)
 
-            # Step 2: write CC for cell[i] — well ahead of the minimum trigger.
+            # Write CC for cell[i] — must precede the next drive/sample trigger.
             drive_coil_pwm.duty_u16(dd)
             sample_coil_pwm.duty_u16(sd)
 
-            # Step 3: read SDOB — previous period's result for cell[(i-1)%n].
-            # Conversion finished during the previous sleep; no BUSY check needed.
-            raw = read_raw_sample()
+            # Non-boundary: read SDOB after CC write (CC-write-first timing preserved).
+            if not at_boundary:
+                raw = read_raw_sample()
+                rolling[prev].append(raw)
+                if len(rolling[prev]) > avg_depth:
+                    rolling[prev].pop(0)
 
-            # Step 4: accumulate in rolling buffer for cell[(i-1)%n].
-            prev = (i - 1) % n
-            rolling[prev].append(raw)
-            if len(rolling[prev]) > avg_depth:
-                rolling[prev].pop(0)
-
-            # Step 5: sleep out the remainder of this cell's period.
+            # Sleep out the remainder of this cell's period.
             elapsed = ticks_diff(ticks_us(), t0)
             remaining = period_i - elapsed - 2
             if remaining > 0:

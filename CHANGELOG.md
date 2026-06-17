@@ -2,6 +2,46 @@
 
 ---
 
+### mcu/pimd_mcu.py — v4.05
+
+**CLASSIFY_EP (profile 4) band frequencies updated to prime-ish actuals.** Round numbers
+replaced with the PWM-achievable prime-ish frequencies from the §17.1 equal-power sweep:
+
+| Band | Old Hz | New Hz | Pulse |
+|------|--------|--------|-------|
+| 0 | 10600 | **10601** | 40 µs |
+| 1 | 17600 | **17599** | 30 µs |
+| 2 | 29200 | **29201** | 20 µs |
+| 3 | 43000 | **43003** | 10 µs |
+| 4 | 57000 | **56992** | 5 µs |
+
+These are the measured operating points from the bench power sweep (2026-06-17). Using
+prime-ish rates avoids beat-frequency noise (same principle as the 3719 Hz choice noted
+in §8). Delays and averages unchanged.
+
+---
+
+### mcu/pimd_mcu.py — v4.04
+
+**`acquire_mode2()` band-boundary SDOB corruption fix.** The last delay cell of each band
+(d8 for P0–P3 in CLASSIFY_EP) read an incorrect, unstable value while all other cells were
+clean and monotonic.
+
+**Root cause:** when `pwm.freq()` increases the PWM frequency, the RP2040 hardware shrinks
+the WRAP register. If the running counter already exceeds the new WRAP it wraps immediately,
+generating a spurious falling edge on GPIO5 (MCLK). The LTC2508 treats this as a new
+conversion trigger, overwriting the previous cell's SDOB result before the firmware reads it.
+The four increasing-freq boundaries (bands 0→1, 1→2, 2→3, 3→4) were all affected; the
+decreasing-freq wrap-around (band 4→0, i=0) was immune because enlarging WRAP never causes
+an immediate wrap.
+
+**Fix:** at band boundaries, read SDOB **before** calling `pwm.freq()`, then change freq,
+then write CC. Non-boundary cells retain the original CC-write-first order unchanged.
+Timing margin at the tightest boundary (band 4, 5 µs pulse): CC is written ~2 µs after the
+counter resets on the freq change; drive trigger fires at 5 µs — 3 µs margin, safe.
+
+---
+
 ### mcu/pimd_mcu.py — v4.03
 
 **Profile structure changed** — replaced flat `freq_hz` / `pulses_us` / `delays_us` top-level
