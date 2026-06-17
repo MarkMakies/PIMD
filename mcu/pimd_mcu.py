@@ -1,5 +1,5 @@
 ###############################################################################
-# Pulse Induction Metal Detector, v4.01, coil v4
+# Pulse Induction Metal Detector, v4.03, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -18,15 +18,26 @@
 #   G/g   start streaming 'W' telemetry
 #   E/e   stop (shared)
 #   output: W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...
-#   rate: min(100 Hz, profile_freq / (z*y))
+#   rate: min(100 Hz, profile_freq / (n_pulses * n_delays))
 #
 # Other commands (both modes):
-#   A<x>  acquire x boxcar-averaged raw samples at held config (Mode 1 or idle only)
+#   A<n>  acquire N boxcar-averaged raw samples at held config (Mode 1 or idle only)
 #   V/v/? identify -> V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>
-#   L     list profiles -> one L<idx>,<freq_kHz>,<z>,<y>,<x>,<name> line each
+#   L     list profiles -> one L<idx>,<freq_kHz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 # v4.00 complete serial protocol rewrite (two non-concurrent modes, W streaming,
 #       Q/G commands, file renamed from pimd_mcu_302.py to pimd_mcu.py)
+# v4.01 acquire_mode2: CC written first at period start (~1-2 us) before SPI read
+#       — eliminates CC-write race on multi-cell profiles; precompute cell_duties;
+#       prime now fires cell[n-1] (removes startup transient in rolling[n-1]);
+#       command poll moved out of W-emit gate ('E' stops within one n_pulses*n_delays cycle)
+# v4.02 acquire_raw_average: discard first 5 samples (priming) so PWM wrap-register
+#       glitch after freq change settles before the averaged window begins; fixes
+#       near-zero readings on A<n> when frequency changes between * commands
+# v4.03 profile structure changed from {freq_hz, pulses_us, delays_us} to
+#       {bands: [(freq_hz, pulse_us, delays_us)…]} so each band can have its own
+#       frequency; acquire_mode2 updates the PWM slice freq at band boundaries;
+#       new profile 4 CLASSIFY_EP: 5 equal-power bands × 9 calibrated delays = 45 cells
 ###############################################################################
 
 # pyright: reportMissingImports=false
@@ -38,7 +49,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id
 
-FW_VERSION = '4.00'
+FW_VERSION = '4.03'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -115,34 +126,51 @@ base_time_ms = ticks_ms()
 PROFILES = (
     {   # Profile 0: fast single-point tracking
         'name': 'FAST_TRACK',
-        'freq_hz': 5000,
-        'pulses_us': (40.0,),
-        'delays_us': (8.4,),
-        'x': 8,
+        'bands': (
+            (5000, 40.0, (8.4,)),
+        ),
+        'averages': 8,
     },
-    {   # Profile 1: 3 pulse widths x 8 log-spaced delays, classification grid
+    {   # Profile 1: 3 pulse widths × 8 log-spaced delays, classification grid
         'name': 'CLASSIFY',
-        'freq_hz': 10000,
-        'pulses_us': (8.0, 20.0, 40.0),
-        'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0),
-        'x': 32,
+        'bands': (
+            (10000,  8.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+            (10000, 20.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+            (10000, 40.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+        ),
+        'averages': 32,
     },
-    {   # Profile 2: scope-correlated delay sweep, single pulse, x=1 (no averaging)
+    {   # Profile 2: scope-correlated delay sweep, single pulse, averages=1 (no averaging)
         'name': 'SCOPE_CAL',
-        'freq_hz': 5000,
-        'pulses_us': (10.0,),
-        'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0),
-        'x': 1,
+        'bands': (
+            (5000, 10.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+        ),
+        'averages': 1,
     },
-    {   # Profile 3: single-point 25 kHz tracker — correlate raw vs old filtered system
+    {   # Profile 3: single-point 25 kHz tracker
         'name': 'TRACK_25K',
-        'freq_hz': 25000,
-        'pulses_us': (10.0,),
-        'delays_us': (7.6,),
-        'x': 16,
+        'bands': (
+            (25000, 10.0, (7.6,)),
+        ),
+        'averages': 16,
+    },
+    {   # Profile 4: equal-power 5-band classification
+        #   5 bands × 9 calibrated delays = 45 cells
+        #   Delays are the interpolated sample times (µs) at which the ADC
+        #   crosses 4.5/4.0/3.5/3.0/2.5/2.0/1.5/1.0/0.5 V thresholds
+        #   (delaycal 2026-06-17, equal-power combinations P ∝ pulse²×freq)
+        'name': 'CLASSIFY_EP',
+        'bands': (
+            (10600, 40.0, ( 8.56,  8.98,  9.37,  9.72, 10.08, 10.49, 10.96, 11.57, 12.53)),
+            (17600, 30.0, ( 8.12,  8.54,  8.92,  9.27,  9.63, 10.02, 10.50, 11.10, 12.03)),
+            (29200, 20.0, ( 7.62,  8.03,  8.40,  8.75,  9.11,  9.50,  9.96, 10.55, 11.46)),
+            (43000, 10.0, ( 6.80,  7.22,  7.58,  7.93,  8.28,  8.66,  9.11,  9.70, 10.57)),
+            (57000,  5.0, ( 6.03,  6.43,  6.78,  7.12,  7.46,  7.84,  8.28,  8.85,  9.71)),
+        ),
+        'averages': 32,
     },
 )
-NUM_PROFILES = len(PROFILES)
+NUM_PROFILES = len(PROFILES)    
 
 # ---------------------------------------------------------------------------
 # Operational state
@@ -184,12 +212,12 @@ def update_pulse_configuration():
 
 
 def validate_profile(profile):
-    """Return None if all cells are valid; else return first bad (pulse, delay, dd, sd)."""
-    for pulse in profile['pulses_us']:
-        for delay in profile['delays_us']:
-            dd, sd = compute_pulse_duties(pulse, delay, profile['freq_hz'])
+    """Return None if all cells valid; else return first bad (freq_hz, pulse_us, delay_us, dd, sd)."""
+    for freq_hz, pulse_us, delays_us in profile['bands']:
+        for delay_us in delays_us:
+            dd, sd = compute_pulse_duties(pulse_us, delay_us, freq_hz)
             if not pulse_duties_valid(dd, sd):
-                return pulse, delay, dd, sd
+                return freq_hz, pulse_us, delay_us, dd, sd
     return None
 
 
@@ -220,7 +248,7 @@ def acquire_filtered_data():
 def calculate_standard_deviation(data):
     n = len(data)
     mean_value = sum(data) / n
-    variance = sum((x - mean_value) ** 2 for x in data) / n
+    variance = sum((v - mean_value) ** 2 for v in data) / n
     return variance ** 0.5
 
 
@@ -236,7 +264,7 @@ def measurement_cycle():
 
 
 # ---------------------------------------------------------------------------
-# Raw SPI0 helpers (shared by Mode 2 and A<x>)
+# Raw SPI0 helpers (shared by Mode 2 and A<n>)
 # ---------------------------------------------------------------------------
 def read_raw_sample():
     """Read one signed 14-bit raw sample from SDOB over SPI0."""
@@ -248,15 +276,20 @@ def read_raw_sample():
     return raw14
 
 
-def acquire_raw_average(x):
-    """Boxcar-average x raw samples at the current held config. Returns (mean_uV, std_uV)."""
+def acquire_raw_average(n_samples):
+    """Boxcar-average n_samples raw readings at the current held config. Returns (mean_uV, std_uV)."""
     period_us = 1_000_000 // sample_frequency_hz
+    # Prime: discard 5 samples so the PWM wrap-register glitch that follows any
+    # freq change (via *) has fully settled before the averaging window opens.
+    for _ in range(5):
+        read_raw_sample()
+        sleep_us(period_us)
     samples = []
-    for _ in range(x):
+    for _ in range(n_samples):
         samples.append(read_raw_sample())
         sleep_us(period_us)
-    mean = sum(samples) / x
-    variance = sum((s - mean) ** 2 for s in samples) / x
+    mean = sum(samples) / n_samples
+    variance = sum((s - mean) ** 2 for s in samples) / n_samples
     mean_uV = int(mean * RAW_FULL_SCALE_UV / 2 ** 14)
     std_uV = int((variance ** 0.5) * RAW_FULL_SCALE_UV / 2 ** 14)
     return mean_uV, std_uV
@@ -267,36 +300,47 @@ def acquire_raw_average(x):
 # ---------------------------------------------------------------------------
 def acquire_mode2(profile):
     """
-    Continuously cycle through all z*y cells at one PWM period each, maintaining
-    a rolling average of depth x per cell. Emits one W record per MIN_EMIT_MS ms.
+    Continuously cycle through all cells in the profile (one PWM period each),
+    maintaining a rolling average of depth `averages` per cell. Emits one W record
+    per MIN_EMIT_MS ms.
     Returns when state leaves 'mode2_running' or mode2_profile_changed is set.
 
-    Read-first / update-CC-second pattern ensures CC is always written before
-    the next trigger fires: all profiles have trigger >= ~13 us from period start,
-    SPI read + CC write completes in ~5-7 us, leaving >= 6 us margin.
+    Profile structure: each band is (freq_hz, pulse_us, delays_us). Cells are
+    enumerated band-major. The PWM slice frequency is updated only at band
+    boundaries; within a band only CC (duty) is written each period.
+
+    Timing model (CC-write-first):
+      At each period start: update freq if band changed (~4 us, one slice write),
+      write CC (~2 us), then read SDOB for the previous period (~6-7 us SPI).
+      Minimum trigger for any profile cell is ≥ 10 us, so CC writes comfortably
+      precede any trigger regardless of SPI timing.
+
+    Prime fires cell[n-1] so iteration i=0 correctly stores the result in
+    rolling[(0-1)%n] = rolling[n-1], eliminating the startup transient.
     """
     global mode2_profile_changed
 
-    freq = profile['freq_hz']
-    period_us = 1_000_000 // freq
-    x_depth = profile['x']
+    avg_depth = profile['averages']
 
-    # Flat cell list: pulse-width-major (z outer, delay inner)
-    cells = [(p, d) for p in profile['pulses_us'] for d in profile['delays_us']]
+    # Flatten bands into a cell list: (freq_hz, period_us, drive_duty, sample_duty)
+    cells = []
+    for freq_hz, pulse_us, delays_us in profile['bands']:
+        period_us = 1_000_000 // freq_hz
+        for delay_us in delays_us:
+            dd, sd = compute_pulse_duties(pulse_us, delay_us, freq_hz)
+            cells.append((freq_hz, period_us, dd, sd))
+
     n = len(cells)
-
-    # Per-cell rolling buffers (raw 14-bit signed integers)
     rolling = [[] for _ in range(n)]
 
-    # Set slice frequency once (both channels share the same slice)
-    drive_coil_pwm.freq(freq)
-    sample_coil_pwm.freq(freq)
-
-    # Prime pipeline: configure cell[0] trigger and wait one full period
-    dd0, sd0 = compute_pulse_duties(cells[0][0], cells[0][1], freq)
-    drive_coil_pwm.duty_u16(dd0)
-    sample_coil_pwm.duty_u16(sd0)
-    sleep_us(period_us)
+    # Prime: fire cell[n-1] so that iteration i=0 stores the result in
+    # rolling[(0-1)%n] = rolling[n-1] with no startup transient.
+    f_last, p_last, dd_last, sd_last = cells[n - 1]
+    drive_coil_pwm.freq(f_last)
+    sample_coil_pwm.freq(f_last)
+    drive_coil_pwm.duty_u16(dd_last)
+    sample_coil_pwm.duty_u16(sd_last)
+    sleep_us(p_last)
 
     last_emit_ms = ticks_ms()
     mode2_profile_changed = False
@@ -305,27 +349,35 @@ def acquire_mode2(profile):
         for i in range(n):
             t0 = ticks_us()
 
-            # Step 1: read SDOB — result from cell[(i-1)%n]'s trigger
-            raw = read_raw_sample()
+            freq_i, period_i, dd, sd = cells[i]
 
-            # Step 2: push into previous cell's rolling buffer (cap at x_depth)
-            prev = (i - 1) % n
-            rolling[prev].append(raw)
-            if len(rolling[prev]) > x_depth:
-                rolling[prev].pop(0)
+            # Step 1: update slice frequency at band boundaries only.
+            # Both channels share slice 2; one freq() call changes both.
+            if freq_i != cells[(i - 1) % n][0]:
+                drive_coil_pwm.freq(freq_i)
+                sample_coil_pwm.freq(freq_i)
 
-            # Step 3: configure PWM for cell[i]'s next trigger
-            dd, sd = compute_pulse_duties(cells[i][0], cells[i][1], freq)
+            # Step 2: write CC for cell[i] — well ahead of the minimum trigger.
             drive_coil_pwm.duty_u16(dd)
             sample_coil_pwm.duty_u16(sd)
 
-            # Step 4: sleep out the remainder of this period
+            # Step 3: read SDOB — previous period's result for cell[(i-1)%n].
+            # Conversion finished during the previous sleep; no BUSY check needed.
+            raw = read_raw_sample()
+
+            # Step 4: accumulate in rolling buffer for cell[(i-1)%n].
+            prev = (i - 1) % n
+            rolling[prev].append(raw)
+            if len(rolling[prev]) > avg_depth:
+                rolling[prev].pop(0)
+
+            # Step 5: sleep out the remainder of this cell's period.
             elapsed = ticks_diff(ticks_us(), t0)
-            remaining = period_us - elapsed - 2
+            remaining = period_i - elapsed - 2
             if remaining > 0:
                 sleep_us(remaining)
 
-        # After each complete z*y cycle: maybe emit W record and poll commands
+        # After each complete cycle: maybe emit W record; always poll commands.
         now = ticks_ms()
         if ticks_diff(now, last_emit_ms) >= MIN_EMIT_MS:
             means = []
@@ -340,7 +392,7 @@ def acquire_mode2(profile):
             fields += ['{0:d}'.format(m) for m in means]
             print(','.join(fields))
             last_emit_ms = now
-            check_for_commands(timeout_ms=0)
+        check_for_commands(timeout_ms=0)
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +458,8 @@ def check_for_commands(timeout_ms=1):
             invalid = validate_profile(PROFILES[active_profile_index])
             if invalid:
                 print('Command Input ERROR: profile {0} has invalid cell '
-                      '(pw={1:.1f}, delay={2:.1f})'.format(
-                          active_profile_index, invalid[0], invalid[1]))
+                      '(freq={1:.0f}Hz, pw={2:.1f}us, delay={3:.1f}us)'.format(
+                          active_profile_index, invalid[0], invalid[1], invalid[2]))
                 return
             state = 'mode2_running'
 
@@ -421,7 +473,9 @@ def check_for_commands(timeout_ms=1):
                 return
             invalid = validate_profile(PROFILES[idx])
             if invalid:
-                print('Command Input ERROR: profile {0} has invalid cell'.format(idx))
+                print('Command Input ERROR: profile {0} has invalid cell '
+                      '(freq={1:.0f}Hz, pw={2:.1f}us, delay={3:.1f}us)'.format(
+                          idx, invalid[0], invalid[1], invalid[2]))
                 return
             active_profile_index = idx
             print('Q{0} OK: {1}'.format(idx, PROFILES[idx]['name']))
@@ -453,20 +507,20 @@ def check_for_commands(timeout_ms=1):
                 print('Command Input ERROR: A rejected while Mode 2 running (send E first)')
                 return
             try:
-                x = int(line[1:])
+                n_samples = int(line[1:])
             except ValueError:
-                x = 0
-            if not 1 <= x <= 1000:
+                n_samples = 0
+            if not 1 <= n_samples <= 1000:
                 print('Command Input ERROR: invalid count (A{0})'.format(line[1:].strip()))
                 return
             dd, sd = compute_pulse_duties(pulse_width_us, sample_delay_us, sample_frequency_hz)
             if not pulse_duties_valid(dd, sd):
-                print('Command Input ERROR: current config invalid for A<x>')
+                print('Command Input ERROR: current config invalid for A<n>')
                 return
-            mean_uV, std_uV = acquire_raw_average(x)
+            mean_uV, std_uV = acquire_raw_average(n_samples)
             elapsed = ticks_diff(ticks_ms(), base_time_ms)
             print('R{0:d}, {1:d}, {2:d}, {3:d}, {4:.1f}, {5:.1f}, {6:.1f}'.format(
-                elapsed, mean_uV, std_uV, x,
+                elapsed, mean_uV, std_uV, n_samples,
                 sample_frequency_hz / 1000, pulse_width_us, sample_delay_us))
 
         elif cmd in ('V', 'v', '?'):
@@ -476,9 +530,11 @@ def check_for_commands(timeout_ms=1):
 
         elif cmd == 'L':
             for idx, p in enumerate(PROFILES):
+                n_bands = len(p['bands'])
+                n_cells = sum(len(d) for _, _, d in p['bands'])
+                first_freq_khz = p['bands'][0][0] / 1000
                 print('L{0:d},{1:.1f},{2:d},{3:d},{4:d},{5}'.format(
-                    idx, p['freq_hz'] / 1000,
-                    len(p['pulses_us']), len(p['delays_us']), p['x'], p['name']))
+                    idx, first_freq_khz, n_bands, n_cells, p['averages'], p['name']))
 
         else:
             print('Command Input ERROR: unknown command')

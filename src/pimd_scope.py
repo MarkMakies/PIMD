@@ -9,6 +9,8 @@
 # Board firmware: pimd_mcu.py v4.00+
 #
 # v4.00 initial version (replaces pimd_scope_cal.py poll-based approach)
+# v4.01 PROFILES_META converted to bands format; _update_titles updated for
+#       multi-freq profiles; profile 4 CLASSIFY_EP added (5 bands × 9 cells)
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false
@@ -36,15 +38,29 @@ DEFAULT_PROFILE = 3
 DEFAULT_SPAN_MV = 50
 
 # Local mirror of firmware's PROFILES table — update here when PROFILES changes.
+# Each band entry: (freq_khz, pulse_us, delays_us)
 PROFILES_META = {
-    0: {'name': 'FAST_TRACK',  'freq_khz': 5.0,  'pulses_us': (40.0,),
-        'delays_us': (8.4,)},
-    1: {'name': 'CLASSIFY',    'freq_khz': 10.0, 'pulses_us': (8.0, 20.0, 40.0),
-        'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)},
-    2: {'name': 'SCOPE_CAL',   'freq_khz': 5.0,  'pulses_us': (10.0,),
-        'delays_us': (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)},
-    3: {'name': 'TRACK_25K',   'freq_khz': 25.0, 'pulses_us': (10.0,),
-        'delays_us': (7.6,)},
+    0: {'name': 'FAST_TRACK',  'bands': (
+            (5.0,   40.0, (8.4,)),
+        )},
+    1: {'name': 'CLASSIFY',    'bands': (
+            (10.0,  8.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+            (10.0, 20.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+            (10.0, 40.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+        )},
+    2: {'name': 'SCOPE_CAL',   'bands': (
+            (5.0,  10.0, (5.0, 6.7, 9.0, 12.1, 16.3, 22.0, 29.7, 40.0)),
+        )},
+    3: {'name': 'TRACK_25K',   'bands': (
+            (25.0, 10.0, (7.6,)),
+        )},
+    4: {'name': 'CLASSIFY_EP', 'bands': (
+            (10.6, 40.0, ( 8.56,  8.98,  9.37,  9.72, 10.08, 10.49, 10.96, 11.57, 12.53)),
+            (17.6, 30.0, ( 8.12,  8.54,  8.92,  9.27,  9.63, 10.02, 10.50, 11.10, 12.03)),
+            (29.2, 20.0, ( 7.62,  8.03,  8.40,  8.75,  9.11,  9.50,  9.96, 10.55, 11.46)),
+            (43.0, 10.0, ( 6.80,  7.22,  7.58,  7.93,  8.28,  8.66,  9.11,  9.70, 10.57)),
+            (57.0,  5.0, ( 6.03,  6.43,  6.78,  7.12,  7.46,  7.84,  8.28,  8.85,  9.71)),
+        )},
 }
 
 
@@ -55,7 +71,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('PIMD Scope v4.00')
+        self.setWindowTitle('PIMD Scope v4.01')
 
         self.serial = QSerialPort()
         self.serial.readyRead.connect(self.read_from_serial)
@@ -243,22 +259,29 @@ class MainWindow(QMainWindow):
     def _update_titles(self, w_idx):
         meta = PROFILES_META.get(w_idx, {})
         name = meta.get('name', '?')
-        freq_khz = meta.get('freq_khz', 0)
-        self.header_label.setText(
-            'Profile {0} ({1}) — {2:.1f} kHz'.format(w_idx, name, freq_khz))
+        bands = meta.get('bands', ())
 
-        pulses = list(meta.get('pulses_us', []))
-        delays = list(meta.get('delays_us', []))
-        multi_pulse = len(pulses) > 1
+        freqs = [b[0] for b in bands]
+        if len(set(freqs)) == 1:
+            freq_str = '{0:.1f} kHz'.format(freqs[0]) if bands else '?'
+        else:
+            freq_str = 'multi-freq'
+        self.header_label.setText(
+            'Profile {0} ({1}) — {2}'.format(w_idx, name, freq_str))
+
+        multi_band = len(bands) > 1
         titles = []
-        for pw in (pulses or ['?']):
-            for dl in (delays or ['?']):
-                if multi_pulse:
-                    titles.append('pw={0:.1f}us, d={1:.1f}us'.format(pw, dl))
+        for freq_khz, pulse_us, delays_us in bands:
+            for delay_us in delays_us:
+                if multi_band:
+                    titles.append('{0:.0f}kHz/{1:.0f}us d={2:.2f}us'.format(
+                        freq_khz, pulse_us, delay_us))
                 else:
-                    titles.append('delay={0:.1f}us'.format(dl))
+                    titles.append('d={0:.2f}us'.format(delay_us))
+
+        fontsize = 7 if len(titles) > 12 else 9
         for ax, title in zip(self.axes, titles):
-            ax.set_title(title, fontsize=9)
+            ax.set_title(title, fontsize=fontsize)
 
     def update_chart(self):
         span_uv = self.span_spin.value() * 1000

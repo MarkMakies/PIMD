@@ -11500,9 +11500,9 @@
 		)
 		(uuid "d156e056-94c9-48aa-b9de-4769392f6cb9")
 	)
-	(text "A / DRL  : 32 bits filtered\nB / BUSY : 22 bits raw"
+	(text "A / DRL  : 32 bits filtered\nB / BUSY : 22 bits raw \n\nThe 22-bit composite code consists of a\n14-bit code representing the differential voltage and an\n8-bit code representing the common mode voltage."
 		(exclude_from_sim no)
-		(at 219.71 175.26 0)
+		(at 226.06 185.166 0)
 		(effects
 			(font
 				(size 1.27 1.27)
