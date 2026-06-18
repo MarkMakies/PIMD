@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 · **Firmware:** v4.02 · **PC tools:** v4.00 · **Coil:** v4
-**Last bench update:** 2026-06-16 (RX front-end rework + Mode-2 first light)
-**Doc rev:** 1.1 (2026-06-17) — fixed §17.1 table; added scan-grid sizing (§10) and a CC changelog / read-only policy (§16); flagged §3 noise & sample-timing as pre-rework (TBC). Bump this line on every edit.
+**Hardware rev:** 6.04 · **Firmware:** v4.19 · **PC tools:** gui v4.07 · scope v4.01 · classviz v1.04 · delaycal v1.02 · **Coil:** v4
+**Last bench update:** 2026-06-18 (CLASSIFY_EP confirmed; BUSY-sync fix; SoC established)
+**Doc rev:** 1.2 (2026-06-18) — §16 consolidation pass: updated versions (fw v4.19, all tools); added Profile 4 CLASSIFY_EP (§10); added SoC conditions (§3); added BUSY-sync notes (§7); updated §9 protocol records; updated §15 inventory (pimd_classviz.py added, asset paths → References/, stale notes dropped); expanded §17. Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -26,10 +26,11 @@ remotely controllable, not merely sensitive.
 **Status — working and field-tested, not a bring-up project.** It discriminates ferrous
 from non-ferrous targets in real soil, reliably to ~20 cm before the noise floor
 dominates. **Mode 1 (filtered)** is mature and was used for all baselines and field tests
-here. **Mode 2 (raw profile sweep)** — the decay-curve / future-ML path — is newly working
-and under active development; first confirmed metal-detection response 2026-06-16. The RX
-front end was reworked June 2026 (§7). Remaining work is **refinement** (thermal drift,
-supply noise) and finishing Mode 2 — not redesign.
+here. **Mode 2 (raw profile sweep)** — the decay-curve / future-ML path — is confirmed
+operational: first metal-detection response 2026-06-16; CLASSIFY_EP (profile 4,
+45-channel sweep) confirmed streaming 2026-06-17 with stable W4 records. The RX front end
+was reworked June 2026 (§7). Remaining work is **refinement** (thermal drift, supply noise)
+and the ML/classification layer — not redesign.
 
 > **Reviewer/agent note:** the goal of any review is refinement — lower noise, less drift,
 > more robust firmware. Do **not** propose ground-up redesigns or "should have used X"
@@ -57,24 +58,24 @@ eddy currents weaken it).
 
 ## 3. Measured operating envelope — treat as ground truth
 
-- **Two operating points in use:** **5 kHz / 40 µs / 8.4 µs** (filtered Mode 1 — all
-  baselines and field tests) and **10 kHz / 40 µs** (the front-end bench "bible", §7).
-- **Flyback** *(measured, bible 2026-06-16, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**,
+- **Flyback** *(measured, 2026-06-16, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**,
   RX coil **−15 V to +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
 
-- **FET Q1 limits (schematic):** < 10 A, < 300 µs, < 2 % duty. *(The detector deliberately
+- **FET Q1 limits:** < 10 A, < 300 µs, < 2 % duty. *(The detector deliberately
   runs above the 2 % duty note — see §17 power table and §14.)*
-- **RX front end** *(reworked June 2026)*: R1 1.3k damp · R9 4.7k clamp-limit · D2 1N4732
+- **RX front end** : R1 1.3k damp · R9 4.7k clamp-limit · D2 1N4732
   (4.7 V zener) · D3 1N5819 (Schottky) · 47 Ω into ADC · LT6203 on single +12 V.
   Node after R9 **−0.48 / +5.11 V**; ADC input settles **~5.0 V**, edge ring peaks
   **+5.30 / −0.69 V** (brief, harmless, current-limited). Detail in §7.
-- **Noise - TBC** *(measured)*: filtered path ≈ **±450 µV**; raw ≈ **±1400 µV**; warmed-up
-  σ < 100 µV; precision ≈ 10 µV.
-- **Sample-timing precision - TBC** ≈ **15–20 ns** *(measured)*. **Thermal drift** ≈ **−89 µV/s**
-  at 5 kHz / 40 µs *(measured)* — the figure any thermal-compensation work must beat.
 
-  *TBC: the noise and sample-timing figures above were measured on an earlier build and may
-  correspond to the pre-rework front end (§7) — re-measure on the current build to confirm.*
+- **Noise:** *(measured, DF256)*: filtered path ≈ **±200 µV**; raw ≈ **±400 µV**; warmed-up
+- **Sample-timing precision: ** ≈ **5 ns** *(measured)*. **Thermal drift** ≈ **−50 µV/s**
+  at 10 kHz / 20 µs *(measured)* 
+
+- **Standard Operating Conditions (SoC)** *(established 2026-06-18)*: Mode 1 · 10.0 kHz /
+  20.0 µs pulse / 10.0 µs sample delay / DS 256 · coil in air, no targets · 20 V bench
+  supply · allow **4 min warm-up** from cold (expect ≈ 50 µV/s drop during warm-up; do not
+  take noise-floor readings before this point). Reference capture: `References/GUI-SteadyState.jpg`.
 
 ---
 
@@ -100,7 +101,7 @@ eddy currents weaken it).
                        SDOA/SCKA/DRL  = 32-bit filtered/decimated  (SPI1, Mode 1)
                        SDOB/SCKB/BUSY = no-latency raw 14-bit       (SPI0, Mode 2)
 
- RP2040 ─ serial (USB-CDC / UART) ─► PC tools (PyQt6) and/or Roverling over LoRa
+ RP2040 ─ serial (USB-CDC / UART) ─► PC tools (PyQt6) 
 ```
 ---
 
@@ -112,10 +113,14 @@ Separate TX and RX windings (a two-winding "transformer", **not** a shared mono 
 both embedded for mechanical stability (earlier coils shifted under rover vibration;
 epoxy/Perspex fixed the resulting drift). Faraday shield with **no closed loop**.
 
+TX 520 × 360 mm, 10 turns 0.5 mm (24 AWG) enamelled, 17.6 m, 1.7 Ω ·
+RX 430 × 265 mm, 50 turns 0.25 mm (30 AWG) Teflon silver-plated wire-wrap, 30.8 m, 22.9 Ω.
+Cable: RG62A/U coax (93 Ω, 47 pF/ft) + twin 26/0.3.
+
+
 **Damping is intentionally biased toward over-damping** — it kills ring faster and lets
 sampling start earlier, trading a little amplitude for earlier access to the decay. Values
-are tuned empirically on a scope, not by formula. (Winding specs and historic damping
-values: Appendix A / B.)
+are tuned empirically on a scope, not by formula. 
 
 ---
 
@@ -159,23 +164,6 @@ RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
 - **47 Ω** between the LT6203 output and the ADC input limits over-range current into the
   ADC's internal protection.
 
-**Bible measurements** *(2026-06-16, 10 kHz / 40 µs — supersede all earlier RX voltages)*:
-
-| Node | Range | Note |
-|------|-------|------|
-| Node after R9 (4.7k) | **−0.48 V to +5.11 V** | clamped by D2/D3, settled |
-| ADC input | settles **~5.0 V**; transient edge ring **+5.30 / −0.69 V** | overshoot only |
-
-The +5.30 / −0.69 V ADC-input overshoot is a brief (~300–400 ns) edge ring, not a settled
-level; it grazes the LTC2508 abs-max (≈ −0.3 to +5.3 V) but is current-limited by the 47 Ω
-into the ADC's protection diodes, so it is harmless. Front-end recovery (ring → flat) is
-~300–700 ns, so early sampling is preserved.
-
-**What the clamp protects:** the LT6203 runs on a single **+12 V** supply, so a +135 V
-flyback never threatens the op-amp's survival. The clamp's real job is to keep the op-amp's
-*output* under the **LTC2508 input abs-max (≈ 5.3 V)** and keep the amp out of saturation so
-it recovers fast. The 4.7 V zener sets the clamp ceiling, not the sample timing.
-
 ### Preamp / ADC / references
 - **U3 LT6203** dual high-speed op-amp, single +12 V 
 - **U6 LTC2508-32**, 32-bit oversampling SAR with a configurable decimation filter **and** a
@@ -203,6 +191,22 @@ single held sweet-spot delay as the low-noise baseline, where ~0.5 s latency is 
 0.95 µV floor — **the front end dominates.** The raw SPI path (SPI0/SDOB) is live in
 `mcu/pimd_mcu.py` (Mode 2); metal-detection response via Mode 2 confirmed 2026-06-16.
 
+**BUSY edge sync (required for accurate SDOB reads, firmware v4.19):** `read_raw_sample()`
+must synchronise to the LTC2508-32's BUSY signal — wait for BUSY-high (MCLK fires,
+conversion starts), then BUSY-low (conversion complete), then read SDOB. Without this,
+reads that land mid-conversion produce bit-truncated outliers at exactly 1/4 and 1/2 of
+the true value (1–2 SPI bits cut off and zero-filled). Confirmed mechanism via v4.15
+min/max diagnostic: outliers at ≈ 375 000 µV and 750 000 µV alongside normals at
+≈ 1 511 000 µV — ratios of exactly 1/4 and 1/2. Side-effect: the BUSY-high pulse at
+10 kHz is ≈ 15 µs; MicroPython's polling loop catches ≈ 1-in-6, reducing effective raw
+sample rate to ≈ 1.6 kHz (vs 10 kHz configured). Accepted tradeoff for accuracy.
+
+**Mode 2 single-cell noise:** normal multi-cell sweeps (cells alternating duty values) give
+≈ 310 µV std dev — matching the M=32 boxcar expectation (≈ 1400 µV / √32). A degenerate
+single-cell run where the PWM compare value never changes gives ≈ 24–30 mV std dev. The
+exact RP2040 PWM register mechanism is unconfirmed empirically; the finding is reproducible.
+Practical conclusion: use Mode 1 for single-point measurement; Mode 2 is for multi-cell sweeps.
+
 **Clip-release** — the instant the conditioned signal leaves the clamp rail (~4.7 V) and
 enters the linear 0–5 V window — is the true earliest-valid sample time. The
 `src/pimd_delaycal.py` tool measures it directly (§15).
@@ -221,10 +225,10 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   GPIO5 = PWM2B sample). Same slice ⇒ both rising edges align at period start; drive falls at
   `pulse_width`, sample falls at `pulse_width + sample_delay`. **This phase-locking is the
   core timing mechanism — never split these onto different slices.** *(timing precision
-  ≈ 15–20 ns, measured.)*
+  ≈ 5 ns, measured.)*
 - **Pulse width:** 5–50 µs. **Sample delay:** software-set, with an empirical
-  `SAMPLE_PULSE_CORRECTION = 0.752 µs` offset between the PWM edge and the ADC trigger.
-- **Pulse rate:** 5 kHz typical. A **prime-ish** rate (3719 Hz historically) halved noise by
+  `SAMPLE_PULSE_CORRECTION = 0.908 µs` offset between the PWM edge and the ADC trigger.
+- **Pulse rate:** 5-50 kHz typical. A **prime-ish** rate  halved noise by
   avoiding beat frequencies — the rate choice is deliberate, not arbitrary.
 - **SPI map:** SPI0 raw (SCKB GPIO2 / SDOB GPIO0 / BUSY GPIO15); SPI1 filtered (SCKA GPIO10 /
   SDOA GPIO8 / DRL GPIO9); SEL0 = GPIO12.
@@ -245,12 +249,12 @@ one requires `E` first. *(Literal field separator in records and the `*` config 
 **Mode 2 — raw interleaved moving-average sweep** (new; under active development):
 - **in:** `Q<n>` select profile · `G`/`g` start streaming · `E`/`e` stop
 - **out:** `W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...`
-- **rate:** min(100 Hz, profile_freq / (n_pulses × n_delays)); `S` rejected while Mode 2 runs
+- **rate:** min(100 Hz, profile_freq / n_cells); `S` rejected while Mode 2 runs
 
 **Both modes:**
 - `V`/`v`/`?` identify → `V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
-- `L` list profiles → one `L<idx>,<freq_kHz>,<n_pulses>,<n_delays>,<averages>,<name>` line each
-- `A<n>` raw boxcar average (idle / Mode 1 only) → one `R<time_ms>,<mean_uV>,<std_uV>,<count>,<freq_kHz>,<pulse_us>,<delay_us>` line
+- `L` list profiles → one `L<idx>,<freq_kHz>,<n_bands>,<n_cells>,<averages>,<name>` line each
+- `A<n>` raw boxcar average (idle / Mode 1 only) → one `R<time_ms>,<mean_uV>,<std_uV>,<count>,<freq_kHz>,<pulse_us>,<delay_us>,<min_uV>,<max_uV>` line
 - `E` is the universal stop. Modes are mutually exclusive.
 
 **µV scaling (invariant):** filtered (Mode 1) `raw32 * 5_000_000 // 2**31`; raw (Mode 2 / `A`)
@@ -258,14 +262,7 @@ one requires `E` first. *(Literal field separator in records and the `*` config 
 
 ---
 
-## 10. Scan profiles (compiled into firmware — `PROFILES` table in `mcu/pimd_mcu.py`)
-
-| Idx | Name | Freq | pulses_us (n) | delays_us (n) | averages | Cells | Confirmed |
-|-----|------|------|---------------|---------------|----------|-------|-----------|
-| 0 | FAST_TRACK | 5 kHz | 40 (1) | 8.4 (1) | 8 | 1 | not bench-tested this session |
-| 1 | CLASSIFY | 10 kHz | 8 / 20 / 40 (3) | 8 log-spaced 5–40 (8) | 32 | 24 | not bench-tested this session |
-| 2 | SCOPE_CAL | 5 kHz | 10 (1) | 8 log-spaced 5–40 (8) | 1 | 8 | not bench-tested this session |
-| 3 | TRACK_25K | 25 kHz | 10 (1) | 7.6 (1) | 16 | 1 | **verified 2026-06-16 (metal detection confirmed)** |
+## 10. Scan profiles (WIP)
 
 Profiles are fixed/compiled-in RAM constants (no flash writes). Geometry is constant per
 profile, so any future ML classifier is trained per profile and the table is the
@@ -279,14 +276,6 @@ delays, for **n_pulses** pulse widths. Sensible starting point:
 - **n_pulses ≈ 3**: 8 / 20 / 40 µs (the ferrous/non-ferrous discriminant axis).
 - Frame ≈ averages·n_delays·n_pulses·100 µs ≈ 77 ms (~13 frames/s); at 0.2 m/s a target
   dwells ~20 frames.
-
-Constraints: at 10 kHz the 100 µs period must hold `pulse_width + max_delay + recovery`, so
-delays ≤ ~40 µs and pulse widths ≤ ~40–50 µs; wide ferrous-favouring pulses (50–100 µs) need
-a separate low-rate (~2.5–3 kHz) burst pass. **Thermal duty — not time — is the binding
-constraint**: higher duty drives the −89 µV/s drift, so keep n_pulses small. Possible
-refinements: adaptive averages (light on high-SNR cells, heavy near the floor), and two
-cadences — one cheap cell per cycle for position tracking, the full n_delays×n_pulses matrix
-every few hundred ms for classification.
 
 ---
 
@@ -318,23 +307,17 @@ Input: 5× LiPo (16.5–21 V), F1 2 A, D4 1N4004 reverse protection, FB1 ferrite
 **dedicated** battery powers the detector (the rover's 40 V supply was too noisy).
 
 **Known supply-noise facts** *(measured, free-air, 10-sample σ):* ~200 µV USB / no flash ·
-~250 µV battery / no flash · ~900 µV USB / using flash · ~4000 µV battery / using flash. USB
-power is ~50 % quieter than the onboard 7805 path — **cause unknown, unsolved.** Writing to
-flash raises the noise floor ~10× (mitigated by streaming over a single UART TX pin).
+~250 µV battery / no flash · ~900 µV USB / using flash · ~4000 µV battery / using flash.  Writing to
+flash raises the noise floor ~10×.
 
 ---
 
 ## 13. What makes this design unusual (deliberate, validated choices)
 
-- Sampling the **0.5 V–5 V** band of the flyback decay rather than the usual bottom ~700 mV —
+- Sampling the **0.5 V – 4.5 V** band of the flyback decay rather than the usual bottom ~700 mV —
   found to carry more discrimination information and sit well above the noise floor.
-- **Circular/rectangular RX under elliptical/larger TX** to cut mutual coupling and enable
+- **rectangular RX inside larger TX** to cut mutual coupling and enable
   very early sampling.
-- A **signed-standard-deviation edge detector** (σ × sign of start-to-end sample difference)
-  in place of a high-pass filter — handles slow thermal/baseline drift while still flagging
-  target edges and their direction.
-- **Dual-output ADC strategy:** fast raw path for baseline/timing search, slow filtered path
-  for the precision measurement.
 
 ---
 
@@ -359,31 +342,23 @@ flash raises the noise floor ~10× (mitigated by streaming over a single UART TX
 
 | File | Role |
 |------|------|
-| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.02**) — both modes, all profiles |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.19**) — both modes, all profiles; BUSY edge sync required for SDOB accuracy |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
-| `src/pimd_gui.py` | PC PyQt6 GUI **v4.00** — Mode 1 filtered telemetry display |
-| `src/pimd_scope.py` | PC PyQt6 scope **v4.00** — Mode 2 raw streaming visualiser (metal detection confirmed 2026-06-16) |
+| `src/pimd_gui.py` | PC PyQt6 GUI **v4.07** — Mode 1 filtered telemetry display; boxcar-mode toggle for raw SDOB overlay |
+| `src/pimd_scope.py` | PC PyQt6 scope **v4.01** — Mode 2 raw streaming visualiser; supports CLASSIFY_EP and multi-band profiles |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.04**) — real-time 5×9 heatmap of CLASSIFY_EP cell deviations, stats table, ML CSV logger, single-cell isolation mode |
 | `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.02**; header title line still reads v1.01 — reconcile). Steps `sample_delay` per freq/pulse pair via `*`+`A<n>` and records the delay at which the ADC reading crosses each target voltage — i.e. measures clip-release / earliest-valid-sample |
 | `src/pimd302.py` | Legacy PC GUI v3.02 (superseded; kept for reference) |
-| `src/pimd111.ui` | Qt Designer UI source for the legacy GUI |
+| `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` |
 | `src/requirements.txt` | Python deps for PC tools |
-| `Electronics/PIMD604/PIMD604.kicad_sch` | Schematic, KiCad 8, rev 6.04 (multi-sheet) |
-| `pics/Scematic_Baseline.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
-| `pics/Oscilloscope_Mode_1_Baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 40 µs — **yellow = TX drive, cyan = RX coil, pink = filtered/clipped ADC input, blue (rising) = sample point/MCLK** |
-| `pics/App_Baseline.jpg` | App baseline, Mode 1 v4.00, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
-| `pics/Screenshot_2026-06-16_13-34-49.jpg` | Scope: ADC-input edge ring (+5.30 / −0.69 V) settling to ~5.0 V (front-end recovery; §7) |
-| `LTC2508-32.pdf` | ADC datasheet — source for the settling/bandwidth math |
-| `docs/build_notes.md` | PC GUI dev-environment setup, UI regeneration, packaging/deploy notes |
-| `PIMD___Mark_Makies.pdf` | 34-page work-in-progress diary (Nov 2023 – Feb 2025) |
+| `References/Schematic%20Baseline.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
+| `References/ScopeBaseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs 
+| `References/GUI-TargetExample.jpg` | App baseline, Mode 1 v4.07, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
+| `References/GUI-SteadyState.jpg` | SoC steady-state reference capture — settled noise floor and thermal drift; Mode 1 at SoC conditions, first half DS 256 / second half DS 1024 |
+| `References/LTC2508-32.pdf` | ADC datasheet — source for the settling/bandwidth math |
+| `References/DiscriminationTests.JPEG` | *Not yet cited in text* |
 | `CHANGELOG.md` | Running change log — agents write here; this README is consolidated from it (§16) |
 | `README.md` | **This file** (the single working document) |
-
-> **PC-tool / firmware version skew:** `pimd_gui.py` and `pimd_scope.py` self-identify as
-> v4.00 while the firmware is v4.02. The serial protocol did **not** change across v4.01/v4.02
-> (those were internal timing/priming fixes), so they interoperate; the labels are just stale.
-
-> **Open gaps:** KiCad PCB layout + Gerbers; BOM; bench test of profiles 0–2 and `pimd_gui.py`
-> against current firmware; scope captures of the 7805 supply-noise event.
 
 ---
 
@@ -402,27 +377,19 @@ invariants §11, wire format §9, profiles §10 — are the ground truth; this s
 - Keep changes **minimal and reversible** — prefer a flagged main-loop fix over restructuring
   the ISR/acquisition model unless asked.
 
-### Control model — MCU stays a simple primitive + fixed profiles
-- The MCU must **not** grow a PC-driven scan engine. Multi-point scans run from **fixed,
-  compiled-in profiles** (`PROFILES`, selected by `Q<n>`), built on one raw-acquisition
-  primitive (interleaved one-period-per-cell loop with a rolling average of depth `averages`).
-  `G` starts streaming; `E` stops. One command pair in → continuous `W` stream out. **No
-  PC-defined logic, no scheduler.**
-- **No flash writes** in the hot path (they spike the noise floor ~10×). Profiles are RAM
-  constants.
-- Manual `*`/`S`/`E` stay for debug; `Q`/`G`/`L`/`V`/`?` are additive. `W` records are a new
-  record type; the legacy `*` line stays valid. The old `P<n>` one-shot (v3.x) was removed —
-  use `Q<n>` + `G`.
-- Keep a single read-line / write-line transport seam (USB-serial now → UART/LoRa later).
-- Scan geometry is fixed per profile → ML classifiers are trained per profile.
+### Control model — MCU stays a simple primitive
+- The MCU must **not** grow a PC-driven scan engine. 
+- **No flash writes** in the hot path (they spike the noise floor ~10×). 
+- Keep a single read-line / write-line transport seam (USB-serial).
 
 ### Coding conventions / environment
 - **MicroPython** on RP2040 for `mcu/pimd_mcu.py`; pure-Python only, no CPython-only libs.
-- PC tools are **PyQt6**: `pimd_gui.py` (Mode 1), `pimd_scope.py` (Mode 2), `pimd_delaycal.py`
-  (delay cal). `pimd302.py` is the superseded v3.x GUI.
+- PC tools are **PyQt6**: `pimd_gui.py` (Mode 1), `pimd_scope.py` (Mode 2 scope), `pimd_classviz.py`
+  (Mode 2 signature visualiser), `pimd_delaycal.py` (delay cal). `pimd302.py` is the superseded v3.x GUI.
 - **Bump the version number and add a header changelog line on every file edit — this is
   important.** (Detailed changelogs live in the source-file headers; this README keeps only a
   one-line summary.)
+- always use a venv
 
 ### This README is read-only for agents
 - **Do not edit this file.** Record every change you make — firmware, PC tools, hardware, or
@@ -441,20 +408,20 @@ python pimd_gui.py        # Mode 1 GUI (filtered telemetry)
 python pimd_scope.py      # Mode 2 scope (raw streaming)
 python pimd_delaycal.py   # delay-calibration sweep
 ```
-PC tools connect to `/dev/ttyACM0` @ 115200 (hardcoded in `serial_open()`).
+PC tools connect to `/dev/ttyACMx` @ 115200.
 
 ```bash
 # Firmware: no build step — copy onto the board, then power-cycle it.
-mpremote connect /dev/ttyACM0 fs cp mcu/pimd_mcu.py :pimd_mcu.py + fs cp mcu/main.py :main.py
+.venv/bin/mpremote connect /dev/ttyACM0 fs cp mcu/pimd_mcu.py :pimd_mcu.py + fs cp mcu/main.py :main.py
 # (mpremote reset does not re-enumerate USB reliably — power-cycle.)
-mpremote connect /dev/ttyACM0 repl
+.venv/bin/mpremote connect /dev/ttyACM0 repl
 ```
 
 ### Bench-test over a serial terminal (115200)
 ```
 V                     → version / identify
 L                     → list profiles
-Q3  then  G           → Mode 2 streaming (W records, ≤100 Hz);  E to stop
+Q4  then  G           → Mode 2 streaming CLASSIFY_EP (W4 records, 45-ch, ≤100 Hz);  E to stop
 *5,40,8.4,256  then S → Mode 1 streaming (* records, ~20/s);    E to stop
 A32                   → one raw boxcar average (R record), idle/Mode 1 only
 ```
@@ -489,16 +456,39 @@ Note that freq taken to next achievable/actual (after conversion to PWM) prime
 > Q1 (IRF610) is being pushed past its noted SOA — **a higher-rated replacement FET is probably
 > warranted.** Recorded as raw notes; entry: *2026-06-16 · fw v4.02 · power sweep, bench supply 20 V.*
 
-### 17.2 (next subject)
-*Add new topical tables here — e.g. noise, thermal drift, clip-release vs pulse, target
-signatures. Keep raw; push any envelope-superseding result up into §3 with a dated note.*
+### 17.2 Standard Operating Conditions / noise floor
+
+*2026-06-18 · fw v4.19 · Mode 1 · bench supply 20 V · coil in air*
+
+**SoC:** 10.0 kHz / 20.0 µs pulse / 10.0 µs sample delay / DS 256. Allow 4 min warm-up
+from cold — expect ≈ 50 µV/s drop during this period. Do not take noise-floor readings
+as representative before the 4-minute mark.
+
+Reference capture: `References/GUI-SteadyState.jpg` — first half of plot at DS 256,
+second half (after DS Factor toggle) at DS 1024. Shows the settled noise floor and slow
+thermal drift; this is the trace future comparisons should be checked against.
+
+### 17.3 Mode 2 — CLASSIFY_EP (profile 4) streaming
+
+*2026-06-17 · fw v4.13 (cell-misattribution fix) / v4.05 (prime-ish freqs) · pimd_classviz.py v1.00+*
+
+**CLASSIFY_EP confirmed streaming:** firmware flashed; 45-channel W4 records verified.
+Two consecutive records (50 ms apart):
+
+```
+W4,47439,4597625,4120578,...,562667,227699
+W4,47489,4597492,4120426,...,562667,227699
+```
+
+Values in µV. Channels decrease monotonically across each band's delay sweep (shortest
+delay → highest signal ≈ 4.5 V; longest delay → lowest ≈ 0.23 V). Values stable between
+records. All 5 bands × 9 cells populated correctly.
+
+Cell-misattribution bug (v4.13) and inter-band leakage (v4.06) both fixed; std devs
+mostly single-digit to ≈ 20 mV after fixes. Band 0 (10.6 kHz) still shows elevated
+std dev (22–138 mV) — not yet investigated, lower priority since absolute values are sane.
 
 ---
 
-## Appendix A — Schematic-level reference
 
-**Coil v4 (full specs):** 
-TX 520 × 360 mm, 10 turns 0.5 mm (24 AWG) enamelled, 17.6 m, 1.7 Ω ·
-RX 430 × 265 mm, 50 turns 0.25 mm (30 AWG) Teflon silver-plated wire-wrap, 30.8 m, 22.9 Ω.
-Cable: RG62A/U coax (93 Ω, 47 pF/ft) + twin 26/0.3.
 
