@@ -2,6 +2,42 @@
 # Pulse Induction Metal Detector GUI — Mode 1 display
 # Runs on Ubuntu desktop / laptop
 #
+# v4.06 chart corruption fix: trim series_v/series_raw_mean by x-axis range
+#       (not by point count) so no off-screen polyline segment crosses the
+#       visible area when the warmup spike scrolls off the left edge. Add
+#       "Boxcar" toggle button (enables/disables A<n> polling + orange trace)
+#       and move "Raw Avg" button to the bottom-left F1/F2/F3/F4 area (those
+#       presets removed). Remove Raw σ button, series_stddev, axis_stddev,
+#       series_stddev_slope and all related state; keep raw_stddev_uV footer.
+# v4.05 clear series_raw_mean and series_stddev on Mode 1 start (S command),
+#       not just on DEL/Clear or toggle-off. Stale data from a previous session
+#       left phantom traces — polyline from old off-screen points to new ones
+#       — visible as multiple overlapping orange plots on the chart.
+# v4.07 remove range (min…max) from footer raw status string; fix horizontal
+#       grid lines (axis_z) back to light gray (#cccccc, was blue).
+# v4.04 extend R record parsing: pimd_mcu.py v4.15 appends min_uV and max_uV
+#       to the R record (format: R<t>,<mean>,<std>,<n>,<freq>,<pulse>,<delay>,
+#       <min>,<max>). Parse parts[7]/parts[8] defensively.
+# v4.03 add two chart toggles to visualise the raw boxcar-average path (A<n>):
+#       "Raw Avg" overlays raw_value_uV (orange) on the existing voltage axis
+#       next to the filtered-path blue trace; "Raw sigma" plots raw_stddev_uV
+#       on the existing (previously unused) red stddev series/axis, which now
+#       auto-expands its range as larger values are seen (was a fixed 0-1000uV
+#       range, too narrow for the std dev values now being investigated, up to
+#       70,000uV). Both default off; DEL/Clear resets them along with the rest
+#       of the chart.
+# v4.02 startup now defaults to Standard Operating Conditions (see CHANGELOG.md):
+#       10.0 kHz / 20.0 us pulse / 10.0 us delay / 256 decimation. Removed the
+#       footer's "std dev: ... uV" entry — it duplicated the top-right Std Dev
+#       box (both show the firmware's filtered-path p_stddev); the now-unused
+#       voltage_buffer/computed_stddev machinery behind it was removed too.
+#       poll_raw_average() now sends A<n> with n = min(down_sample, 1000)
+#       instead of a hardcoded A32, so the raw-path boxcar average's noise
+#       floor is comparable to the filtered path's decimation factor instead
+#       of differing by ~8-32x just from oversampling-count mismatch.
+# v4.01 added editable port field (mirrors pimd_classviz.py) — was hardcoded to
+#       'ttyACM0'; serial_open() now reads self.le_port.text(), stripping a leading
+#       '/dev/' if present
 # v4.00 renamed from pimd302.py; W (Mode 2 stream) records silently ignored;
 #       window title updated
 
@@ -10,10 +46,9 @@
 
 import sys
 import time
-import math
 from datetime import datetime
 
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QLineEdit, QPushButton
 from PyQt6.QtSerialPort import QSerialPort
 from PyQt6.QtCore import QIODevice, QTimer, QPointF, Qt
 from PyQt6.QtGui import QPen, QColor, QShortcut, QKeySequence
@@ -21,9 +56,8 @@ from PyQt6.QtCharts import QChart, QLineSeries, QValueAxis
 
 from pimd111_ui import Ui_MainWindow  # This is your auto-generated UI file
 
-# Constants for standard deviation calculation and display
-NUMBER_STDDEV_POINTS = 100       # Number of recent voltage points used to compute stddev
-STDDEV_MAX_SCALE = 1000          # Maximum stddev scale in microvolts (uV)
+DEFAULT_PORT = '/dev/ttyACM0'
+
 SLOPE_COUNT = 100               # Rolling average slope count (derivative)
 
 class MainWindow(QMainWindow):
@@ -37,8 +71,36 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle('Pulse Induction Metal Detector v4.00 by Mark Makies')
-        
+        self.setWindowTitle('Pulse Induction Metal Detector v4.07 by Mark Makies')
+
+        # Editable port field (mirrors pimd_classviz.py) — added below the existing
+        # Connect/Start/filename rows in the same label+control grid layout.
+        self.lbl_port = QLabel('Port:')
+        self.le_port = QLineEdit(DEFAULT_PORT)
+        self.le_port.setMaximumWidth(110)
+        self.ui.gridLayout_2.addWidget(self.lbl_port, 3, 0, 1, 1)
+        self.ui.gridLayout_2.addWidget(self.le_port, 3, 1, 1, 1)
+
+        # Remove F1/F2/F3/F4 preset labels from the bottom-left area (v4.06).
+        for _name in ('label_9', 'label_11', 'label_8', 'label_12',
+                      'label_14', 'label_15', 'label_18', 'label_19'):
+            getattr(self.ui, _name).setParent(None)
+
+        # Boxcar mode toggle — enables/disables A<n> polling and the orange
+        # trace (v4.06). "Raw Avg" toggle (show/hide trace within boxcar mode)
+        # moved here from gridLayout_2.
+        self.pb_boxcar_mode = QPushButton('Boxcar: OFF')
+        self.pb_boxcar_mode.setCheckable(True)
+        self.pb_boxcar_mode.setStyleSheet(self.MY_YELLOW)
+        self.pb_boxcar_mode.toggled.connect(self._on_toggle_boxcar_mode)
+        self.ui.formLayout_10.addRow(self.pb_boxcar_mode)
+
+        self.pb_show_raw_mean = QPushButton('Raw Avg: OFF')
+        self.pb_show_raw_mean.setCheckable(True)
+        self.pb_show_raw_mean.setStyleSheet(self.MY_YELLOW)
+        self.pb_show_raw_mean.toggled.connect(self._on_toggle_raw_mean)
+        self.ui.formLayout_10.addRow(self.pb_show_raw_mean)
+
         #self.showFullScreen()  ##MM Added to start in full-screen mode
 
         # Serial port and file handle
@@ -59,15 +121,21 @@ class MainWindow(QMainWindow):
         self.raw_stddev_uV = None
         self.raw_x = None
 
+        # Chart toggles for the raw boxcar-average path (off by default)
+        self.show_raw_mean = False
+
         # Periodic poll for a raw-path averaged sample while running
         self.raw_poll_timer = QTimer()
         self.raw_poll_timer.timeout.connect(self.poll_raw_average)
 
-        # Measurement parameters (defaults)
-        self.frequency = 25.0        # in kHz (displayed as x/10 slider value)
-        self.pulse_width = 10.0      # in µs
-        self.sample_delay = 7.4      # in µs
-        self.down_sample = 1024       # down-sample factor for decimation filter
+        # Measurement parameters — defaults are the Standard Operating
+        # Conditions (see CHANGELOG.md): 10.0 kHz / 20.0 us pulse / 10.0 us
+        # delay / 256 decimation. apply_soc_defaults() (called from my_init)
+        # pushes these onto the sliders/DS-factor button at startup.
+        self.frequency = 10.0        # in kHz (displayed as x/10 slider value)
+        self.pulse_width = 20.0      # in µs
+        self.sample_delay = 10.0     # in µs
+        self.down_sample = 256        # down-sample factor for decimation filter
 
         # Chart scaling parameters
         self.v_scale = 5000
@@ -80,21 +148,16 @@ class MainWindow(QMainWindow):
         # Chart objects
         self.chart = None
         self.series_v = None
-        self.series_stddev = None  # New series for calculated stddev
         self.axis_x = None
         self.axis_y = None
         self.axis_t = None
         self.axis_z = None
-        self.axis_stddev = None  # New axis for stddev
-        self.series_stddev_slope = None #series for rolling average slope (derivative)
 
         # Vertical scale update flag and current Y range (for voltage)
         self.update_vert_scale = True
         self.cur_min = 0
         self.cur_max = 5000
 
-        # Buffer to hold the last NUMBER_STDDEV_POINTS voltage values (in µV) for stddev calculation
-        self.voltage_buffer = []
         ## buffer to hold raw voltage with timestamps for slope calculation over SLOPE_COUNT points
         self.voltage_ts_buffer = []
 
@@ -131,15 +194,6 @@ class MainWindow(QMainWindow):
         sc_del = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
         sc_del.activated.connect(self.clear_chart)
 
-        # Preselect functions
-        sc_f1 = QShortcut(QKeySequence(Qt.Key.Key_F1), self)
-        sc_f1.activated.connect(self.f1)
-        sc_f2 = QShortcut(QKeySequence(Qt.Key.Key_F2), self)
-        sc_f2.activated.connect(self.f2)
-        sc_f3 = QShortcut(QKeySequence(Qt.Key.Key_F3), self)
-        sc_f3.activated.connect(self.f3)
-        sc_f4 = QShortcut(QKeySequence(Qt.Key.Key_F4), self)
-        sc_f4.activated.connect(self.f4)
         sc_f12 = QShortcut(QKeySequence(Qt.Key.Key_F12), self)
         sc_f12.activated.connect(self.quit_app)
 
@@ -253,6 +307,18 @@ class MainWindow(QMainWindow):
         self.ui.leFileName.setText(fname)  # Update UI field with filename
         self.file = open(fname, 'a')  # Open file in append mode
 
+    def apply_soc_defaults(self):
+        """
+        Standard Operating Conditions (see CHANGELOG.md) \u2014 10.0 kHz / 20.0 us
+        pulse / 10.0 us delay / 256 decimation. Sets slider/button state only;
+        the '*' command goes out the normal way when Start is pressed.
+        """
+        self.ui.slFreq.setValue(100)    # 10.0 kHz
+        self.ui.slPulse.setValue(200)   # 20.0 us
+        self.ui.slSample.setValue(100)  # 10.0 us
+        self.ui.pbFactor.setText('256')
+        self.down_sample = 256
+
     def my_init(self):
         """
         Initialization routine run after the UI has loaded.
@@ -264,6 +330,7 @@ class MainWindow(QMainWindow):
         self.setup_file_logging()  # Call function to handle file creation
 
         self.create_chart()
+        self.apply_soc_defaults()
         self.connect_port()
         self.send_command('E')
 
@@ -290,7 +357,9 @@ class MainWindow(QMainWindow):
             self.setup_file_logging()  # Ensure a file is opened when starting
             self.send_command('S')
             self.change_parameters()
-            self.raw_poll_timer.start(250)  # poll raw-path average (A32) at 4 Hz
+            if self.pb_boxcar_mode.isChecked():
+                self.series_raw_mean.clear()
+                self.raw_poll_timer.start(250)
         else:
             self.ui.pbStart.setText('Stopped')
             self.ui.pbStart.setStyleSheet(self.MY_YELLOW)
@@ -302,8 +371,14 @@ class MainWindow(QMainWindow):
     def poll_raw_average(self):
         # Request a boxcar-averaged raw-path sample (Task 2 'A<x>' primitive,
         # returns a new 'R...' record - does not affect the legacy '*' telemetry).
+        # n tracks the current DS Factor (was a hardcoded A32) so the raw
+        # path's oversampling is comparable to the filtered path's decimation
+        # factor instead of differing by ~8-32x just from sample-count
+        # mismatch — that mismatch was the main reason the two std dev
+        # readouts looked so far apart. Firmware caps A<n> at 1000.
         if self.serial.isOpen():
-            self.serial.write(b'A32\n')
+            n = min(self.down_sample, 1000)
+            self.serial.write('A{0}\n'.format(n).encode())
 
     def v_div(self, direction):
         # Adjust vertical division scale via button group.
@@ -320,42 +395,6 @@ class MainWindow(QMainWindow):
         # Clamp the value between -7 and -2
         ix = max(-7, min(-2, ix))
         self.ui.TimeButtonGroup.button(ix).setChecked(True)
-
-    def f1(self):
-        # Preset configuration F1.
-        self.ui.slFreq.setValue(250)
-        self.ui.slPulse.setValue(100)
-        self.ui.slSample.setValue(76)
-        self.ui.pbFactor.setText('1024')
-        self.down_sample = 1024
-        self.change_parameters()
-
-    def f2(self):
-        # Preset configuration F2.
-        self.ui.slFreq.setValue(96)
-        self.ui.slPulse.setValue(200)
-        self.ui.slSample.setValue(80)
-        self.ui.pbFactor.setText('256')
-        self.down_sample = 256
-        self.change_parameters()
-
-    def f3(self):
-        # Preset configuration F3.
-        self.ui.slFreq.setValue(61)
-        self.ui.slPulse.setValue(300)
-        self.ui.slSample.setValue(83)
-        self.ui.pbFactor.setText('256')
-        self.down_sample = 256
-        self.change_parameters()
-
-    def f4(self):
-        # Preset configuration F4.
-        self.ui.slFreq.setValue(49)
-        self.ui.slPulse.setValue(400)
-        self.ui.slSample.setValue(85)
-        self.ui.pbFactor.setText('256')
-        self.down_sample = 256
-        self.change_parameters()
 
     def change_parameters(self):
         # Read the current slider values, update parameters, and send the configuration command via serial.
@@ -374,7 +413,10 @@ class MainWindow(QMainWindow):
         # Open (if flag is True) or close the serial port.
         # Returns True if successful.
         if flag:
-            self.serial.setPortName('ttyACM0')  # Adjust for your platform (e.g., 'COM4' on Windows)
+            port = self.le_port.text()
+            if port.startswith('/dev/'):
+                port = port[5:]
+            self.serial.setPortName(port)
             self.serial.setBaudRate(115200)
             self.serial.setDataBits(QSerialPort.DataBits.Data8)
             self.serial.setParity(QSerialPort.Parity.NoParity)
@@ -444,11 +486,6 @@ class MainWindow(QMainWindow):
             
             self.update_uv_chart(p_timestamp, p_voltage)
 
-            # Update the voltage buffer for stddev calculation
-            self.voltage_buffer.append((p_timestamp/1000, p_voltage))
-            if len(self.voltage_buffer) > NUMBER_STDDEV_POINTS:
-                self.voltage_buffer.pop(0)
-            
             # Update the raw voltage buffer for slope calculation
             self.voltage_ts_buffer.append((p_timestamp/1000, p_voltage))
             if len(self.voltage_ts_buffer) > SLOPE_COUNT:
@@ -458,14 +495,30 @@ class MainWindow(QMainWindow):
             self.update_stddev_chart(p_timestamp)
 
         elif line.startswith('R'):
-            # Raw-path boxcar-average record: R<time_ms>,<value_uV>,<stddev_uV>,<x>,<freq_kHz>,<pulse_us>,<delay_us>
+            # Raw-path boxcar-average record:
+            # R<time_ms>,<value_uV>,<stddev_uV>,<x>,<freq_kHz>,<pulse_us>,<delay_us>,<min_uV>,<max_uV>
+            # min_uV/max_uV (firmware v4.15+) — sample extremes within the
+            # boxcar window; diagnostic for outlier samples hiding inside the
+            # mean/std (see CHANGELOG.md). Parsed defensively in case an older
+            # firmware without these trailing fields is connected.
             parts = line[1:].split(',')
             try:
+                r_timestamp = int(parts[0])
                 self.raw_value_uV = int(parts[1])
                 self.raw_stddev_uV = int(parts[2])
                 self.raw_x = int(parts[3])
             except Exception as e:
                 print('Raw packet parsing error:', e)
+                return
+
+            if self.show_raw_mean:
+                self.series_raw_mean.append(QPointF(r_timestamp / 1000, self.raw_value_uV / 1000))
+                x_min = self.axis_x.min()
+                n = 0
+                while n < self.series_raw_mean.count() and self.series_raw_mean.at(n).x() < x_min:
+                    n += 1
+                if n > 0:
+                    self.series_raw_mean.removePoints(0, n)
 
         elif line.startswith('W'):
             return  # Mode 2 stream record — silently ignore in Mode 1 GUI
@@ -483,12 +536,24 @@ class MainWindow(QMainWindow):
         self.series_v.setPen(pen)
         self.chart.addSeries(self.series_v)
 
+        # Raw boxcar-average mean series (orange) — toggled via "Raw Avg"
+        # button (v4.03); shares the voltage axes with series_v.
+        self.series_raw_mean = QLineSeries()
+        pen_raw_mean = QPen(QColor('orange'))
+        pen_raw_mean.setWidth(1)
+        self.series_raw_mean.setPen(pen_raw_mean)
+        self.chart.addSeries(self.series_raw_mean)
+
+        _no_pen = QPen(QColor(0, 0, 0, 0))  # fully transparent — suppresses theme-overridden grid lines
+
         # X axis (timestamp, not visible)
         self.axis_x = QValueAxis()
         self.axis_x.setTickCount(7)
         self.axis_x.setVisible(False)
         self.chart.addAxis(self.axis_x, Qt.AlignmentFlag.AlignTop)
         self.series_v.attachAxis(self.axis_x)
+        self.series_raw_mean.attachAxis(self.axis_x)
+        self.axis_x.setGridLinePen(_no_pen)
 
         # Y axis (voltage, not visible)
         self.axis_y = QValueAxis()
@@ -496,6 +561,8 @@ class MainWindow(QMainWindow):
         self.axis_y.setVisible(False)
         self.chart.addAxis(self.axis_y, Qt.AlignmentFlag.AlignLeft)
         self.series_v.attachAxis(self.axis_y)
+        self.series_raw_mean.attachAxis(self.axis_y)
+        self.axis_y.setGridLinePen(_no_pen)
 
         # T axis for relative time (visible)
         self.axis_t = QValueAxis()
@@ -508,34 +575,8 @@ class MainWindow(QMainWindow):
         self.axis_z.setTickCount(11)
         self.axis_z.setRange(0, 5)
         self.chart.addAxis(self.axis_z, Qt.AlignmentFlag.AlignRight)
-        self.axis_z.setGridLineColor(QColor("blue"))
+        self.axis_z.setGridLineColor(QColor("#cccccc"))  # preserves cosmetic (width=0) theme pen
         self.axis_z.setLabelsColor(QColor("blue"))
-
-        # Create the stddev series (red)
-        self.series_stddev = QLineSeries()
-        pen_stddev = QPen(QColor('red'))
-        pen_stddev.setWidth(1)
-        self.series_stddev.setPen(pen_stddev)
-        self.chart.addSeries(self.series_stddev)
-
-        # Create a separate axis for stddev (displayed on the right)
-        self.axis_stddev = QValueAxis()
-        self.axis_stddev.setTickCount(11)
-        self.axis_stddev.setRange(0, STDDEV_MAX_SCALE)  # Fixed range: 0 to 1000 µV
-        self.chart.addAxis(self.axis_stddev, Qt.AlignmentFlag.AlignRight)
-        self.series_stddev.attachAxis(self.axis_stddev)
-        self.series_stddev.attachAxis(self.axis_x)
-        #self.axis_stddev.setGridLineColor(QColor("red"))
-        self.axis_stddev.setLabelsColor(QColor("red"))
-        
-        # Create the rolling average slope series (green) over SLOPE_COUNT points ## MM:
-        self.series_stddev_slope = QLineSeries()
-        pen_slope = QPen(QColor('green'))
-        pen_slope.setWidth(1)
-        self.series_stddev_slope.setPen(pen_slope)
-        self.chart.addSeries(self.series_stddev_slope)
-        self.series_stddev_slope.attachAxis(self.axis_stddev)
-        self.series_stddev_slope.attachAxis(self.axis_x)
 
         self.ui.ChartView1.setChart(self.chart)
         self.ui.ChartView1.show()
@@ -545,13 +586,20 @@ class MainWindow(QMainWindow):
         # timestamp: integer (ms), voltage: integer (µV)
         # Append new point (convert timestamp to seconds and voltage to mV)
         self.series_v.append(QPointF(timestamp / 1000, voltage / 1000))
-        if self.series_v.count() > 5000:
-            self.series_v.removePoints(0, 100)
 
         # Update X axis (time)
         last_timestamp = self.series_v.at(self.series_v.count() - 1).x()
         self.axis_x.setMax(last_timestamp)
         self.axis_x.setMin(self.axis_x.max() - self.h_scale)
+
+        # Trim series to visible window — prevents off-screen points creating
+        # diagonal polyline artifacts when the warmup spike scrolls off-screen
+        x_min = self.axis_x.min()
+        n = 0
+        while n < self.series_v.count() and self.series_v.at(n).x() < x_min:
+            n += 1
+        if n > 0:
+            self.series_v.removePoints(0, n)
 
         # Update Y axis (voltage) if needed
         last_voltage = self.series_v.at(self.series_v.count() - 1).y()
@@ -569,20 +617,6 @@ class MainWindow(QMainWindow):
             self.axis_y.setRange(self.cur_min, self.cur_max)
 
     def update_stddev_chart(self, timestamp):
-        # Compute the standard deviation from the voltage_buffer (values in µV)
-        if len(self.voltage_buffer) < 2:
-            computed_stddev = 0
-        else:
-            values = [v for (t, v) in self.voltage_buffer]  # extract voltage values from tuples
-            mean_val = sum(values) / len(values)
-            variance = sum((x - mean_val) ** 2 for x in values) / len(values)
-            computed_stddev = math.sqrt(variance)
-        # Append the computed stddev (in µV) to the stddev series
-        #MM self.series_stddev.append(QPointF(timestamp / 1000, computed_stddev))
-        #if self.series_stddev.count() > 5000:
-        #    self.series_stddev.removePoints(0, 1)
-        # The stddev axis range remains fixed at 0 to STDDEV_MAX_SCALE
-
         # Compute rolling slope from raw voltage using SLOPE_COUNT points from voltage_ts_buffer
         slope = 0
         if len(self.voltage_ts_buffer) >= SLOPE_COUNT:
@@ -592,9 +626,6 @@ class MainWindow(QMainWindow):
                 slope = (last_voltage - first_voltage) / (last_time - first_time)
             else:
                 slope = 0
-            #MM self.series_stddev_slope.append(QPointF(timestamp / 1000, abs(slope)))
-            #if self.series_stddev_slope.count() > 5000:
-            #    self.series_stddev_slope.removePoints(0, 1)
         # Update the status bar to include computed stddev and slope
 
         if self.update_delay > 0:
@@ -605,15 +636,20 @@ class MainWindow(QMainWindow):
             SPS = 0
 
         if self.raw_value_uV is not None:
+            # "(N=...)" is the raw-path boxcar sample count (the A<n> argument
+            # echoed back by firmware) — i.e. how many undecimated SDOB
+            # samples this sd figure was averaged over. Was unlabelled "(x32)".
+            # "range" is the min/max sample spread within that same boxcar
+            # window (firmware v4.15+) — a wide spread with only a modest sd
+            # points at a few outlier samples rather than uniform noise.
             raw_status = (f"Raw avg: {self.raw_value_uV:>9,d} uV, "
-                           f"sd: {self.raw_stddev_uV:>6,d} uV (x{self.raw_x}) | ")
+                           f"sd: {self.raw_stddev_uV:>6,d} uV (N={self.raw_x}) | ")
         else:
             raw_status = "Raw avg: -- | "
 
         self.ui.statusBar.showMessage(
                 f"Last command: {self.last_command:<20} | "
                 f"Incoming packet: {self.last_packet:<60} | "
-                f"std dev: {computed_stddev:>6.0f} uV | "
                 f"{raw_status}"
                 f"Rx freq: {freq:>4.1f} kHz | "
                 f"SPS: {SPS:>4.1f} "
@@ -644,12 +680,30 @@ class MainWindow(QMainWindow):
         # Reset the chart vertical scaling.
         self.update_vert_scale = True
 
+    def _on_toggle_raw_mean(self, checked):
+        # Show/hide the raw boxcar-average mean trace (orange), overlaid on
+        # the same voltage axis as the filtered-path blue trace.
+        self.show_raw_mean = checked
+        self.pb_show_raw_mean.setText('Raw Avg: ON' if checked else 'Raw Avg: OFF')
+        self.pb_show_raw_mean.setStyleSheet(self.MY_GREEN if checked else self.MY_YELLOW)
+        if not checked:
+            self.series_raw_mean.clear()
+
+    def _on_toggle_boxcar_mode(self, checked):
+        self.pb_boxcar_mode.setText('Boxcar: ON' if checked else 'Boxcar: OFF')
+        self.pb_boxcar_mode.setStyleSheet(self.MY_GREEN if checked else self.MY_YELLOW)
+        if checked:
+            if self.ui.pbStart.text() == 'Running':
+                self.series_raw_mean.clear()
+                self.raw_poll_timer.start(250)
+        else:
+            self.raw_poll_timer.stop()
+            self.series_raw_mean.clear()
+
     def clear_chart(self):
         # Clear the chart data.
         self.series_v.clear()
-        self.series_stddev.clear()
-        self.series_stddev_slope.clear()  ## MM: clear the slope series as well
-        self.voltage_buffer.clear()
+        self.series_raw_mean.clear()
         self.voltage_ts_buffer.clear()
 
     def send_command(self, text):

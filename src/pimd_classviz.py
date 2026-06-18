@@ -1,23 +1,33 @@
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) — Mode 2 profile 4 (CLASSIFY_EP)
+# PIMD Signature Visualiser (ClassViz) — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
-# Connects to the board, sends Q4/G to start Mode 2 streaming, and displays
-# a 5×9 heatmap of signed cell deviations from a captured air baseline.
-# Includes a labelled-data logger for ML training data capture.
+# Connects to the board, sends Q4/G to start Mode 2 streaming with the default
+# CLASSIFY_EP profile, and displays a heatmap of signed cell deviations from a
+# captured air baseline. Includes a labelled-data logger for ML training data
+# capture, and a Profile Builder tab to edit/save/load band/pulse/delay profiles
+# and send them to the board as a RAM-only "dynamic" profile (firmware D command)
+# without reflashing — the heatmap/stats table/single-cell selectors resize to
+# match whatever profile (static or dynamic) is active.
 #
-# Protocol: receives W4,<time_ms>,<ch0>,...,<ch44>
-# Board firmware: pimd_mcu.py v4.04+
+# Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
+# Board firmware: pimd_mcu.py v4.07+
 #
 # v1.00 initial version: heatmap + baseline + labelled CSV logger + 3D surface
 # v1.01 add Stats tab (per-cell value/mean/std, mV) + single-cell isolation mode
 # v1.02 Resume Sweep now auto-sends G — sweep restarts immediately without extra click
 # v1.03 Stats tab: Save table as CSV button (saves whatever is currently displayed)
+# v1.04 profile dimensions (N_BANDS/N_CELLS/BANDS_META/etc) moved from module
+#       constants to instance state set by _apply_profile(); added Profile
+#       Builder tab to edit/save/load profiles and send them to the board's new
+#       D command (RAM-only dynamic profile, Q<DYNAMIC_PROFILE_INDEX>); default
+#       Q4-on-connect behaviour unchanged
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false
 # pyright: reportAttributeAccessIssue=false
 
+import json
 import os
 import sys
 import time
@@ -32,9 +42,9 @@ from PyQt6.QtCore import QIODevice, QTimer, Qt  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QPushButton, QSpinBox, QStackedWidget, QTabWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMainWindow, QPushButton, QSpinBox, QStackedWidget, QTabWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 import pyqtgraph as pg  # noqa: E402
@@ -45,37 +55,56 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.03'
+APP_VERSION = '1.04'
 
-N_BANDS    = 5
-N_CELLS    = 9
-N_CHANNELS = N_BANDS * N_CELLS   # 45
-PROFILE_IDX = 4
 REDRAW_MS   = 33    # ~30 Hz
+
+DEFAULT_PROFILE_IDX   = 4   # static CLASSIFY_EP — sent automatically on connect
+DYNAMIC_PROFILE_INDEX = 5   # must match firmware's NUM_PROFILES (pimd_mcu.py v4.07+)
 
 CAPTURE_FRAMES_DEFAULT = 64
 ROLLING_SECS_DEFAULT   = 3.0
 DEFAULT_PORT = '/dev/ttyACM0'
 
-# Threshold voltages: cell j ↔ (4.5 − 0.5·j) V
-THRESHOLDS_V = tuple(4.5 - 0.5 * j for j in range(N_CELLS))
+PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
 
-# Band metadata — matches pimd_mcu.py PROFILES[4] exactly.
-# Each entry: (freq_hz, pulse_us, delays_us × 9)
-BANDS_META = (
-    (10601, 40.0, ( 8.56,  8.98,  9.37,  9.72, 10.08, 10.49, 10.96, 11.57, 12.53)),
-    (17599, 30.0, ( 8.12,  8.54,  8.92,  9.27,  9.63, 10.02, 10.50, 11.10, 12.03)),
-    (29201, 20.0, ( 7.62,  8.03,  8.40,  8.75,  9.11,  9.50,  9.96, 10.55, 11.46)),
-    (43003, 10.0, ( 6.80,  7.22,  7.58,  7.93,  8.28,  8.66,  9.11,  9.70, 10.57)),
-    (56992,  5.0, ( 6.03,  6.43,  6.78,  7.12,  7.46,  7.84,  8.28,  8.85,  9.71)),
-)
 
-BAND_LABELS = ['{0:.0f}µs/{1:.1f}kHz'.format(b[1], b[0] / 1000) for b in BANDS_META]
-CELL_LABELS = ['{0:.1f}V'.format(v) for v in THRESHOLDS_V]
+def _default_profile():
+    """Baseline CLASSIFY_EP profile — matches pimd_mcu.py PROFILES[4] exactly."""
+    band_data = (
+        (10601, 40.0, ( 8.56,  8.98,  9.37,  9.72, 10.08, 10.49, 10.96, 11.57, 12.53)),
+        (17599, 30.0, ( 8.12,  8.54,  8.92,  9.27,  9.63, 10.02, 10.50, 11.10, 12.03)),
+        (29201, 20.0, ( 7.62,  8.03,  8.40,  8.75,  9.11,  9.50,  9.96, 10.55, 11.46)),
+        (43003, 10.0, ( 6.80,  7.22,  7.58,  7.93,  8.28,  8.66,  9.11,  9.70, 10.57)),
+        (56992,  5.0, ( 6.03,  6.43,  6.78,  7.12,  7.46,  7.84,  8.28,  8.85,  9.71)),
+    )
+    threshold_v = [4.5 - 0.5 * j for j in range(9)]
+    return {
+        'name': 'CLASSIFY_EP',
+        'averages': 32,
+        'bands': [
+            {'freq_hz': f, 'pulse_us': p, 'delays_us': list(d), 'threshold_v': threshold_v}
+            for f, p, d in band_data
+        ],
+    }
 
-# Nominal baseline in µV: threshold_V × 1e6, uniform across all bands.
-NOMINAL_BASELINE_UV = np.array(
-    [[t * 1_000_000 for t in THRESHOLDS_V] for _ in range(N_BANDS)], dtype=float)
+
+def _list_profile_files():
+    if not os.path.isdir(PROFILES_DIR):
+        return []
+    return sorted(f[:-5] for f in os.listdir(PROFILES_DIR) if f.endswith('.json'))
+
+
+def _load_profile_file(name):
+    with open(os.path.join(PROFILES_DIR, name + '.json')) as f:
+        return json.load(f)
+
+
+def _save_profile_file(name, profile):
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    with open(os.path.join(PROFILES_DIR, name + '.json'), 'w') as f:
+        json.dump(profile, f, indent=2)
+
 
 pg.setConfigOptions(background='w', foreground='k', antialias=True)
 
@@ -93,25 +122,6 @@ def _csv_default_path():
     return os.path.join(data_dir, 'signatures_{0}.csv'.format(date.today().strftime('%Y%m%d')))
 
 
-def _write_csv_header(path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    d_cols = ','.join('d{0:02d}'.format(i) for i in range(N_CHANNELS))
-    r_cols = ','.join('r{0:02d}'.format(i) for i in range(N_CHANNELS))
-    b_cols = ','.join('b{0:02d}'.format(i) for i in range(N_CHANNELS))
-    with open(path, 'w') as f:
-        f.write('# PIMD ClassViz labelled-data log — profile 4 (CLASSIFY_EP),'
-                ' generated by pimd_classviz.py v{0}\n'.format(APP_VERSION))
-        f.write('# Columns: timestamp, label, baseline_mode,\n')
-        f.write('#   d00..d44 = signed deviation µV (band-major: index=band*9+cell),\n')
-        f.write('#   r00..r44 = raw absolute µV,\n')
-        f.write('#   b00..b44 = baseline mean µV used for delta\n')
-        f.write('# Band order: 0=40µs/10.6kHz  1=30µs/17.6kHz  2=20µs/29.2kHz'
-                '  3=10µs/43.0kHz  4=5µs/57.0kHz\n')
-        f.write('# Cell j: threshold (4.5-0.5*j) V;'
-                ' delays differ per band (see BANDS_META in source)\n')
-        f.write('timestamp,label,baseline_mode,{0},{1},{2}\n'.format(d_cols, r_cols, b_cols))
-
-
 class MainWindow(QMainWindow):
     MY_GREEN  = 'background-color: rgb(143, 240, 164);'
     MY_YELLOW = 'background-color: rgb(249, 240, 107);'
@@ -127,10 +137,15 @@ class MainWindow(QMainWindow):
         self._last_cmd    = ''
         self._last_packet = ''
 
+        # Profile dimensions (n_bands, n_cells, labels, etc) — instance state so
+        # the heatmap/stats table/single-cell selectors can resize at runtime
+        # when a dynamic profile is sent from the Profile Builder tab.
+        self._set_profile_dims(_default_profile(), DEFAULT_PROFILE_IDX)
+
         # Data state — sweep
-        self._latest_raw: 'np.ndarray | None' = None   # shape (45,)
-        self._baseline_mean: 'np.ndarray | None' = None  # shape (5, 9)
-        self._baseline_std:  'np.ndarray | None' = None  # shape (5, 9)
+        self._latest_raw: 'np.ndarray | None' = None   # shape (n_channels,)
+        self._baseline_mean: 'np.ndarray | None' = None  # shape (n_bands, n_cells)
+        self._baseline_std:  'np.ndarray | None' = None  # shape (n_bands, n_cells)
         self._baseline_mode = 'static'   # 'static' | 'rolling' | 'nominal'
         self._baseline_age: 'float | None' = None
         self._capture_buf: list = []
@@ -162,6 +177,61 @@ class MainWindow(QMainWindow):
         self._redraw_timer.setInterval(REDRAW_MS)
         self._redraw_timer.timeout.connect(self._redraw)
         self._redraw_timer.start()
+
+    # ------------------------------------------------------------------
+    # Profile dimensions
+    # ------------------------------------------------------------------
+    def _set_profile_dims(self, profile, profile_idx):
+        """Pure data update — sets self._n_bands/_n_cells/_band_labels/etc from
+        `profile` (dict: name, averages, bands=[{freq_hz,pulse_us,delays_us,
+        threshold_v(optional)}, ...], all bands sharing the same delay count).
+        Does not touch any UI widgets — see _apply_profile() for that."""
+        bands = profile['bands']
+        n_bands = len(bands)
+        n_cells = len(bands[0]['delays_us'])
+        self._profile           = profile
+        self._active_profile_idx = profile_idx
+        self._n_bands    = n_bands
+        self._n_cells    = n_cells
+        self._n_channels = n_bands * n_cells
+        # Keep the (freq_hz, pulse_us, delays_us_tuple) shape used throughout
+        # the rest of the file (was the module-level BANDS_META tuple).
+        self._bands_meta = [(b['freq_hz'], b['pulse_us'], tuple(b['delays_us']))
+                             for b in bands]
+        self._band_labels = ['{0:.0f}µs/{1:.1f}kHz'.format(b['pulse_us'], b['freq_hz'] / 1000)
+                              for b in bands]
+        self._has_threshold_v = all(
+            'threshold_v' in b and len(b['threshold_v']) == n_cells for b in bands)
+        if self._has_threshold_v:
+            self._cell_labels = ['{0:.1f}V'.format(v) for v in bands[0]['threshold_v']]
+            self._nominal_baseline_uv = np.array(
+                [[v * 1_000_000 for v in b['threshold_v']] for b in bands], dtype=float)
+        else:
+            self._cell_labels = ['d{0}'.format(j) for j in range(n_cells)]
+            self._nominal_baseline_uv = np.zeros((n_bands, n_cells))
+
+    def _apply_profile(self, profile, profile_idx):
+        """Switch the active profile at runtime: updates dimensions, clears any
+        old-shape buffered data, and resizes the heatmap/3D surface/stats table/
+        single-cell selectors to match. Called once for the default profile (via
+        _set_profile_dims directly, before _build_ui) and again whenever a
+        dynamic profile is sent from the Profile Builder tab."""
+        self._set_profile_dims(profile, profile_idx)
+
+        # Old-shape data must not survive a dimension change.
+        self._rolling_buf.clear()
+        self._baseline_mean = None
+        self._baseline_std  = None
+        self._baseline_age  = None
+        self._latest_raw     = None
+        self._frame_count    = 0
+
+        self._rebuild_heatmap_axes()
+        self._rebuild_3d_surface()
+        self._rebuild_stats_table()
+        self._rebuild_single_cell_combos()
+        self.header_label.setText('Profile {0} — {1} ({2} bands × {3} cells)'.format(
+            profile_idx, profile.get('name', '?'), self._n_bands, self._n_cells))
 
     # ------------------------------------------------------------------
     # Colormaps
@@ -209,7 +279,9 @@ class MainWindow(QMainWindow):
         self.pb_start.clicked.connect(self.start_stop)
         row1.addWidget(self.pb_start)
 
-        self.header_label = QLabel('Profile 4 — CLASSIFY_EP (5 bands × 9 cells)')
+        self.header_label = QLabel('Profile {0} — {1} ({2} bands × {3} cells)'.format(
+            self._active_profile_idx, self._profile.get('name', '?'),
+            self._n_bands, self._n_cells))
         row1.addWidget(self.header_label, stretch=1)
         layout.addLayout(row1)
 
@@ -217,6 +289,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
         self.tabs.addTab(self._build_stats_tab(),   'Stats && Isolation')
+        self.tabs.addTab(self._build_profile_tab(), 'Profile Builder')
         layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
@@ -355,19 +428,22 @@ class MainWindow(QMainWindow):
         self.img.setColorMap(self.cm_div)
         self.plot.addItem(self.img)
 
-        ax_b = self.plot.getAxis('bottom')
-        ax_b.setTicks([[(j + 0.5, CELL_LABELS[j]) for j in range(N_CELLS)]])
-        ax_b.setLabel('Threshold')
-
-        ax_l = self.plot.getAxis('left')
-        ax_l.setTicks([[(b + 0.5, BAND_LABELS[b]) for b in range(N_BANDS)]])
-        ax_l.setLabel('Band')
-
-        self.plot.setXRange(0, N_CELLS, padding=0)
-        self.plot.setYRange(0, N_BANDS, padding=0)
+        self._rebuild_heatmap_axes()
 
         self.plot.scene().sigMouseMoved.connect(self._on_mouse_move)
         return self.gw
+
+    def _rebuild_heatmap_axes(self):
+        ax_b = self.plot.getAxis('bottom')
+        ax_b.setTicks([[(j + 0.5, self._cell_labels[j]) for j in range(self._n_cells)]])
+        ax_b.setLabel('Threshold' if self._has_threshold_v else 'Cell')
+
+        ax_l = self.plot.getAxis('left')
+        ax_l.setTicks([[(b + 0.5, self._band_labels[b]) for b in range(self._n_bands)]])
+        ax_l.setLabel('Band')
+
+        self.plot.setXRange(0, self._n_cells, padding=0)
+        self.plot.setYRange(0, self._n_bands, padding=0)
 
     def _build_3d_widget(self):
         if not _GL_AVAILABLE:
@@ -380,13 +456,21 @@ class MainWindow(QMainWindow):
         self.gl_widget = gl.GLViewWidget()
         self.gl_widget.setCameraPosition(distance=15, elevation=30, azimuth=45)
         self._surface = gl.GLSurfacePlotItem(
-            x=np.arange(N_CELLS, dtype=float),
-            y=np.arange(N_BANDS, dtype=float),
-            z=np.zeros((N_CELLS, N_BANDS)),
+            x=np.arange(self._n_cells, dtype=float),
+            y=np.arange(self._n_bands, dtype=float),
+            z=np.zeros((self._n_cells, self._n_bands)),
             smooth=False,
         )
         self.gl_widget.addItem(self._surface)
         return self.gl_widget
+
+    def _rebuild_3d_surface(self):
+        if not _GL_AVAILABLE or not hasattr(self, '_surface'):
+            return
+        self._surface.setData(
+            x=np.arange(self._n_cells, dtype=float),
+            y=np.arange(self._n_bands, dtype=float),
+            z=np.zeros((self._n_cells, self._n_bands)))
 
     # ------------------------------------------------------------------
     # Tab 1 — Stats & Isolation
@@ -420,27 +504,13 @@ class MainWindow(QMainWindow):
         layout.addLayout(ctrl)
 
         # Stats table: Band | Threshold | Delay µs | Latest mV | Mean mV | Std mV
-        self.tbl_stats = QTableWidget(N_CHANNELS, 6)
+        self.tbl_stats = QTableWidget(self._n_channels, 6)
         self.tbl_stats.setHorizontalHeaderLabels(
             ['Band', 'Threshold', 'Delay (µs)', 'Latest (mV)', 'Mean (mV)', 'Std (mV)'])
         self.tbl_stats.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_stats.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_stats.setAlternatingRowColors(True)
-
-        for b in range(N_BANDS):
-            freq_hz, pulse_us, delays = BANDS_META[b]
-            for c in range(N_CELLS):
-                row = b * N_CELLS + c
-                for col, text in enumerate([BAND_LABELS[b],
-                                            CELL_LABELS[c],
-                                            '{0:.2f}'.format(delays[c])]):
-                    item = QTableWidgetItem(text)
-                    item.setTextAlignment(_C)
-                    self.tbl_stats.setItem(row, col, item)
-                for col in range(3, 6):
-                    item = QTableWidgetItem('—')
-                    item.setTextAlignment(_R)
-                    self.tbl_stats.setItem(row, col, item)
+        self._rebuild_stats_table()
 
         layout.addWidget(self.tbl_stats, stretch=1)
 
@@ -452,8 +522,6 @@ class MainWindow(QMainWindow):
         sc_row1 = QHBoxLayout()
         sc_row1.addWidget(QLabel('Band:'))
         self.cb_sc_band = QComboBox()
-        for label in BAND_LABELS:
-            self.cb_sc_band.addItem(label)
         self.cb_sc_band.currentIndexChanged.connect(self._on_sc_band_changed)
         sc_row1.addWidget(self.cb_sc_band)
 
@@ -499,9 +567,277 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(grp)
 
-        # Populate cell combo for band 0
-        self._on_sc_band_changed(0)
+        # Populate band/cell combos for the current profile
+        self._rebuild_single_cell_combos()
         return w
+
+    def _rebuild_stats_table(self):
+        self.tbl_stats.setRowCount(self._n_channels)
+        for b in range(self._n_bands):
+            freq_hz, pulse_us, delays = self._bands_meta[b]
+            for c in range(self._n_cells):
+                row = b * self._n_cells + c
+                for col, text in enumerate([self._band_labels[b],
+                                            self._cell_labels[c],
+                                            '{0:.2f}'.format(delays[c])]):
+                    item = QTableWidgetItem(text)
+                    item.setTextAlignment(_C)
+                    self.tbl_stats.setItem(row, col, item)
+                for col in range(3, 6):
+                    item = QTableWidgetItem('—')
+                    item.setTextAlignment(_R)
+                    self.tbl_stats.setItem(row, col, item)
+
+    def _rebuild_single_cell_combos(self):
+        self.cb_sc_band.blockSignals(True)
+        self.cb_sc_band.clear()
+        for label in self._band_labels:
+            self.cb_sc_band.addItem(label)
+        self.cb_sc_band.blockSignals(False)
+        self._on_sc_band_changed(0)
+
+    # ------------------------------------------------------------------
+    # Tab 2 — Profile Builder
+    # ------------------------------------------------------------------
+    def _build_profile_tab(self):
+        w      = QWidget()
+        layout = QVBoxLayout(w)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel('Saved profile:'))
+        self.cb_profile_file = QComboBox()
+        self._refresh_profile_file_list()
+        row1.addWidget(self.cb_profile_file, stretch=1)
+        pb_load = QPushButton('Load')
+        pb_load.clicked.connect(self._on_load_profile_file)
+        row1.addWidget(pb_load)
+        pb_save = QPushButton('Save')
+        pb_save.clicked.connect(self._on_save_profile_file)
+        row1.addWidget(pb_save)
+        pb_save_as = QPushButton('Save As…')
+        pb_save_as.clicked.connect(self._on_save_profile_file_as)
+        row1.addWidget(pb_save_as)
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel('Name:'))
+        self.le_profile_name = QLineEdit()
+        row2.addWidget(self.le_profile_name, stretch=1)
+        row2.addWidget(QLabel('Averages:'))
+        self.sp_profile_avg = QSpinBox()
+        self.sp_profile_avg.setRange(1, 256)
+        self.sp_profile_avg.setValue(32)
+        row2.addWidget(self.sp_profile_avg)
+        layout.addLayout(row2)
+
+        self.tbl_profile_bands = QTableWidget(0, 4)
+        self.tbl_profile_bands.setHorizontalHeaderLabels(
+            ['Freq (Hz)', 'Pulse (µs)', 'Delays (µs, comma-sep)',
+             'Threshold V (optional, comma-sep)'])
+        self.tbl_profile_bands.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.tbl_profile_bands, stretch=1)
+
+        row3 = QHBoxLayout()
+        pb_add_band = QPushButton('Add Band')
+        pb_add_band.clicked.connect(self._on_add_band_row)
+        row3.addWidget(pb_add_band)
+        pb_remove_band = QPushButton('Remove Band')
+        pb_remove_band.clicked.connect(self._on_remove_band_row)
+        row3.addWidget(pb_remove_band)
+        row3.addStretch(1)
+        layout.addLayout(row3)
+
+        self.lbl_profile_validation = QLabel('')
+        layout.addWidget(self.lbl_profile_validation)
+
+        row_cmd = QHBoxLayout()
+        row_cmd.addWidget(QLabel('Command:'))
+        self.le_profile_command = QLineEdit()
+        self.le_profile_command.setReadOnly(True)
+        row_cmd.addWidget(self.le_profile_command, stretch=1)
+        layout.addLayout(row_cmd)
+
+        row4 = QHBoxLayout()
+        self.pb_send_run = QPushButton('Send && Run')
+        self.pb_send_run.setStyleSheet(self.MY_YELLOW)
+        self.pb_send_run.clicked.connect(self._on_send_run_profile)
+        row4.addWidget(self.pb_send_run)
+        row4.addStretch(1)
+        layout.addLayout(row4)
+
+        # Any edit re-validates and refreshes the command preview.
+        self.tbl_profile_bands.itemChanged.connect(self._on_profile_table_changed)
+        self.le_profile_name.textChanged.connect(self._on_profile_table_changed)
+        self.sp_profile_avg.valueChanged.connect(self._on_profile_table_changed)
+
+        # Seed the editor with the currently active profile (CLASSIFY_EP baseline
+        # on first launch).
+        self._populate_profile_editor(self._profile)
+        return w
+
+    def _refresh_profile_file_list(self):
+        self.cb_profile_file.clear()
+        for name in _list_profile_files():
+            self.cb_profile_file.addItem(name)
+
+    def _populate_profile_editor(self, profile):
+        self.le_profile_name.setText(profile.get('name', ''))
+        self.sp_profile_avg.setValue(profile.get('averages', 32))
+        bands = profile['bands']
+        self.tbl_profile_bands.blockSignals(True)
+        self.tbl_profile_bands.setRowCount(len(bands))
+        for r, b in enumerate(bands):
+            delays_str = ', '.join('{0:.2f}'.format(d) for d in b['delays_us'])
+            thresh_str = (', '.join('{0:.2f}'.format(v) for v in b['threshold_v'])
+                          if b.get('threshold_v') else '')
+            for col, text in enumerate(
+                    [str(b['freq_hz']), str(b['pulse_us']), delays_str, thresh_str]):
+                self.tbl_profile_bands.setItem(r, col, QTableWidgetItem(text))
+        self.tbl_profile_bands.blockSignals(False)
+        self._validate_profile_editor()
+
+    def _on_load_profile_file(self):
+        name = self.cb_profile_file.currentText()
+        if not name:
+            return
+        try:
+            profile = _load_profile_file(name)
+        except Exception as e:
+            self.statusBar().showMessage('Load failed: {0}'.format(e))
+            return
+        self._populate_profile_editor(profile)
+        self.statusBar().showMessage('Loaded profile: {0}'.format(name))
+
+    def _on_save_profile_file(self):
+        name = self.le_profile_name.text().strip()
+        if not name:
+            self.statusBar().showMessage('Enter a profile name before saving')
+            return
+        self._save_current_editor_as(name)
+
+    def _on_save_profile_file_as(self):
+        name, ok = QInputDialog.getText(self, 'Save Profile As', 'Profile name:')
+        if not ok or not name.strip():
+            return
+        self.le_profile_name.setText(name.strip())
+        self._save_current_editor_as(name.strip())
+
+    def _save_current_editor_as(self, name):
+        profile = self._validate_profile_editor()
+        if profile is None:
+            self.statusBar().showMessage('Cannot save: profile has validation errors')
+            return
+        profile['name'] = name
+        _save_profile_file(name, profile)
+        self._refresh_profile_file_list()
+        idx = self.cb_profile_file.findText(name)
+        if idx >= 0:
+            self.cb_profile_file.setCurrentIndex(idx)
+        self.statusBar().showMessage('Saved profile: {0}'.format(name))
+
+    def _on_add_band_row(self):
+        r = self.tbl_profile_bands.rowCount()
+        self.tbl_profile_bands.insertRow(r)
+        for col, text in enumerate(['10000', '10.0', '', '']):
+            self.tbl_profile_bands.setItem(r, col, QTableWidgetItem(text))
+
+    def _on_remove_band_row(self):
+        r = self.tbl_profile_bands.currentRow()
+        if r >= 0:
+            self.tbl_profile_bands.removeRow(r)
+        self._validate_profile_editor()
+
+    def _on_profile_table_changed(self, *_args):
+        self._validate_profile_editor()
+
+    def _read_profile_from_editor(self):
+        """Parse the band table into a profile dict. Returns (profile, error_str)."""
+        rows = self.tbl_profile_bands.rowCount()
+        if rows == 0:
+            return None, 'no bands defined'
+        bands = []
+        n_delays = None
+        for r in range(rows):
+            freq_item   = self.tbl_profile_bands.item(r, 0)
+            pulse_item  = self.tbl_profile_bands.item(r, 1)
+            delays_item = self.tbl_profile_bands.item(r, 2)
+            thresh_item = self.tbl_profile_bands.item(r, 3)
+            try:
+                freq_hz   = int(float(freq_item.text()))
+                pulse_us  = float(pulse_item.text())
+                delays_us = [float(x) for x in delays_item.text().split(',') if x.strip()]
+            except (ValueError, AttributeError):
+                return None, 'band {0}: invalid freq/pulse/delays'.format(r)
+            if not delays_us:
+                return None, 'band {0}: no delays'.format(r)
+            if n_delays is None:
+                n_delays = len(delays_us)
+            elif len(delays_us) != n_delays:
+                return None, ('band {0} has {1} delays, expected {2} '
+                              '(rectangular only)').format(r, len(delays_us), n_delays)
+            band = {'freq_hz': freq_hz, 'pulse_us': pulse_us, 'delays_us': delays_us}
+            thresh_text = thresh_item.text().strip() if thresh_item else ''
+            if thresh_text:
+                try:
+                    thresh_v = [float(x) for x in thresh_text.split(',') if x.strip()]
+                except ValueError:
+                    return None, 'band {0}: invalid threshold list'.format(r)
+                if len(thresh_v) != n_delays:
+                    return None, 'band {0}: threshold count must match delay count'.format(r)
+                band['threshold_v'] = thresh_v
+            bands.append(band)
+        profile = {
+            'name': self.le_profile_name.text().strip() or 'DYNAMIC',
+            'averages': self.sp_profile_avg.value(),
+            'bands': bands,
+        }
+        return profile, None
+
+    def _validate_profile_editor(self):
+        profile, error = self._read_profile_from_editor()
+        if error:
+            self.lbl_profile_validation.setText('✗ {0}'.format(error))
+            self.lbl_profile_validation.setStyleSheet('color: red;')
+            self.le_profile_command.setText('')
+            self.pb_send_run.setEnabled(False)
+            return None
+        n_bands = len(profile['bands'])
+        n_cells = len(profile['bands'][0]['delays_us'])
+        self.lbl_profile_validation.setText('✓ {0} bands × {1} cells'.format(n_bands, n_cells))
+        self.lbl_profile_validation.setStyleSheet('color: green;')
+        self.le_profile_command.setText(self._build_d_command(profile))
+        self.pb_send_run.setEnabled(True)
+        return profile
+
+    def _build_d_command(self, profile):
+        parts = ['D{0}'.format(profile['averages'])]
+        for b in profile['bands']:
+            fields = [str(b['freq_hz']), str(b['pulse_us'])]
+            fields += ['{0:.3f}'.format(d) for d in b['delays_us']]
+            parts.append(','.join(fields))
+        return ';'.join(parts)
+
+    def _on_send_run_profile(self):
+        profile = self._validate_profile_editor()
+        if profile is None:
+            return
+        if not self.serial.isOpen():
+            self.statusBar().showMessage('Not connected')
+            return
+        cmd = self._build_d_command(profile)
+        self.send_command('E')
+        self.send_command(cmd)
+        self.send_command('Q{0}'.format(DYNAMIC_PROFILE_INDEX))
+        self.send_command('G')
+        self._apply_profile(profile, DYNAMIC_PROFILE_INDEX)
+        if self._mode == 'single_cell':
+            self._mode = 'sweep'
+        self.pb_start.setText('Running')
+        self.pb_start.setStyleSheet(self.MY_GREEN)
+        self._update_sc_button_states()
+        self.statusBar().showMessage('Dynamic profile sent and running: {0}'.format(
+            profile['name']))
 
     # ------------------------------------------------------------------
     # Serial
@@ -528,7 +864,8 @@ class MainWindow(QMainWindow):
                 self.pb_connect.setText('Connected')
                 self.pb_connect.setStyleSheet(self.MY_GREEN)
                 self.send_command('E')
-                self.send_command('Q{0}'.format(PROFILE_IDX))
+                self.send_command('Q{0}'.format(DEFAULT_PROFILE_IDX))
+                self._apply_profile(_default_profile(), DEFAULT_PROFILE_IDX)
                 self.statusBar().showMessage('Connected — Q4 sent')
             else:
                 self.pb_connect.setText('Port Error')
@@ -569,7 +906,7 @@ class MainWindow(QMainWindow):
                 # Auto-exit single-cell before resuming sweep
                 self._mode = 'sweep'
                 self._update_sc_button_states()
-                self.send_command('Q{0}'.format(PROFILE_IDX))
+                self.send_command('Q{0}'.format(self._active_profile_idx))
             self.send_command('G')
             self.pb_start.setText('Running')
             self.pb_start.setStyleSheet(self.MY_GREEN)
@@ -607,18 +944,19 @@ class MainWindow(QMainWindow):
             self._update_status()
             return
 
-        # Mode 2 sweep: W4,<time_ms>,<ch0>,...,<ch44>
+        # Mode 2 sweep: W<idx>,<time_ms>,<ch0>,...,<chN-1> — idx must match the
+        # profile we last selected (DEFAULT_PROFILE_IDX or DYNAMIC_PROFILE_INDEX).
         if len(line) < 2 or line[0] != 'W' or not line[1].isdigit():
             return
 
         parts = line.split(',')
         try:
             w_idx = int(parts[0][1:])
-            if w_idx != PROFILE_IDX:
+            if w_idx != self._active_profile_idx:
                 return
-            if len(parts) != 2 + N_CHANNELS:
+            if len(parts) != 2 + self._n_channels:
                 return
-            raw = np.array([int(parts[2 + i]) for i in range(N_CHANNELS)], dtype=float)
+            raw = np.array([int(parts[2 + i]) for i in range(self._n_channels)], dtype=float)
         except (ValueError, IndexError) as e:
             self.statusBar().showMessage('W parse error: {0}'.format(e))
             return
@@ -635,10 +973,10 @@ class MainWindow(QMainWindow):
                 self._finalise_capture()
 
         if self._continuous_log:
-            raw_5x9 = raw.reshape(N_BANDS, N_CELLS)
+            raw_nxn = raw.reshape(self._n_bands, self._n_cells)
             mean, _ = self._get_current_baseline()
-            delta = (raw_5x9 - mean) if mean is not None else np.zeros((N_BANDS, N_CELLS))
-            self._append_csv_row(self.le_label.text(), delta, raw_5x9, mean)
+            delta = (raw_nxn - mean) if mean is not None else np.zeros((self._n_bands, self._n_cells))
+            self._append_csv_row(self.le_label.text(), delta, raw_nxn, mean)
 
         self._update_status()
 
@@ -654,8 +992,8 @@ class MainWindow(QMainWindow):
 
     def _finalise_capture(self):
         arr = np.array(self._capture_buf, dtype=float)
-        self._baseline_mean = arr.mean(0).reshape(N_BANDS, N_CELLS)
-        self._baseline_std  = arr.std(0).reshape(N_BANDS, N_CELLS)
+        self._baseline_mean = arr.mean(0).reshape(self._n_bands, self._n_cells)
+        self._baseline_std  = arr.std(0).reshape(self._n_bands, self._n_cells)
         self._baseline_age  = time.time()
         self._capturing     = False
         self._capture_buf   = []
@@ -668,31 +1006,31 @@ class MainWindow(QMainWindow):
         self._baseline_age  = None
 
     def _get_current_baseline(self):
-        """Return (mean_5x9, std_5x9) or (None, None)."""
+        """Return (mean_nxn, std_nxn) or (None, None)."""
         if self._baseline_mode == 'static':
             return self._baseline_mean, self._baseline_std
 
         if self._baseline_mode == 'nominal':
-            return NOMINAL_BASELINE_UV.copy(), np.zeros((N_BANDS, N_CELLS))
+            return self._nominal_baseline_uv.copy(), np.zeros((self._n_bands, self._n_cells))
 
         cutoff = time.time() - self._rolling_T
         frames = [arr for ts, arr in self._rolling_buf if ts >= cutoff]
         if not frames:
             return None, None
         mat  = np.array(frames, dtype=float)
-        mean = np.median(mat, axis=0).reshape(N_BANDS, N_CELLS)
-        std  = mat.std(axis=0).reshape(N_BANDS, N_CELLS)
+        mean = np.median(mat, axis=0).reshape(self._n_bands, self._n_cells)
+        std  = mat.std(axis=0).reshape(self._n_bands, self._n_cells)
         return mean, std
 
     # ------------------------------------------------------------------
     # Display computation (heatmap)
     # ------------------------------------------------------------------
-    def _compute_display_matrix(self, raw_5x9, mean, std):
+    def _compute_display_matrix(self, raw_nxn, mean, std):
         if self._display_mode == 'raw':
-            return raw_5x9.copy()
+            return raw_nxn.copy()
         if mean is None:
-            return np.zeros((N_BANDS, N_CELLS))
-        delta = raw_5x9 - mean
+            return np.zeros((self._n_bands, self._n_cells))
+        delta = raw_nxn - mean
         if self._display_mode == 'delta':
             return delta
         safe_std = np.where(std is not None and std > 1.0, std, 1.0)
@@ -718,15 +1056,15 @@ class MainWindow(QMainWindow):
             self.lbl_scale.setText('Scale: ±{0:.2f} {1}'.format(val, unit))
 
     def _update_3d(self, matrix):
-        # Note: the 5-row (band) axis is coarse — interpolation between 5 bands
-        # is cosmetic smoothing only, not real data.
+        # Note: the band axis is coarse — interpolation between bands is
+        # cosmetic smoothing only, not real data.
         if not _GL_AVAILABLE or not hasattr(self, '_surface'):
             return
         lim = max(float(np.abs(matrix).max()), 1.0)
         normed = np.clip((matrix + lim) / (2.0 * lim), 0.0, 1.0)
         try:
             rgba = self.cm_div.map(normed.T.flatten(), mode='float')
-            rgba = rgba.reshape(N_CELLS, N_BANDS, 4)
+            rgba = rgba.reshape(self._n_cells, self._n_bands, 4)
             self._surface.setData(z=matrix.T, colors=rgba)
         except Exception:
             self._surface.setData(z=matrix.T)
@@ -738,7 +1076,7 @@ class MainWindow(QMainWindow):
         if self._freeze_stats or self._latest_raw is None:
             return
 
-        raw    = self._latest_raw   # (45,)
+        raw    = self._latest_raw   # (n_channels,)
         window = self.sp_stats_window.value()
         cutoff = time.time() - window
         frames = [arr for ts, arr in self._rolling_buf if ts >= cutoff]
@@ -749,9 +1087,9 @@ class MainWindow(QMainWindow):
             stds  = mat.std(0)
         else:
             means = raw.copy()
-            stds  = np.zeros(N_CHANNELS)
+            stds  = np.zeros(self._n_channels)
 
-        for i in range(N_CHANNELS):
+        for i in range(self._n_channels):
             self.tbl_stats.item(i, 3).setText(_fmt(raw[i]))
             self.tbl_stats.item(i, 4).setText(_fmt(means[i]))
             self.tbl_stats.item(i, 5).setText(_fmt(stds[i]))
@@ -785,14 +1123,14 @@ class MainWindow(QMainWindow):
         # Always update heatmap so it's current when user switches back to it
         if not self._freeze:
             mean, std = self._get_current_baseline()
-            raw_5x9   = self._latest_raw.reshape(N_BANDS, N_CELLS)
-            matrix    = self._compute_display_matrix(raw_5x9, mean, std)
+            raw_nxn   = self._latest_raw.reshape(self._n_bands, self._n_cells)
+            matrix    = self._compute_display_matrix(raw_nxn, mean, std)
             self._update_heatmap(matrix)
             if self._3d_visible:
                 self._update_3d(matrix)
             self._update_baseline_label(mean)
-            delta_5x9 = (raw_5x9 - mean) if mean is not None else None
-            self._update_crossings(delta_5x9)
+            delta_nxn = (raw_nxn - mean) if mean is not None else None
+            self._update_crossings(delta_nxn)
 
         # Stats table — only compute when that tab is visible
         if self.tabs.currentIndex() == 1:
@@ -817,17 +1155,22 @@ class MainWindow(QMainWindow):
                 self.lbl_baseline_info.setText(
                     'Baseline: Static ({0}fr, {1:.0f}s ago)'.format(self._capture_n, age))
 
-    def _update_crossings(self, delta_5x9):
-        if delta_5x9 is None:
+    def _update_crossings(self, delta_nxn):
+        if delta_nxn is None:
             self.lbl_crossings.setText('Crossings: no baseline')
             return
-        crossings = self._compute_crossings(delta_5x9)
+        crossings = self._compute_crossings(delta_nxn)
         parts = []
         for b, cross in enumerate(crossings):
-            pol = '+' if delta_5x9[b, 0] > 0 else '−'
-            if cross is not None:
-                thresh_v = 4.5 - 0.5 * cross
+            pol = '+' if delta_nxn[b, 0] > 0 else '−'
+            if cross is not None and self._has_threshold_v:
+                tv = self._nominal_baseline_uv[b] / 1_000_000
+                j  = int(np.floor(cross))
+                frac = cross - j
+                thresh_v = tv[j] * (1 - frac) + tv[min(j + 1, len(tv) - 1)] * frac
                 parts.append('B{0}:{1}↔{2:.2f}V'.format(b, pol, thresh_v))
+            elif cross is not None:
+                parts.append('B{0}:{1}↔cell{2:.2f}'.format(b, pol, cross))
             else:
                 parts.append('B{0}:{1}'.format(b, pol))
         self.lbl_crossings.setText('Crossings:  ' + '   '.join(parts))
@@ -835,12 +1178,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Zero-crossing
     # ------------------------------------------------------------------
-    def _compute_crossings(self, delta_5x9):
+    def _compute_crossings(self, delta_nxn):
         crossings = []
-        for b in range(N_BANDS):
-            row   = delta_5x9[b]
+        for b in range(self._n_bands):
+            row   = delta_nxn[b]
             found = None
-            for j in range(N_CELLS - 1):
+            for j in range(self._n_cells - 1):
                 if row[j] * row[j + 1] < 0:
                     denom = abs(row[j]) + abs(row[j + 1])
                     frac  = abs(row[j]) / denom if denom > 0 else 0.5
@@ -853,10 +1196,10 @@ class MainWindow(QMainWindow):
     # Single-cell isolation
     # ------------------------------------------------------------------
     def _on_sc_band_changed(self, band_idx):
-        freq_hz, pulse_us, delays = BANDS_META[band_idx]
+        freq_hz, pulse_us, delays = self._bands_meta[band_idx]
         self.cb_sc_cell.clear()
-        for c, (delay, thresh) in enumerate(zip(delays, THRESHOLDS_V)):
-            self.cb_sc_cell.addItem('{0:.1f}V / {1:.2f}µs'.format(thresh, delay))
+        for c, delay in enumerate(delays):
+            self.cb_sc_cell.addItem('{0} / {1:.2f}µs'.format(self._cell_labels[c], delay))
         self._update_sc_info()
 
     def _update_sc_info(self):
@@ -864,7 +1207,7 @@ class MainWindow(QMainWindow):
         c = self.cb_sc_cell.currentIndex()
         if b < 0 or c < 0:
             return
-        freq_hz, pulse_us, delays = BANDS_META[b]
+        freq_hz, pulse_us, delays = self._bands_meta[b]
         self.lbl_sc_cell_info.setText(
             '→ {0:.3f} kHz  {1:.0f} µs pulse  delay {2:.2f} µs'.format(
                 freq_hz / 1000, pulse_us, delays[c]))
@@ -875,7 +1218,7 @@ class MainWindow(QMainWindow):
             return
         b = self.cb_sc_band.currentIndex()
         c = self.cb_sc_cell.currentIndex()
-        freq_hz, pulse_us, delays = BANDS_META[b]
+        freq_hz, pulse_us, delays = self._bands_meta[b]
         delay_us = delays[c]
         freq_khz = freq_hz / 1000.0
         ds       = self.sp_sc_ds.value()
@@ -893,7 +1236,7 @@ class MainWindow(QMainWindow):
         self.lbl_sc_n.setText('N=0')
 
         self.pb_run_single.setText('Running: {0} {1}'.format(
-            BAND_LABELS[b], CELL_LABELS[c]))
+            self._band_labels[b], self._cell_labels[c]))
         self.pb_run_single.setStyleSheet(self.MY_GREEN)
         self.pb_start.setText('Stopped')
         self.pb_start.setStyleSheet(self.MY_YELLOW)
@@ -902,7 +1245,7 @@ class MainWindow(QMainWindow):
     def _resume_sweep(self):
         self.send_command('E')
         self._mode = 'sweep'
-        self.send_command('Q{0}'.format(PROFILE_IDX))
+        self.send_command('Q{0}'.format(self._active_profile_idx))
         self.send_command('G')
         self.pb_start.setText('Running')
         self.pb_start.setStyleSheet(self.MY_GREEN)
@@ -927,28 +1270,49 @@ class MainWindow(QMainWindow):
         if self._latest_raw is None:
             self.statusBar().showMessage('No data to record')
             return
-        raw_5x9 = self._latest_raw.reshape(N_BANDS, N_CELLS)
+        raw_nxn = self._latest_raw.reshape(self._n_bands, self._n_cells)
         mean, _ = self._get_current_baseline()
-        delta   = (raw_5x9 - mean) if mean is not None else np.zeros((N_BANDS, N_CELLS))
-        self._append_csv_row(self.le_label.text(), delta, raw_5x9, mean)
+        delta   = (raw_nxn - mean) if mean is not None else np.zeros((self._n_bands, self._n_cells))
+        self._append_csv_row(self.le_label.text(), delta, raw_nxn, mean)
         self.statusBar().showMessage('Snapshot recorded — row {0}'.format(self._csv_rows))
 
     def _on_continuous_toggled(self, checked):
         self._continuous_log = checked
 
-    def _append_csv_row(self, label, delta_5x9, raw_5x9, baseline_5x9):
+    def _write_csv_header(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        n = self._n_channels
+        d_cols = ','.join('d{0:02d}'.format(i) for i in range(n))
+        r_cols = ','.join('r{0:02d}'.format(i) for i in range(n))
+        b_cols = ','.join('b{0:02d}'.format(i) for i in range(n))
+        band_order = '  '.join('{0}={1}'.format(i, lbl)
+                               for i, lbl in enumerate(self._band_labels))
+        with open(path, 'w') as f:
+            f.write('# PIMD ClassViz labelled-data log — profile {0} ({1}),'
+                    ' generated by pimd_classviz.py v{2}\n'.format(
+                        self._active_profile_idx, self._profile.get('name', '?'), APP_VERSION))
+            f.write('# Columns: timestamp, label, baseline_mode,\n')
+            f.write('#   d00..d{0:02d} = signed deviation uV (band-major: index=band*{1}+cell),\n'.format(
+                n - 1, self._n_cells))
+            f.write('#   r00..r{0:02d} = raw absolute uV,\n'.format(n - 1))
+            f.write('#   b00..b{0:02d} = baseline mean uV used for delta\n'.format(n - 1))
+            f.write('# Band order: {0}\n'.format(band_order))
+            f.write('# Cell labels: {0}\n'.format(', '.join(self._cell_labels)))
+            f.write('timestamp,label,baseline_mode,{0},{1},{2}\n'.format(d_cols, r_cols, b_cols))
+
+    def _append_csv_row(self, label, delta_nxn, raw_nxn, baseline_nxn):
         path = self.le_csv.text()
         if not path:
             return
         if not self._csv_header_written:
             if not os.path.exists(path):
-                _write_csv_header(path)
+                self._write_csv_header(path)
             self._csv_header_written = True
-        bl  = baseline_5x9 if baseline_5x9 is not None else np.zeros((N_BANDS, N_CELLS))
+        bl  = baseline_nxn if baseline_nxn is not None else np.zeros((self._n_bands, self._n_cells))
         ts  = datetime.now().isoformat(timespec='milliseconds')
         row = [ts, label, self._baseline_mode]
-        row += delta_5x9.flatten().astype(int).tolist()
-        row += raw_5x9.flatten().astype(int).tolist()
+        row += delta_nxn.flatten().astype(int).tolist()
+        row += raw_nxn.flatten().astype(int).tolist()
         row += bl.flatten().astype(int).tolist()
         with open(path, 'a') as f:
             f.write(','.join(str(v) for v in row) + '\n')
@@ -1001,11 +1365,11 @@ class MainWindow(QMainWindow):
         if self.plot.sceneBoundingRect().contains(pos):
             vp = self.plot.vb.mapSceneToView(pos)
             cx, cy = int(vp.x()), int(vp.y())
-            if 0 <= cx < N_CELLS and 0 <= cy < N_BANDS:
-                delay_us = BANDS_META[cy][2][cx]
+            if 0 <= cx < self._n_cells and 0 <= cy < self._n_bands:
+                delay_us = self._bands_meta[cy][2][cx]
                 self.statusBar().showMessage(
                     'Band {0} ({1}) | Cell {2} ({3}) | delay = {4:.2f} µs'.format(
-                        cy, BAND_LABELS[cy], cx, CELL_LABELS[cx], delay_us))
+                        cy, self._band_labels[cy], cx, self._cell_labels[cx], delay_us))
                 return
         self._update_status()
 
