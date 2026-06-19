@@ -22,6 +22,20 @@
 #       Builder tab to edit/save/load profiles and send them to the board's new
 #       D command (RAM-only dynamic profile, Q<DYNAMIC_PROFILE_INDEX>); default
 #       Q4-on-connect behaviour unchanged
+# v1.05 fix _fmt(): remove thousands-separator from format string so saved CSV
+#       files are machine-parseable (4373.6 not 4,373.6)
+# v1.07 process_packet: 64-frame circular median glitch filter on display path.
+#       _latest_raw (→ heatmap, stats tab) uses median-substituted values when a
+#       channel deviates >100 mV from its 64-frame median; _rolling_buf and
+#       _record_buf keep the unfiltered raw values. Targets the 32-frame flat-step
+#       ADC bit-truncation artifacts (440–880 mV shifts, fw v4.21 primary fix)
+#       while leaving real signals (e.g. ±7 mV environmental pickup) fully visible.
+#       64-frame window ensures ≥33 clean frames in buffer throughout any 32-frame
+#       glitch, keeping the median stable.
+# v1.06 Stats tab: add "Record Frames" toggle button — starts/stops recording of
+#       raw W-record frames (fw_time_ms, wall_time_s, ch0…chN-1 in µV); auto-saves
+#       to data/frames_YYYYMMDD_HHMMSS.csv on stop. Recording is also auto-stopped
+#       when streaming stops or the profile changes.
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false
@@ -55,7 +69,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.04'
+APP_VERSION = '1.07'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -113,8 +127,8 @@ _C = int(Qt.AlignmentFlag.AlignCenter)
 
 
 def _fmt(uv):
-    """µV → mV string with 1 d.p. and thousands comma."""
-    return '{0:,.1f}'.format(uv / 1000.0)
+    """µV → mV string with 1 d.p."""
+    return '{0:.1f}'.format(uv / 1000.0)
 
 
 def _csv_default_path():
@@ -164,6 +178,12 @@ class MainWindow(QMainWindow):
         self._csv_header_written = False
         self._csv_rows           = 0
         self._frame_count        = 0
+
+        self._recording   = False
+        self._record_buf: list = []   # list of (fw_time_ms, wall_time_s, raw_uv_array)
+
+        self._ch_glitch_buf: 'np.ndarray | None' = None  # shape (64, n_channels), circular
+        self._ch_glitch_pos  = 0
 
         # Data state — stats + single-cell
         self._mode        = 'sweep'     # 'sweep' | 'single_cell'
@@ -219,12 +239,16 @@ class MainWindow(QMainWindow):
         self._set_profile_dims(profile, profile_idx)
 
         # Old-shape data must not survive a dimension change.
+        if self._recording:
+            self.pb_record.setChecked(False)   # triggers _toggle_record_frames → auto-save
         self._rolling_buf.clear()
         self._baseline_mean = None
         self._baseline_std  = None
         self._baseline_age  = None
         self._latest_raw     = None
         self._frame_count    = 0
+        self._ch_glitch_buf  = None
+        self._ch_glitch_pos  = 0
 
         self._rebuild_heatmap_axes()
         self._rebuild_3d_surface()
@@ -498,6 +522,12 @@ class MainWindow(QMainWindow):
         pb_save_stats = QPushButton('Save table CSV…')
         pb_save_stats.clicked.connect(self._save_stats_csv)
         ctrl.addWidget(pb_save_stats)
+
+        self.pb_record = QPushButton('Record Frames')
+        self.pb_record.setCheckable(True)
+        self.pb_record.setStyleSheet(self.MY_YELLOW)
+        self.pb_record.toggled.connect(self._toggle_record_frames)
+        ctrl.addWidget(self.pb_record)
 
         ctrl.addStretch(1)
         ctrl.addWidget(QLabel('All values in mV · 1 d.p.'))
@@ -896,6 +926,8 @@ class MainWindow(QMainWindow):
             self.send_command('E')
             self.pb_start.setText('Stopped')
             self.pb_start.setStyleSheet(self.MY_YELLOW)
+            if self._recording:
+                self.pb_record.setChecked(False)   # auto-save recorded frames
             if self._mode == 'single_cell':
                 self._mode = 'sweep'
                 self._update_sc_button_states()
@@ -956,14 +988,33 @@ class MainWindow(QMainWindow):
                 return
             if len(parts) != 2 + self._n_channels:
                 return
+            fw_time_ms = int(parts[1])
             raw = np.array([int(parts[2 + i]) for i in range(self._n_channels)], dtype=float)
         except (ValueError, IndexError) as e:
             self.statusBar().showMessage('W parse error: {0}'.format(e))
             return
 
-        self._latest_raw = raw
+        now = time.time()
+
+        # Glitch filter for display only: 64-frame circular median, 100 mV threshold.
+        # Catches ADC bit-truncation artifacts (440–880 mV shifts) without suppressing
+        # real signals (e.g. ±7 mV environmental pickup). _rolling_buf and _record_buf
+        # receive unfiltered raw so frame recordings stay faithful.
+        if self._ch_glitch_buf is None:
+            self._ch_glitch_buf = np.zeros((64, self._n_channels))
+        raw_mv = raw / 1000.0
+        self._ch_glitch_buf[self._ch_glitch_pos] = raw_mv
+        self._ch_glitch_pos = (self._ch_glitch_pos + 1) % 64
+        med_mv = np.median(self._ch_glitch_buf, axis=0)
+        glitch_mask = np.abs(raw_mv - med_mv) > 100.0
+        raw_display = np.where(glitch_mask, med_mv * 1000.0, raw)
+        self._latest_raw = raw_display
+
         self._frame_count += 1
-        self._rolling_buf.append((time.time(), raw))
+        self._rolling_buf.append((now, raw))
+
+        if self._recording:
+            self._record_buf.append((fw_time_ms, now, raw.copy()))
 
         if self._capturing:
             self._capture_buf.append(raw.copy())
@@ -1113,10 +1164,44 @@ class MainWindow(QMainWindow):
                     for col in range(self.tbl_stats.columnCount())) + '\n')
         self.statusBar().showMessage('Stats table saved: {0}'.format(path))
 
+    def _toggle_record_frames(self, checked):
+        if checked:
+            self._recording = True
+            self._record_buf = []
+            self.pb_record.setText('■ 0 frames')
+            self.pb_record.setStyleSheet(self.MY_RED)
+        else:
+            self._recording = False
+            self.pb_record.setText('Record Frames')
+            self.pb_record.setStyleSheet(self.MY_YELLOW)
+            self._save_frames_csv_auto()
+
+    def _save_frames_csv_auto(self):
+        if not self._record_buf:
+            self.statusBar().showMessage('Record stopped — no frames to save.')
+            return
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+        os.makedirs(data_dir, exist_ok=True)
+        path = os.path.join(data_dir,
+            'frames_{0}.csv'.format(datetime.now().strftime('%Y%m%d_%H%M%S')))
+        headers = ['fw_time_ms', 'wall_time_s'] + \
+                  ['ch{0}_uV'.format(i) for i in range(self._n_channels)]
+        with open(path, 'w') as f:
+            f.write(','.join(headers) + '\n')
+            for fw_t, wall_t, raw in self._record_buf:
+                row = [str(fw_t), '{0:.4f}'.format(wall_t)] + \
+                      [str(int(v)) for v in raw]
+                f.write(','.join(row) + '\n')
+        self.statusBar().showMessage(
+            'Frames saved: {0}  ({1} rows)'.format(path, len(self._record_buf)))
+
     # ------------------------------------------------------------------
     # Redraw (30 Hz timer)
     # ------------------------------------------------------------------
     def _redraw(self):
+        if self._recording:
+            self.pb_record.setText('■ {0} frames'.format(len(self._record_buf)))
+
         if self._latest_raw is None:
             return
 

@@ -1,5 +1,5 @@
 ###############################################################################
-# Pulse Induction Metal Detector, v4.19, coil v4
+# Pulse Induction Metal Detector, v4.21, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -31,6 +31,30 @@
 #   L     list profiles -> one L<idx>,<freq_kHz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
+# v4.21 FIX read_raw_sample: wrap BUSY poll + SPI read in disable_irq/enable_irq
+#       so USB CDC IRQs cannot fire between the BUSY-low edge and the SPI clock.
+#       Eliminates two Mode 2 anomaly types confirmed in quiet 45-channel recordings:
+#       (1) §7 SDOB bit-truncation (value ≈ 50%/25% of true): USB IRQ delays SPI
+#       start past the next MCLK; partial SDOB shift produces half/quarter values.
+#       (2) Cell-value bleed (value > next-cell, ratio >1.0): USB IRQ starves the
+#       BUSY-high poll long enough to miss the current cell's MCLK entirely, landing
+#       on the previous cell's still-valid output. Both produce 32-frame flat level
+#       shifts (one bad sample × M=32 rolling-buffer depth). IRQ blackout per call
+#       ≤36 µs worst-case (just missed MCLK); safe for USB SOF at 1 kHz.
+#       Also adds a per-cell 10% plausibility gate: if raw14 deviates >10% from
+#       rolling mean (after ≥8 samples), substitute the mean instead of updating.
+#       Belt-and-suspenders secondary defence; all 8 observed events caught.
+#       FW_VERSION synced to file header (was stuck at 4.15).
+# v4.20 FIX acquire_mode2: two first/last-cell std-dev bugs fixed.
+#       (1) BOUNDARY_PRIME 5→15: 470 µs was insufficient for the 5µs→40µs
+#       wrap-around thermal transient (8× pulse-energy step); settling
+#       signature was the 3.1→1.6→0.6 mV gradient in band-0 cells 0-2.
+#       (2) emit/poll moved from after the for-loop to inside it at i==0:
+#       previously print() ran between cell[n-1]'s write and its read,
+#       and USB CDC IRQs (~10-50 µs) exceed the 2.5 µs BUSY-LOW window at
+#       57 kHz — causing the §7 mid-conversion bit-truncated outliers in
+#       cell[n-1]. Moving here: cell[n-1] read is clean, USB noise overlaps
+#       the already-running cell[0] settling sleep instead.
 # v4.19 revert v4.18: v4.18's sleep_us+post-read-retry approach brought back
 #       the outlier corruption that v4.17 had eliminated. v4.17's BUSY edge
 #       sync (wait-for-high then wait-for-low) is restored. The reduced sample
@@ -234,9 +258,9 @@ import struct
 import select
 from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
-from machine import Pin, PWM, SPI, unique_id
+from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.15'
+FW_VERSION = '4.21'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -287,13 +311,19 @@ RAW_FULL_SCALE_UV = 10_000_000  # ±5 V differential span in µV
 # Mode 2 output rate cap and band-boundary settling
 # ---------------------------------------------------------------------------
 MIN_EMIT_MS = 10      # emit W records at most every 10 ms (100 Hz max)
-BOUNDARY_PRIME = 5    # extra PWM periods to let coil settle after a band-freq change;
-                      # increase (try 10, 15) if std dev remains elevated in high-freq bands
+BOUNDARY_PRIME = 15   # extra PWM periods to let coil settle after a band-freq change.
+                      # 5 was insufficient for the 5µs→40µs wrap-around (8× energy step):
+                      # the settling signature (3.1→1.6→0.6 mV gradient in band 0) persisted.
+                      # 15 × 94 µs = 1.41 ms; with emit firing during this sleep the effective
+                      # settling is 3–7 ms on emit cycles — enough for the thermal transient.
 COMMAND_POLL_MS = 1   # poll stdin for commands at most once per ms instead of once
                       # per sweep cycle (was every PWM period for a 1-2 cell profile).
                       # A reasonable reduction in syscall rate regardless, but tested
                       # and confirmed NOT the cause of the single-cell noise anomaly
                       # — see the v4.08/v4.09 note in the file header for what was.
+OUTLIER_GATE_FRAC = 10  # per-cell raw14 plausibility gate: reject samples deviating
+                        # >1/10 (10%) from rolling mean; substitute mean instead.
+                        # Secondary defence after the IRQ critical section (v4.21).
 
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
@@ -484,12 +514,14 @@ overrun_count = 0     # DIAGNOSTIC (temporary): counts how often acquire_mode2's
 def read_raw_sample():
     """Read one signed 14-bit raw sample from SDOB over SPI0."""
     global busy_high_count
+    irq_state = disable_irq()      # keep USB IRQs out of the BUSY-poll + SPI window
     while not busy_pin.value():   # wait for MCLK to fire (BUSY high)
         pass
     busy_high_count += 1
     while busy_pin.value():        # wait for conversion complete (BUSY low)
         pass
     data_bytes = adc_raw_spi.read(4)
+    enable_irq(irq_state)          # restore IRQs before Python processing
     word = struct.unpack('>I', data_bytes)[0]
     raw14 = (word >> RAW_DIFF_SHIFT) & RAW_DIFF_MASK
     if raw14 & (RAW_DIFF_MASK // 2 + 1):
@@ -619,6 +651,14 @@ def acquire_mode2(profile):
             # at boundaries this also avoids the v4.04 WRAP-shrink issue.
             if at_boundary:
                 raw = read_raw_sample()
+                cnt = rolling_count[prev]
+                if cnt >= 8:
+                    mean_raw = rolling_sum[prev] // cnt
+                    dev = raw - mean_raw
+                    if dev < 0:
+                        dev = -dev
+                    if dev > mean_raw // OUTLIER_GATE_FRAC:
+                        raw = mean_raw
                 idx = rolling_idx[prev]
                 rolling_sum[prev] += raw - rolling[prev][idx]
                 rolling[prev][idx] = raw
@@ -629,6 +669,14 @@ def acquire_mode2(profile):
                 sample_coil_pwm.freq(freq_i)
             else:
                 raw = read_raw_sample()
+                cnt = rolling_count[prev]
+                if cnt >= 8:
+                    mean_raw = rolling_sum[prev] // cnt
+                    dev = raw - mean_raw
+                    if dev < 0:
+                        dev = -dev
+                    if dev > mean_raw // OUTLIER_GATE_FRAC:
+                        raw = mean_raw
                 idx = rolling_idx[prev]
                 rolling_sum[prev] += raw - rolling[prev][idx]
                 rolling[prev][idx] = raw
@@ -658,28 +706,33 @@ def acquire_mode2(profile):
             else:
                 overrun_count += 1
 
-        # After each complete cycle: maybe emit W record; maybe poll commands.
-        # Both are time-throttled (not "once per cycle") so a small-n, high-freq
-        # profile (cycle time << 1 ms) can't call either on every single PWM
-        # period — see COMMAND_POLL_MS above for why that mattered.
-        now = ticks_ms()
-        if ticks_diff(now, last_emit_ms) >= MIN_EMIT_MS:
-            means = []
-            for i in range(n):
-                cnt = rolling_count[i]
-                if cnt:
-                    mean_uV = int(rolling_sum[i] / cnt * RAW_FULL_SCALE_UV / 2 ** 14)
-                else:
-                    mean_uV = 0
-                means.append(mean_uV)
-            elapsed_ms = ticks_diff(now, base_time_ms)
-            fields = ['W{0:d}'.format(active_profile_index), '{0:d}'.format(elapsed_ms)]
-            fields += ['{0:d}'.format(m) for m in means]
-            print(','.join(fields))
-            last_emit_ms = now
-        if ticks_diff(now, last_poll_ms) >= COMMAND_POLL_MS:
-            check_for_commands(timeout_ms=0)
-            last_poll_ms = now
+            # Emit W record and poll commands at i==0 only (once per cycle), placed
+            # AFTER reading cell[n-1] and AFTER the boundary settling sleep.
+            # Previously this block ran after the for loop, meaning cell[n-1]'s read
+            # (at i=0) was the first read after print() — USB CDC IRQs from print()
+            # have ~10-50 µs latency, wider than the 2.5 µs BUSY-LOW window at 57 kHz,
+            # causing bit-truncated outliers (the §7 mid-conversion read mechanism).
+            # Moving here: cell[n-1] is read clean (i=0 read before this block),
+            # and the USB activity overlaps cell[0]'s already-running settling sleep.
+            if i == 0:
+                now = ticks_ms()
+                if ticks_diff(now, last_emit_ms) >= MIN_EMIT_MS:
+                    means = []
+                    for j in range(n):
+                        cnt = rolling_count[j]
+                        if cnt:
+                            mean_uV = int(rolling_sum[j] / cnt * RAW_FULL_SCALE_UV / 2 ** 14)
+                        else:
+                            mean_uV = 0
+                        means.append(mean_uV)
+                    elapsed_ms = ticks_diff(now, base_time_ms)
+                    fields = ['W{0:d}'.format(active_profile_index), '{0:d}'.format(elapsed_ms)]
+                    fields += ['{0:d}'.format(m) for m in means]
+                    print(','.join(fields))
+                    last_emit_ms = now
+                if ticks_diff(now, last_poll_ms) >= COMMAND_POLL_MS:
+                    check_for_commands(timeout_ms=0)
+                    last_poll_ms = now
 
 
 # ---------------------------------------------------------------------------
