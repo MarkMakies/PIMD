@@ -1,8 +1,23 @@
 ###############################################################################
-# PIMD GUI v4.11
+# PIMD GUI v4.12
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop
 #
+# v4.12 (a) A<n> serial backlog fix: closeEvent and start_stop stop path now
+#       call serial.clear(Direction.Output) before sending 'E', discarding any
+#       queued A<n> commands accumulated in the write buffer. waitForBytesWritten
+#       increased from 200 ms to 500 ms. Root cause: at slow rates (e.g. 6250 Hz /
+#       DS 256) the firmware takes ~245 ms per A256, barely within the 250 ms poll
+#       timer — any latency caused a growing backlog, delaying 'E' by 20–30 s.
+#       (b) User-controlled Avg n field (default 64) added to the left sidebar
+#       between the Boxcar and Raw Avg toggles. Orange highlight if n > freq/30,
+#       meaning A<n> would exceed 80 % of the 250 ms poll timer. Warning also
+#       re-evaluated on every frequency change.
+#       (c) App no longer auto-connects on startup — consistent with pimd_classviz
+#       and pimd_delaycal (user presses ENT / Connect explicitly).
+#       (d) 10 uV, 20 uV, 50 uV and 100 uV V/div options removed from the left
+#       sidebar to free space for the new Avg n field; minimum V/div is now 200 uV.
+#       v_div arrow-key clamp updated accordingly (−11 instead of −15).
 # v4.11 serial protocol updated to match MCU v4.23: * command now sends
 #       freq in Hz (integer) and pulse/delay in ns (integer); * record parsing
 #       updated accordingly. Title standardised to 'PIMD GUI v<N> by Mark Makies'.
@@ -114,7 +129,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle('PIMD GUI v4.11 by Mark Makies')
+        self.setWindowTitle('PIMD GUI v4.12 by Mark Makies')
 
         # Editable port field (mirrors pimd_classviz.py) — added below the existing
         # Connect/Start/filename rows in the same label+control grid layout.
@@ -129,6 +144,13 @@ class MainWindow(QMainWindow):
                       'label_14', 'label_15', 'label_18', 'label_19'):
             getattr(self.ui, _name).setParent(None)
 
+        # Remove 10/20/50/100 uV V/div options — too fine for normal use and
+        # frees vertical space in the sidebar for the Avg n field (v4.12).
+        for _name in ('rb2', 'rb9', 'rb5', 'rb10'):   # 100uV, 50uV, 20uV, 10uV
+            btn = getattr(self.ui, _name)
+            self.ui.VoltageButtonGroup.removeButton(btn)
+            btn.setParent(None)
+
         # Boxcar mode toggle — enables/disables A<n> polling and the orange
         # trace (v4.06). "Raw Avg" toggle (show/hide trace within boxcar mode)
         # moved here from gridLayout_2.
@@ -137,6 +159,15 @@ class MainWindow(QMainWindow):
         self.pb_boxcar_mode.setStyleSheet(self.MY_YELLOW)
         self.pb_boxcar_mode.toggled.connect(self._on_toggle_boxcar_mode)
         self.ui.formLayout_10.addRow(self.pb_boxcar_mode)
+
+        # Avg n field — user sets A<n> sample count; orange if n would cause
+        # the firmware to take > 80 % of the 250 ms poll timer (v4.12).
+        self.avg_n = 64
+        self.lbl_avg_n = QLabel('Avg n:')
+        self.le_avg_n = QLineEdit('64')
+        self.le_avg_n.setMaximumWidth(50)
+        self.le_avg_n.editingFinished.connect(self._on_avg_n_edited)
+        self.ui.formLayout_10.addRow(self.lbl_avg_n, self.le_avg_n)
 
         self.pb_show_raw_mean = QPushButton('Raw Avg: OFF')
         self.pb_show_raw_mean.setCheckable(True)
@@ -344,6 +375,7 @@ class MainWindow(QMainWindow):
         self.ui.lFreq.setStyleSheet(
             '' if hz in CLEAN_FREQS_HZ else 'background-color: #ff8c00;'
         )
+        self._check_avg_n_warning()
 
     def _set_pulse_display(self, pulse_us):
         """Set lPulse text (µs, 3 dp); highlight orange if not a multiple of 8 ns."""
@@ -377,7 +409,7 @@ class MainWindow(QMainWindow):
         self.ui.slFreq.blockSignals(True)
         self.ui.slFreq.setValue(slider_val)
         self.ui.slFreq.blockSignals(False)
-        self._set_freq_display(freq_hz)
+        self._set_freq_display(freq_hz)   # also calls _check_avg_n_warning
         self.change_parameters()
 
     def _on_pulse_edited(self):
@@ -409,6 +441,31 @@ class MainWindow(QMainWindow):
         self.ui.slSample.blockSignals(False)
         self._set_delay_display(delay_us)
         self.change_parameters()
+
+    def _on_avg_n_edited(self):
+        """Parse and clamp the Avg n field; re-evaluate the safety warning."""
+        try:
+            n = max(1, min(1000, int(float(self.le_avg_n.text()))))
+        except ValueError:
+            n = 64
+        self.avg_n = n
+        self.le_avg_n.setText(str(n))
+        self._check_avg_n_warning()
+
+    def _check_avg_n_warning(self):
+        """Orange if A<n> would occupy > 80 % of the 250 ms poll timer at current freq.
+        Effective raw rate ≈ freq/6 (BUSY 1-in-6 catch, README §7).
+        A<n> time = 6*n/freq s; warn when > 0.2 s → n > freq/30."""
+        if not hasattr(self, 'le_avg_n'):
+            return
+        try:
+            freq_hz = int(float(self.ui.lFreq.text()))
+        except ValueError:
+            freq_hz = int(round(self.frequency * 1000))
+        n_safe = freq_hz / 30
+        self.le_avg_n.setStyleSheet(
+            'background-color: #ff8c00;' if self.avg_n > n_safe else ''
+        )
 
     def set_factor(self):
         toggle_map = {'256': '1024', '1024': '256'}
@@ -457,10 +514,10 @@ class MainWindow(QMainWindow):
 
         self.create_chart()
         self.apply_soc_defaults()
-        self.connect_port()
-        self.send_command('E')
+        # No auto-connect \u2014 user presses ENT / Connect explicitly (v4.12).
         self.pb_boxcar_mode.setChecked(True)
         self.pb_show_raw_mean.setChecked(True)
+        self._check_avg_n_warning()
 
     def connect_port(self):
         # Open or close the serial port based on the current state.
@@ -491,30 +548,25 @@ class MainWindow(QMainWindow):
         else:
             self.ui.pbStart.setText('Stopped')
             self.ui.pbStart.setStyleSheet(self.MY_YELLOW)
-            self.send_command('E')
             self.raw_poll_timer.stop()
+            self.serial.clear(QSerialPort.Direction.Output)
+            self.send_command('E')
             if self.file:
                 self.file.close()
                 self.file = None
 
     def poll_raw_average(self):
-        # Request a boxcar-averaged raw-path sample (Task 2 'A<x>' primitive,
-        # returns a new 'R...' record - does not affect the legacy '*' telemetry).
-        # n tracks the current DS Factor (was a hardcoded A32) so the raw
-        # path's oversampling is comparable to the filtered path's decimation
-        # factor instead of differing by ~8-32x just from sample-count
-        # mismatch — that mismatch was the main reason the two std dev
-        # readouts looked so far apart. Firmware caps A<n> at 1000.
+        # Request a boxcar-averaged raw-path sample. Uses self.avg_n set by
+        # the Avg n field (default 64). Firmware caps A<n> at 1000.
         if self.serial.isOpen():
-            n = min(self.down_sample, 1000)
-            self.serial.write('A{0}\n'.format(n).encode())
+            self.serial.write('A{0}\n'.format(self.avg_n).encode())
 
     def v_div(self, direction):
         # Adjust vertical division scale via button group.
         ix = self.ui.VoltageButtonGroup.checkedId()
         ix = ix + 1 if direction == 'up' else ix - 1
         # Clamp the value between -15 and -2
-        ix = max(-15, min(-2, ix))
+        ix = max(-11, min(-2, ix))
         self.ui.VoltageButtonGroup.button(ix).setChecked(True)
 
     def h_div(self, direction):
@@ -873,8 +925,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.raw_poll_timer.stop()
         if self.serial.isOpen():
+            self.serial.clear(QSerialPort.Direction.Output)
             self.send_command('E')
-            self.serial.waitForBytesWritten(200)
+            self.serial.waitForBytesWritten(500)
             self.serial.close()
         if self.file:
             self.file.close()

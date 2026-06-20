@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Scope v4.01
+# PIMD Scope v4.02
 # — Mode 2 streaming visualiser
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -9,6 +9,7 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...
 # Board firmware: pimd_mcu.py v4.00+
 #
+# v4.02 title standardised to include author.
 # v4.01 PROFILES_META converted to bands format; _update_titles updated for
 #       multi-freq profiles; profile 4 CLASSIFY_EP added (5 bands × 9 cells)
 # v4.00 initial version (replaces pimd_scope_cal.py poll-based approach)
@@ -72,7 +73,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('PIMD Scope v4.01')
+        self.setWindowTitle('PIMD Scope v4.02 by Mark Makies')
 
         self.serial = QSerialPort()
         self.serial.readyRead.connect(self.read_from_serial)

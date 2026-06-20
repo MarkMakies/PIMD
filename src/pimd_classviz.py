@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.07
+# PIMD Signature Visualiser (ClassViz) v1.10
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -12,8 +12,11 @@
 # match whatever profile (static or dynamic) is active.
 #
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
-# Board firmware: pimd_mcu.py v4.07+
+# Board firmware: pimd_mcu.py v4.23+
 #
+# v1.10 * command (single-cell Mode 1) updated to match MCU v4.23 protocol:
+#       freq in Hz (integer), pulse and delay in ns (integer).
+#       Title standardised to include author.
 # v1.09 _band_labels: pulse width and frequency now show 3 d.p. (was 0 d.p. / 1 d.p.).
 #       Stats table Delay column: now 3 d.p. (was 2 d.p.).  Matches 8 ns grid precision.
 # v1.08 Stats tab std-dev window: changed from seconds-based (QDoubleSpinBox, 0.5–60 s)
@@ -75,7 +78,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.09'
+APP_VERSION = '1.10'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -149,7 +152,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('PIMD ClassViz v{0}'.format(APP_VERSION))
+        self.setWindowTitle('PIMD ClassViz v{0} by Mark Makies'.format(APP_VERSION))
 
         # Serial
         self.serial = QSerialPort()
@@ -1308,12 +1311,11 @@ class MainWindow(QMainWindow):
         c = self.cb_sc_cell.currentIndex()
         freq_hz, pulse_us, delays = self._bands_meta[b]
         delay_us = delays[c]
-        freq_khz = freq_hz / 1000.0
         ds       = self.sp_sc_ds.value()
 
         self.send_command('E')
-        self.send_command('*{0:.3f},{1:.1f},{2:.2f},{3}'.format(
-            freq_khz, pulse_us, delay_us, ds))
+        self.send_command('*{0},{1},{2},{3}'.format(
+            freq_hz, int(round(pulse_us * 1000)), int(round(delay_us * 1000)), ds))
         self.send_command('S')
 
         self._mode = 'single_cell'
