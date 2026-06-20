@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Delay Calibration v1.03
+# PIMD Delay Calibration v1.08
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -12,12 +12,64 @@
 #
 # Firmware commands used:
 #   E                                      — safe state (on connect / stop / done)
-#   *<freq_kHz>,<pulse_us>,<delay_us>,256  — configure PWM (no streaming)
+#   *<freq_hz>,<pulse_ns>,<delay_ns>,256   — configure PWM (no streaming)
 #   A<n>                                   — raw boxcar average; returns R record
 #   D<avg>;<freq_hz>,<pulse_us>,<d0>,...;… — define dynamic profile (thermal mode)
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.12 QSplitter between calibration table and monitoring section so the bottom
+#       tables maintain size rather than compressing; splitter state + window
+#       geometry (size + position) persisted in settings.  _auto_color_cell now
+#       updates all three tables identically; _update_thermal_tables mirrors the
+#       calibration table colour to both thermal tables (removes value-based
+#       std-dev colouring); _auto_finish uses _auto_color_cell for consistency.
+#       Section labels above thermal tables set to bold for visual parity.
+#       "Nudging every cell" explanation: calibrated delays sit at threshold
+#       crossings where signal slope converts amplitude noise to σ > 0.5 mV;
+#       Auto Nudge correctly relocates to quieter nearby delays — not a bug.
+# v1.11 Post-nudge settling gate: after each G command in Auto Nudge, incoming W
+#       records are discarded and display frozen for 1 s (_auto_settling flag +
+#       QTimer.singleShot).  _auto_settle_done clears the flag and flushes the
+#       buffer so std-dev accumulation begins only from clean settled frames,
+#       eliminating the false yellow flicker seen in the thermal tables at each nudge.
+# v1.10 Wider left column (320→420 px) and larger window (1200×1000→1440×1200) so
+#       activity log entries fit on a single line.  Thermal Monitoring box renamed
+#       "Live Monitoring & Auto Nudge"; setMaximumHeight(140) removed from both
+#       thermal tables and the box now gets stretch=1 so it expands with the window.
+#       Cell colouring applied to both thermal mean and std-dev tables during Auto:
+#       mean copies calibration table status colour; std dev uses green/yellow/red
+#       against the auto-nudge threshold.  All parameter field values saved to
+#       data/delaycal_settings.json on exit and restored on startup.
+# v1.09 Real-time cell colouring during Auto Nudge: yellow = queued, amber = active,
+#       green = passed, red = flagged (colours updated live as each soak completes).
+#       "Import Profile" button loads a JSON profile directly into the calibration
+#       table, enabling Auto/Thermal without first running a full sweep.
+#       Auto finish now prints a compact "Adjusted delays" summary to the log
+#       (only channels where the delay changed) and updates progress_label.
+# v1.08 Scrolling activity log panel added in left column below the config group,
+#       showing per-step calibration progress, thermal events, and auto-nudge
+#       decisions.  Auto Nudge changed from parallel to sequential per-channel
+#       processing: an initial soak identifies bad channels, then each bad channel
+#       is tackled one at a time (up to "Max attempts" nudges per channel) before
+#       moving on to the next.  _auto_iter replaced by _auto_phase / _auto_targets
+#       / _auto_target_idx / _auto_ch_attempts.  "Max iter" spinbox relabelled
+#       "Max attempts/cell".  Window height bumped 950→1000 px.
+# v1.07 Auto Nudge: iterative per-cell delay correction to escape noisy zones.
+#       After calibration, "Auto" button runs soak→evaluate iterations: streams
+#       Mode 2 with the calibrated profile, measures per-cell std dev over the
+#       last N W-frames (reuses sp_thermal_n; keep N ≤ 200 — at 50 µV/s thermal
+#       drift, N=200 @ ~100 Hz adds ~100 µV drift vs 500 µV threshold), nudges
+#       cells whose std dev exceeds the threshold by nudge_ns toward earlier
+#       delays (−ns first).  On cap hit in that direction, resets to calibrated
+#       delay and nudges in the opposite direction; flags the cell if both
+#       directions are capped.  Best-std delay kept per cell across all soaks.
+#       At finish: calibration table updated (green = passed, red = still bad);
+#       Export Profile runs automatically.  ΔV per nudged cell reported in
+#       status.  N/R cells excluded.  All I/O via QTimer + W-record callbacks —
+#       no blocking loops.
+# v1.06 * command updated to match MCU v4.23 protocol: freq in Hz (integer),
+#       pulse and delay in ns (integer). Title standardised to include author.
 # v1.05 Snap interpolated threshold-crossing delays to the 8 ns PWM clock grid
 #       before storing in the table and exporting; display to 3 d.p. (0.008 µs
 #       precision) instead of 2 d.p.  Off-grid delays cause ±1 LSB PWM jitter
@@ -53,17 +105,19 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QDoubleSpinBox, QSpinBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout,
-    QFileDialog, QHeaderView,
+    QFileDialog, QHeaderView, QPlainTextEdit, QSplitter,
 )
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.05'
+APP_VERSION = '1.12'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
-PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'data', 'profiles')
+PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'data', 'profiles')
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'data', 'delaycal_settings.json')
 
 def _snap_8ns(delay_us):
     """Round a delay to the nearest 8 ns RP2040 PWM clock boundary."""
@@ -72,9 +126,12 @@ def _snap_8ns(delay_us):
 
 
 # Cell background colours
-_COL_PENDING  = QColor(200, 220, 255)   # light blue: in progress
-_COL_DONE     = QColor(143, 240, 164)   # green:      threshold found
-_COL_NR       = QColor(210, 210, 210)   # grey:       not reached within max delay
+_COL_PENDING      = QColor(200, 220, 255)   # light blue: in progress (calibration sweep)
+_COL_DONE         = QColor(143, 240, 164)   # green:      threshold found / auto passed
+_COL_NR           = QColor(210, 210, 210)   # grey:       not reached within max delay
+_COL_AUTO_FLAGGED = QColor(246, 97, 81)     # red:        still bad after Auto max attempts
+_COL_AUTO_QUEUED  = QColor(249, 240, 107)   # yellow:     bad channel queued for nudging
+_COL_AUTO_WORKING = QColor(255, 175,  50)   # amber:      channel currently being soaked
 
 
 class MainWindow(QMainWindow):
@@ -84,7 +141,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f'PIMD Delay Calibration v{APP_VERSION}')
+        self.setWindowTitle(f'PIMD Delay Calibration v{APP_VERSION} by Mark Makies')
 
         self.serial = QSerialPort()
         self.serial.readyRead.connect(self.read_from_serial)
@@ -117,7 +174,28 @@ class MainWindow(QMainWindow):
         self._thermal_n_channels = 0
         self._thermal_last_redraw = 0.0         # rate-limit redraws to ~10 Hz
 
+        # Auto Nudge state
+        # Sequential model: initial soak → identify bad channels in order →
+        # for each bad channel: nudge → soak → check (up to max_attempts); advance.
+        self._auto_state            = 'idle'    # 'idle' | 'soaking'
+        self._auto_phase            = 'initial' # 'initial' | 'channel'
+        self._auto_targets:  'list[int]' = []   # ordered bad-channel indices (set after initial eval)
+        self._auto_target_idx        = 0        # index of current channel in _auto_targets
+        self._auto_ch_attempts       = 0        # nudge attempts on current channel
+        self._auto_cur_profile: 'dict | None' = None
+        self._auto_cal_delays_flat: 'list[float]' = []  # calibrated delays µs, per channel
+        self._auto_cur_delays_flat: 'list[float]' = []  # working delays µs, per channel
+        self._auto_dir_flat:        'list[int]'   = []  # -1 or +1 per channel
+        self._auto_dir_flipped:     'list[bool]'  = []  # True once direction has been flipped
+        self._auto_skip_flat:       'list[bool]'  = []  # True for N/R cells (excluded)
+        self._auto_best_std_uV:     'list[float]' = []  # min std dev seen µV per channel
+        self._auto_best_delays_flat:'list[float]' = []  # delay at best std per channel
+        self._auto_soak_timer: 'QTimer | None' = None
+        self._auto_running  = False         # True from _start_auto to _auto_finish/_stop_auto
+        self._auto_settling = False         # True for 1 s after each G command; discards W records
+
         self._build_ui()
+        self._load_settings()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -169,19 +247,27 @@ class MainWindow(QMainWindow):
         self.pb_export_profile.clicked.connect(self.export_profile)
         top.addWidget(self.pb_export_profile)
 
+        self.pb_import_profile = QPushButton('Import Profile')
+        self.pb_import_profile.setFixedWidth(110)
+        self.pb_import_profile.clicked.connect(self._import_profile)
+        top.addWidget(self.pb_import_profile)
+
         top.addSpacing(10)
         self.status_label = QLabel('Connect the board to begin.')
         top.addWidget(self.status_label, stretch=1)
 
         root.addLayout(top)
 
-        # Content row: config left, results right
+        # Content row: config+log left, results right
         content = QHBoxLayout()
         content.setSpacing(8)
 
-        # Config panel
+        # ── Left column: config panel + activity log ──────────────────
+        left_col = QVBoxLayout()
+        left_col.setSpacing(4)
+
         cfg_box = QGroupBox('Configuration')
-        cfg_box.setFixedWidth(320)
+        cfg_box.setFixedWidth(420)
         form = QFormLayout(cfg_box)
         form.setSpacing(6)
 
@@ -215,7 +301,6 @@ class MainWindow(QMainWindow):
         self.sp_avg.setValue(100)
         form.addRow('Averages N:', self.sp_avg)
 
-        # freq/pulse pairs: "25/10, 20/20, 5/40"  →  (freq kHz)/(pulse µs)
         self.le_fp_pairs = QLineEdit('25/10, 20/20, 5/40')
         self.le_fp_pairs.setToolTip(
             'Comma-separated freq/pulse pairs (kHz/µs)\n'
@@ -225,24 +310,46 @@ class MainWindow(QMainWindow):
         self.le_targets = QLineEdit('4.5, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5, 1.0, 0.5')
         form.addRow('Targets (V):', self.le_targets)
 
-        content.addWidget(cfg_box)
+        left_col.addWidget(cfg_box)
+
+        # Activity log
+        log_box_grp = QGroupBox('Activity Log')
+        log_box_grp.setFixedWidth(420)
+        log_layout = QVBoxLayout(log_box_grp)
+        log_layout.setContentsMargins(4, 4, 4, 4)
+
+        self.log_box = QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMinimumHeight(160)
+        self.log_box.setPlaceholderText('Activity log…')
+        log_layout.addWidget(self.log_box)
+
+        left_col.addWidget(log_box_grp, stretch=1)
+        content.addLayout(left_col)
+        # ─────────────────────────────────────────────────────────────
 
         # Results area
         right = QVBoxLayout()
         right.setSpacing(4)
 
+        # Calibration table container (upper splitter pane)
+        cal_container = QWidget()
+        cal_layout = QVBoxLayout(cal_container)
+        cal_layout.setContentsMargins(0, 0, 0, 0)
+        cal_layout.setSpacing(4)
+
         self.progress_label = QLabel('Ready — configure parameters and press Run.')
-        right.addWidget(self.progress_label)
+        cal_layout.addWidget(self.progress_label)
 
         self.table = QTableWidget(0, 0)
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
-        right.addWidget(self.table, stretch=1)
+        cal_layout.addWidget(self.table, stretch=1)
 
-        # ── Thermal monitoring section ────────────────────────────────
-        therm_grp = QGroupBox('Thermal Monitoring')
+        # ── Live monitoring + Auto Nudge section ─────────────────────
+        therm_grp = QGroupBox('Live Monitoring & Auto Nudge')
         therm_layout = QVBoxLayout(therm_grp)
         therm_layout.setSpacing(4)
 
@@ -275,6 +382,10 @@ class MainWindow(QMainWindow):
         self.sp_thermal_n.setRange(2, 2000)
         self.sp_thermal_n.setValue(50)
         self.sp_thermal_n.setFixedWidth(70)
+        self.sp_thermal_n.setToolTip(
+            'Rolling window (frames) for std dev — shared by Thermal and Auto Nudge.\n'
+            'Keep ≤ 200 with Auto: at ~100 Hz W-rate, N=200 ≈ 2 s; thermal drift\n'
+            '(~50 µV/s) contributes ~100 µV — well below the 500 µV default threshold.')
         ctrl.addWidget(self.sp_thermal_n)
 
         self.lbl_thermal_status = QLabel('')
@@ -282,32 +393,158 @@ class MainWindow(QMainWindow):
 
         therm_layout.addLayout(ctrl)
 
-        therm_layout.addWidget(QLabel('Latest mean (mV):'))
+        lbl_mean = QLabel('Latest mean (mV):')
+        lbl_mean.setStyleSheet('font-weight: bold;')
+        therm_layout.addWidget(lbl_mean)
 
         self.tbl_thermal_mean = QTableWidget(0, 0)
         self.tbl_thermal_mean.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_thermal_mean.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tbl_thermal_mean.setMaximumHeight(140)
-        therm_layout.addWidget(self.tbl_thermal_mean)
+        self.tbl_thermal_mean.setMinimumHeight(80)
+        therm_layout.addWidget(self.tbl_thermal_mean, stretch=1)
 
-        therm_layout.addWidget(QLabel('Std dev (mV):'))
+        lbl_std = QLabel('Std dev (mV):')
+        lbl_std.setStyleSheet('font-weight: bold;')
+        therm_layout.addWidget(lbl_std)
 
         self.tbl_thermal_std = QTableWidget(0, 0)
         self.tbl_thermal_std.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_thermal_std.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tbl_thermal_std.setMaximumHeight(140)
-        therm_layout.addWidget(self.tbl_thermal_std)
+        self.tbl_thermal_std.setMinimumHeight(80)
+        therm_layout.addWidget(self.tbl_thermal_std, stretch=1)
 
-        right.addWidget(therm_grp)
+        # ── Auto Nudge sub-section ────────────────────────────────────
+        sep_lbl = QLabel('── Auto Nudge ──')
+        sep_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        therm_layout.addWidget(sep_lbl)
+
+        auto_row1 = QHBoxLayout()
+        auto_row1.setSpacing(6)
+
+        self.pb_auto = QPushButton('Auto')
+        self.pb_auto.setFixedWidth(70)
+        self.pb_auto.setEnabled(False)
+        self.pb_auto.clicked.connect(self._start_auto)
+        auto_row1.addWidget(self.pb_auto)
+
+        self.pb_auto_stop = QPushButton('Stop Auto')
+        self.pb_auto_stop.setFixedWidth(80)
+        self.pb_auto_stop.setEnabled(False)
+        self.pb_auto_stop.clicked.connect(self._stop_auto)
+        auto_row1.addWidget(self.pb_auto_stop)
+
+        auto_row1.addSpacing(8)
+        auto_row1.addWidget(QLabel('Soak:'))
+        self.sp_auto_soak_s = QSpinBox()
+        self.sp_auto_soak_s.setRange(5, 600)
+        self.sp_auto_soak_s.setValue(20)
+        self.sp_auto_soak_s.setSuffix(' s')
+        self.sp_auto_soak_s.setFixedWidth(70)
+        auto_row1.addWidget(self.sp_auto_soak_s)
+
+        auto_row1.addSpacing(8)
+        auto_row1.addWidget(QLabel('Max att/cell:'))
+        self.sp_auto_max_iter = QSpinBox()
+        self.sp_auto_max_iter.setRange(1, 20)
+        self.sp_auto_max_iter.setValue(5)
+        self.sp_auto_max_iter.setFixedWidth(50)
+        self.sp_auto_max_iter.setToolTip(
+            'Maximum nudge attempts per channel before flagging it and moving on.')
+        auto_row1.addWidget(self.sp_auto_max_iter)
+
+        self.lbl_auto_status = QLabel('')
+        auto_row1.addWidget(self.lbl_auto_status, stretch=1)
+
+        therm_layout.addLayout(auto_row1)
+
+        auto_row2 = QHBoxLayout()
+        auto_row2.setSpacing(6)
+
+        auto_row2.addWidget(QLabel('Threshold:'))
+        self.sp_auto_threshold_mv = QDoubleSpinBox()
+        self.sp_auto_threshold_mv.setRange(0.01, 100.0)
+        self.sp_auto_threshold_mv.setValue(0.5)
+        self.sp_auto_threshold_mv.setSuffix(' mV')
+        self.sp_auto_threshold_mv.setDecimals(2)
+        self.sp_auto_threshold_mv.setFixedWidth(90)
+        auto_row2.addWidget(self.sp_auto_threshold_mv)
+
+        auto_row2.addSpacing(8)
+        auto_row2.addWidget(QLabel('Nudge:'))
+        self.sp_auto_nudge_ns = QSpinBox()
+        self.sp_auto_nudge_ns.setRange(8, 960)
+        self.sp_auto_nudge_ns.setSingleStep(8)
+        self.sp_auto_nudge_ns.setValue(80)
+        self.sp_auto_nudge_ns.setSuffix(' ns')
+        self.sp_auto_nudge_ns.setFixedWidth(80)
+        self.sp_auto_nudge_ns.setToolTip(
+            'Step magnitude (ns, multiple of 8 ns PWM grid).\n'
+            'Applied as −N first toward earlier delays; flips to +N on cap hit.')
+        auto_row2.addWidget(self.sp_auto_nudge_ns)
+
+        auto_row2.addSpacing(8)
+        auto_row2.addWidget(QLabel('Cap ±:'))
+        self.sp_auto_cap_ns = QSpinBox()
+        self.sp_auto_cap_ns.setRange(8, 9600)
+        self.sp_auto_cap_ns.setSingleStep(8)
+        self.sp_auto_cap_ns.setValue(960)
+        self.sp_auto_cap_ns.setSuffix(' ns')
+        self.sp_auto_cap_ns.setFixedWidth(90)
+        self.sp_auto_cap_ns.setToolTip(
+            'Max total deviation from calibrated delay in either direction.\n'
+            'At ~115 mV/80 ns slope, 960 ns cap ≈ 1.4 V shift from target voltage.')
+        auto_row2.addWidget(self.sp_auto_cap_ns)
+
+        auto_row2.addStretch()
+        therm_layout.addLayout(auto_row2)
         # ─────────────────────────────────────────────────────────────
+
+        # Vertical splitter: cal table (top, 2×) | monitoring + nudge (bottom, 1×)
+        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.v_splitter.addWidget(cal_container)
+        self.v_splitter.addWidget(therm_grp)
+        self.v_splitter.setStretchFactor(0, 2)
+        self.v_splitter.setStretchFactor(1, 1)
+        right.addWidget(self.v_splitter, stretch=1)
 
         content.addLayout(right, stretch=1)
         root.addLayout(content, stretch=1)
 
         self.setCentralWidget(central)
         self.statusBar().showMessage('Not connected')
+
+    # ------------------------------------------------------------------
+    # Activity log
+    # ------------------------------------------------------------------
+    def _log(self, msg: str):
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.log_box.appendPlainText(f'[{ts}] {msg}')
+
+    def _ch_label(self, ch: int) -> str:
+        """Map flat channel index to 'ch{N} [band/target_V]' for log readability."""
+        if (not self._fp_pairs or not self._targets_v
+                or self._thermal_n_cells == 0):
+            return f'ch{ch}'
+        b = ch // self._thermal_n_cells
+        c = ch  % self._thermal_n_cells
+        band = (self._row_label(*self._fp_pairs[b])
+                if b < len(self._fp_pairs) else f'b{b}')
+        volt = (f'{self._targets_v[c]:.1f}V'
+                if c < len(self._targets_v) else f'c{c}')
+        return f'ch{ch} [{band}/{volt}]'
+
+    def _auto_color_cell(self, ch: int, color: QColor):
+        """Set the same background colour on all three tables for a flat channel index."""
+        if self._thermal_n_cells == 0:
+            return
+        b = ch // self._thermal_n_cells
+        c = ch  % self._thermal_n_cells
+        for tbl in (self.table, self.tbl_thermal_mean, self.tbl_thermal_std):
+            item = tbl.item(b, c)
+            if item:
+                item.setBackground(color)
 
     # ------------------------------------------------------------------
     # Serial
@@ -326,11 +563,13 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage('Serial port error.')
         else:
             self.stop_calibration()
+            self._stop_auto()
             self._stop_thermal()
             self._serial_open(False)
             self.pb_connect.setText('Not Connected')
             self.pb_connect.setStyleSheet(self.MY_YELLOW)
             self.pb_run.setEnabled(False)
+            self._log('Disconnected.')
             self.statusBar().showMessage('Disconnected.')
 
     def _serial_open(self, flag):
@@ -361,7 +600,8 @@ class MainWindow(QMainWindow):
             self.last_packet = raw
             self._update_status_bar()
 
-            if self._thermal_state == 'running' and raw.startswith('W'):
+            if (self._thermal_state == 'running' or self._auto_state == 'soaking') \
+                    and raw.startswith('W'):
                 self._on_thermal_w_record(raw)
                 continue
 
@@ -374,11 +614,6 @@ class MainWindow(QMainWindow):
     # Calibration sweep
     # ------------------------------------------------------------------
     def _parse_config(self):
-        """
-        Parse config widgets.
-        Returns (fp_pairs, thresholds_uV, targets_v).
-        fp_pairs: list of (freq_khz, pulse_us) tuples, in entry order.
-        """
         fp_pairs = []
         for token in self.le_fp_pairs.text().split(','):
             token = token.strip()
@@ -392,11 +627,9 @@ class MainWindow(QMainWindow):
                 freq_khz = float(parts[0].strip())
                 pulse_us = float(parts[1].strip())
             except ValueError:
-                raise ValueError(
-                    f'Non-numeric freq/pulse pair "{token}"')
+                raise ValueError(f'Non-numeric freq/pulse pair "{token}"')
             if freq_khz <= 0 or pulse_us <= 0:
-                raise ValueError(
-                    f'Freq and pulse must be positive (got "{token}")')
+                raise ValueError(f'Freq and pulse must be positive (got "{token}")')
             fp_pairs.append((freq_khz, pulse_us))
         if not fp_pairs:
             raise ValueError('Enter at least one freq/pulse pair.')
@@ -433,7 +666,6 @@ class MainWindow(QMainWindow):
                 self.table.setItem(r, c, item)
 
     def _mark_row_pending(self, row):
-        """Highlight unmeasured cells in the current row as in-progress."""
         for c in range(self._thresh_idx, len(self._thresholds)):
             item = self.table.item(row, c)
             if item:
@@ -470,12 +702,14 @@ class MainWindow(QMainWindow):
         self.pb_export.setEnabled(False)
         self.pb_export_profile.setEnabled(False)
         self.pb_thermal.setEnabled(False)
+        self.pb_auto.setEnabled(False)
 
-        self.send_command('E')     # ensure firmware is in ready state
+        self._log(f'Starting calibration — {len(fp_pairs)} pair(s), '
+                  f'{len(targets_v)} threshold(s)')
+        self.send_command('E')
         self._send_next_step()
 
     def _send_next_step(self):
-        """Send * config + A<n> for the current (freq, pulse, delay)."""
         if self._state != 'sweeping':
             return
 
@@ -487,7 +721,8 @@ class MainWindow(QMainWindow):
             self._advance_pair()
             return
 
-        self.send_command(f'*{freq:.1f},{pulse:.1f},{self._delay:.2f},256')
+        self._log(f'→ {self._row_label(freq, pulse)}  delay {self._delay:.3f} µs')
+        self.send_command(f'*{int(round(freq * 1000))},{int(round(pulse * 1000))},{int(round(self._delay * 1000))},256')
         self.send_command(f'A{n}')
 
         total = len(self._fp_pairs) * len(self._thresholds)
@@ -497,10 +732,8 @@ class MainWindow(QMainWindow):
             f'{done}/{total} thresholds found')
 
     def _on_r_record(self, line):
-        """Parse R record and advance sweep state machine."""
         if self._state != 'sweeping':
             return
-        # Format: R<t>, <mean_uV>, <std_uV>, <count>, <freq_kHz>, <pulse_us>, <delay_us>
         parts = line[1:].split(',')
         try:
             mean_uV = int(parts[1])
@@ -519,9 +752,6 @@ class MainWindow(QMainWindow):
 
         self._check_thresholds(mean_uV)
 
-        # Only advance to the next step if _check_thresholds() did NOT call _advance_pair().
-        # If it did, _advance_pair already reset all state and called _send_next_step().
-        # Sending again here would corrupt the new pair's pipeline with a double-send.
         if self._state == 'sweeping' and self._pair_idx == current_pair_idx:
             self._prev_delay = current_delay
             self._prev_uV    = mean_uV
@@ -531,23 +761,21 @@ class MainWindow(QMainWindow):
             self._send_next_step()
 
     def _check_thresholds(self, mean_uV):
-        """Detect all threshold crossings in this step; fill cells with interpolated delays."""
         while self._thresh_idx < len(self._thresholds):
             target_uV = self._thresholds[self._thresh_idx]
             if mean_uV > target_uV:
-                break   # not yet crossed
+                break
 
-            # Crossed — linear interpolation between previous and current reading,
-            # then snap to the 8 ns PWM clock grid to avoid ±1 LSB jitter.
             if (self._prev_uV is not None
                     and self._prev_uV > target_uV
                     and self._prev_uV != mean_uV):
                 frac = (self._prev_uV - target_uV) / (self._prev_uV - mean_uV)
                 interp = self._prev_delay + frac * (self._delay - self._prev_delay)
             else:
-                interp = self._delay   # first step already at or below threshold
+                interp = self._delay
             interp = _snap_8ns(interp)
 
+            self._log(f'  ✓ {target_uV / 1_000_000:.1f} V at {interp:.3f} µs')
             self._fill_cell(self._pair_idx, self._thresh_idx,
                             f'{interp:.3f}', color=_COL_DONE)
             self._thresh_idx += 1
@@ -567,12 +795,13 @@ class MainWindow(QMainWindow):
             item.setBackground(color)
 
     def _mark_remaining_nr(self):
-        """Mark all unfound thresholds for the current row as N/R."""
+        count = len(self._thresholds) - self._thresh_idx
+        if count:
+            self._log(f'  — {count} threshold(s) not reached within max delay (N/R)')
         for c in range(self._thresh_idx, len(self._thresholds)):
             self._fill_cell(self._pair_idx, c, 'N/R', color=_COL_NR)
 
     def _advance_pair(self):
-        """Move to the next freq/pulse pair, or finish if all pairs done."""
         self._pair_idx   += 1
         self._thresh_idx  = 0
         self._step_count  = 0
@@ -594,8 +823,10 @@ class MainWindow(QMainWindow):
         self.pb_export.setEnabled(True)
         self.pb_export_profile.setEnabled(True)
         self.pb_thermal.setEnabled(True)
+        self.pb_auto.setEnabled(True)
         self.progress_label.setText('Calibration complete.')
-        self.status_label.setText('Done — Export CSV / Export Profile / THERMAL.')
+        self.status_label.setText('Done — Export CSV / Export Profile / THERMAL / Auto.')
+        self._log('Calibration done.')
         self.statusBar().showMessage('Calibration complete.')
 
     def stop_calibration(self):
@@ -607,14 +838,16 @@ class MainWindow(QMainWindow):
         self.pb_export.setEnabled(self.table.rowCount() > 0)
         self.pb_export_profile.setEnabled(
             self.table.rowCount() > 0 and bool(self._fp_pairs))
+        self.pb_auto.setEnabled(
+            self.serial.isOpen() and self.table.rowCount() > 0 and bool(self._fp_pairs))
         self.progress_label.setText('Stopped.')
         self.status_label.setText('Sweep stopped.')
+        self._log('Calibration stopped.')
 
     # ------------------------------------------------------------------
     # Profile export
     # ------------------------------------------------------------------
     def _build_profile(self):
-        """Build a classviz-compatible profile dict from the calibration table."""
         max_delay = self.sp_max.value()
         bands = []
         for r, (freq_khz, pulse_us) in enumerate(self._fp_pairs):
@@ -654,6 +887,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f'Profile saved: {path}')
         self.status_label.setText(f'Profile → {os.path.basename(path)}')
 
+    def _import_profile(self):
+        """Load a JSON profile into the calibration table, bypassing a sweep."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Import Profile', PROFILES_DIR, 'JSON profiles (*.json)')
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                profile = json.load(f)
+            bands = profile.get('bands', [])
+            if not bands:
+                raise ValueError('No bands in profile.')
+            targets_v = bands[0].get('threshold_v')
+            if not targets_v:
+                raise ValueError('Profile has no threshold_v field.')
+
+            fp_pairs      = [(b['freq_hz'] / 1000.0, b['pulse_us']) for b in bands]
+            thresholds_uV = [int(v * 1_000_000) for v in targets_v]
+
+            self._fp_pairs    = fp_pairs
+            self._targets_v   = targets_v
+            self._thresholds  = thresholds_uV
+            self._state       = 'done'
+
+            self._rebuild_table(fp_pairs, targets_v)
+            for r, band in enumerate(bands):
+                for c, delay in enumerate(band['delays_us']):
+                    if c < len(targets_v):
+                        self._fill_cell(r, c, f'{delay:.3f}', color=_COL_DONE)
+
+            connected = self.serial.isOpen()
+            self.pb_export.setEnabled(True)
+            self.pb_export_profile.setEnabled(True)
+            self.pb_thermal.setEnabled(connected)
+            self.pb_auto.setEnabled(connected)
+
+            name = profile.get('name', os.path.basename(path))
+            self.progress_label.setText(
+                f'Imported: {name}  ({len(fp_pairs)} band(s), '
+                f'{len(targets_v)} threshold(s))')
+            self.statusBar().showMessage(f'Profile imported: {os.path.basename(path)}')
+            self._log(f'Profile imported: {os.path.basename(path)} '
+                      f'— {len(fp_pairs)} band(s), {len(targets_v)} threshold(s)')
+        except (KeyError, ValueError, json.JSONDecodeError, OSError) as e:
+            self.statusBar().showMessage(f'Import error: {e}')
+            self._log(f'Import failed: {e}')
+
     # ------------------------------------------------------------------
     # D command builder (same format as pimd_classviz.py)
     # ------------------------------------------------------------------
@@ -687,7 +967,6 @@ class MainWindow(QMainWindow):
         self._thermal_remaining  = float(self.sp_thermal_secs.value())
         self._thermal_state      = 'running'
 
-        # Define dynamic profile and start Mode 2 streaming
         self.send_command('E')
         self.send_command(self._build_d_command(profile))
         self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
@@ -704,8 +983,10 @@ class MainWindow(QMainWindow):
         self.pb_thermal.setStyleSheet(self.MY_GREEN)
         self.pb_thermal_stop.setEnabled(True)
         self.pb_run.setEnabled(False)
+        self.pb_auto.setEnabled(False)
         self.lbl_thermal_status.setText(
             f'Running — {int(self._thermal_remaining)} s remaining')
+        self._log(f'THERMAL started ({int(self._thermal_remaining)} s)')
         self.statusBar().showMessage('Thermal monitoring started.')
 
     def _stop_thermal(self):
@@ -721,20 +1002,22 @@ class MainWindow(QMainWindow):
         self.pb_thermal.setStyleSheet('')
         self.pb_thermal_stop.setEnabled(False)
         self.pb_run.setEnabled(self.serial.isOpen())
+        self.pb_auto.setEnabled(bool(self._fp_pairs) and self.serial.isOpen())
         self.lbl_thermal_status.setText('Stopped.')
+        self._log('THERMAL stopped.')
         self.statusBar().showMessage('Thermal monitoring stopped.')
 
     def _thermal_tick(self):
         self._thermal_remaining -= 1.0
         if self._thermal_remaining <= 0:
             self.lbl_thermal_status.setText('Complete.')
+            self._log('THERMAL complete.')
             self._stop_thermal()
         else:
             self.lbl_thermal_status.setText(
                 f'Running — {int(self._thermal_remaining)} s remaining')
 
     def _rebuild_thermal_tables(self, profile):
-        """Size both thermal tables to match the profile dimensions."""
         row_labels = [
             self._row_label(b['freq_hz'] / 1000, b['pulse_us'])
             for b in profile['bands']
@@ -754,7 +1037,6 @@ class MainWindow(QMainWindow):
                     tbl.setItem(r, c, item)
 
     def _on_thermal_w_record(self, line):
-        """Parse W record from Mode 2 streaming and feed thermal display."""
         line = line.replace(', ', ',')
         parts = line.split(',')
         try:
@@ -767,12 +1049,13 @@ class MainWindow(QMainWindow):
         except (ValueError, IndexError):
             return
 
+        if self._auto_settling:
+            return  # discard transition frames until signal settles
         self._thermal_latest = raw
         self._thermal_buf.append(raw)
         self._update_thermal_tables()
 
     def _update_thermal_tables(self):
-        """Update mean and std-dev tables; rate-limited to ~10 Hz."""
         now = time.time()
         if now - self._thermal_last_redraw < 0.1:
             return
@@ -784,6 +1067,7 @@ class MainWindow(QMainWindow):
         latest = self._thermal_latest
         n = self.sp_thermal_n.value()
         recent = list(self._thermal_buf)[-n:]
+        threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
 
         for b in range(self._thermal_n_bands):
             for c in range(self._thermal_n_cells):
@@ -796,10 +1080,419 @@ class MainWindow(QMainWindow):
                 item_s = self.tbl_thermal_std.item(b, c)
                 if item_s:
                     if len(recent) >= 2:
-                        vals = [frame[ch] for frame in recent]
-                        item_s.setText(f'{_stdev(vals) / 1000:.2f}')
+                        vals   = [frame[ch] for frame in recent]
+                        std_uV = _stdev(vals)
+                        item_s.setText(f'{std_uV / 1000:.2f}')
                     else:
                         item_s.setText('0.00')
+
+                # Mirror calibration table status colour to both thermal tables
+                if self._auto_running:
+                    cal_item = self.table.item(b, c)
+                    if cal_item:
+                        bg = cal_item.background()
+                        if item_m:
+                            item_m.setBackground(bg)
+                        if item_s:
+                            item_s.setBackground(bg)
+
+    # ------------------------------------------------------------------
+    # Auto Nudge — sequential per-channel processing
+    #
+    # Phase "initial": one soak with the calibrated profile; all channels
+    #   evaluated; bad-channel list built in order.
+    # Phase "channel": each bad channel is tackled one at a time.
+    #   Per channel: nudge → soak → evaluate that channel.
+    #   If pass: advance to next channel.
+    #   If fail and attempts < max: nudge again.
+    #   If fail and attempts == max: flag channel (keep best-std delay), advance.
+    # All channels stream together in every soak (Mode 2 requires multi-cell).
+    # ------------------------------------------------------------------
+    def _start_auto(self):
+        if not self.serial.isOpen():
+            self.statusBar().showMessage('Not connected.')
+            return
+        if not self._fp_pairs or not self._targets_v:
+            self.statusBar().showMessage('Run calibration first.')
+            return
+
+        profile = self._build_profile()
+        n_bands = len(profile['bands'])
+        if n_bands == 0:
+            self.statusBar().showMessage('No calibration bands.')
+            return
+        n_cells = len(profile['bands'][0]['delays_us'])
+        n_ch    = n_bands * n_cells
+
+        if n_ch < 2:
+            self.statusBar().showMessage(
+                'Auto Nudge requires ≥ 2 channels '
+                '(need at least 2 target voltages or freq/pulse pairs).')
+            return
+
+        self._thermal_n_bands    = n_bands
+        self._thermal_n_cells    = n_cells
+        self._thermal_n_channels = n_ch
+        self._thermal_buf.clear()
+        self._thermal_latest     = None
+        self._rebuild_thermal_tables(profile)
+
+        self._auto_cal_delays_flat = [
+            profile['bands'][b]['delays_us'][c]
+            for b in range(n_bands) for c in range(n_cells)
+        ]
+        self._auto_cur_delays_flat  = list(self._auto_cal_delays_flat)
+        self._auto_dir_flat         = [-1] * n_ch
+        self._auto_dir_flipped      = [False] * n_ch
+        self._auto_best_std_uV      = [float('inf')] * n_ch
+        self._auto_best_delays_flat = list(self._auto_cal_delays_flat)
+
+        self._auto_skip_flat = []
+        for b in range(n_bands):
+            for c in range(n_cells):
+                item = self.table.item(b, c)
+                text = item.text() if item else ''
+                self._auto_skip_flat.append(text in ('N/R', ''))
+
+        self._auto_cur_profile  = profile
+        self._auto_phase        = 'initial'
+        self._auto_targets      = []
+        self._auto_target_idx   = 0
+        self._auto_ch_attempts  = 0
+
+        self.pb_auto.setEnabled(False)
+        self.pb_auto.setStyleSheet(self.MY_GREEN)
+        self.pb_auto_stop.setEnabled(True)
+        self.pb_run.setEnabled(False)
+        self.pb_thermal.setEnabled(False)
+        self.pb_thermal_stop.setEnabled(False)
+        self.lbl_thermal_status.setText('Auto running…')
+
+        self._auto_running = True
+        n_active = sum(1 for s in self._auto_skip_flat if not s)
+        self._log(f'Auto Nudge starting — {n_ch} channels ({n_active} active), '
+                  f'threshold {self.sp_auto_threshold_mv.value():.2f} mV, '
+                  f'max {self.sp_auto_max_iter.value()} attempts/cell')
+        self._log('Phase 1: initial soak to identify bad channels…')
+        self._auto_run_soak()
+
+    def _stop_auto(self):
+        was_soaking = (self._auto_state == 'soaking')
+        if self._auto_soak_timer:
+            self._auto_soak_timer.stop()
+            self._auto_soak_timer = None
+        self._auto_state    = 'idle'
+        self._auto_running  = False
+        self._auto_settling = False
+        if was_soaking and self.serial.isOpen():
+            self.send_command('E')
+        self.pb_auto.setEnabled(bool(self._fp_pairs) and self.serial.isOpen())
+        self.pb_auto.setStyleSheet('')
+        self.pb_auto_stop.setEnabled(False)
+        self.pb_run.setEnabled(self.serial.isOpen())
+        self.pb_thermal.setEnabled(bool(self._fp_pairs))
+        self.lbl_thermal_status.setText('')
+        if was_soaking:
+            self._log('Auto Nudge stopped by user.')
+            self.lbl_auto_status.setText('Stopped.')
+            self.statusBar().showMessage('Auto Nudge stopped.')
+
+    def _auto_run_soak(self):
+        """Push current delays into profile, start Mode 2 stream, arm soak timer."""
+        n_cells = self._thermal_n_cells
+        for b, band in enumerate(self._auto_cur_profile['bands']):
+            band['delays_us'] = [
+                self._auto_cur_delays_flat[b * n_cells + c]
+                for c in range(n_cells)
+            ]
+
+        self._thermal_buf.clear()
+        self.send_command('E')
+        self.send_command(self._build_d_command(self._auto_cur_profile))
+        self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
+        self.send_command('G')
+        self._auto_state    = 'soaking'
+        self._auto_settling = True
+        QTimer.singleShot(1000, self._auto_settle_done)
+
+        soak_ms = self.sp_auto_soak_s.value() * 1000
+        self._auto_soak_timer = QTimer(self)
+        self._auto_soak_timer.setSingleShot(True)
+        self._auto_soak_timer.timeout.connect(self._auto_soak_done)
+        self._auto_soak_timer.start(soak_ms)
+
+        if self._auto_phase == 'initial':
+            self.lbl_auto_status.setText(
+                f'Initial soak {self.sp_auto_soak_s.value()} s…')
+        else:
+            ch         = self._auto_targets[self._auto_target_idx]
+            n_targets  = len(self._auto_targets)
+            max_att    = self.sp_auto_max_iter.value()
+            self.lbl_auto_status.setText(
+                f'{self._ch_label(ch)} — '
+                f'cell {self._auto_target_idx + 1}/{n_targets}, '
+                f'attempt {self._auto_ch_attempts + 1}/{max_att} — '
+                f'soaking {self.sp_auto_soak_s.value()} s…')
+
+    def _auto_soak_done(self):
+        if self._auto_state != 'soaking':
+            return
+        self._auto_state = 'idle'
+        self.send_command('E')
+        QTimer.singleShot(200, self._auto_evaluate)
+
+    def _auto_settle_done(self):
+        """1-second settling gate expired: begin accepting W records into the buffer."""
+        self._auto_settling = False
+        self._thermal_buf.clear()   # discard any stray frames that arrived during gate
+
+    def _auto_evaluate(self):
+        """Dispatch to initial or per-channel evaluator."""
+        if self._auto_phase == 'initial':
+            self._auto_evaluate_initial()
+        else:
+            self._auto_evaluate_channel()
+
+    def _auto_evaluate_initial(self):
+        """Evaluate all channels; build ordered bad list; start first channel."""
+        if not self._fp_pairs:
+            return
+        threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
+        n            = self.sp_thermal_n.value()
+        recent       = list(self._thermal_buf)[-n:]
+        n_ch         = self._thermal_n_channels
+
+        bad = []
+        for ch in range(n_ch):
+            if self._auto_skip_flat[ch]:
+                continue
+            if len(recent) < 2:
+                std_uV = float('inf')
+            else:
+                vals   = [frame[ch] for frame in recent]
+                std_uV = _stdev(vals)
+            if std_uV < self._auto_best_std_uV[ch]:
+                self._auto_best_std_uV[ch]      = std_uV
+                self._auto_best_delays_flat[ch] = self._auto_cur_delays_flat[ch]
+            result = 'BAD' if std_uV > threshold_uV else 'ok'
+            std_mv = std_uV / 1000.0
+            mean_v = (self._thermal_latest[ch] / 1_000_000
+                      if self._thermal_latest else 0.0)
+            self._log(f'  {self._ch_label(ch)}: σ={std_mv:.2f} mV  '
+                      f'mean={mean_v:.3f} V  [{result}]')
+            if std_uV > threshold_uV:
+                bad.append(ch)
+
+        # Colour calibration table: good → green, bad → yellow (queued)
+        bad_set = set(bad)
+        for ch in range(n_ch):
+            if self._auto_skip_flat[ch]:
+                continue
+            self._auto_color_cell(
+                ch, _COL_AUTO_QUEUED if ch in bad_set else _COL_DONE)
+
+        if not bad:
+            self._log('All channels within threshold — nothing to nudge.')
+            self._auto_finish(all_pass=True)
+            return
+
+        self._auto_targets    = bad
+        self._auto_target_idx = 0
+        self._auto_ch_attempts = 0
+        self._log(f'Phase 2: {len(bad)} bad channel(s) → processing sequentially')
+        self._auto_start_next_channel()
+
+    def _auto_start_next_channel(self):
+        """Nudge the current target channel and start its first soak."""
+        if self._auto_target_idx >= len(self._auto_targets):
+            self._auto_finish(all_pass=False)
+            return
+        self._auto_phase       = 'channel'
+        self._auto_ch_attempts = 0
+        ch  = self._auto_targets[self._auto_target_idx]
+        idx = self._auto_target_idx
+        n   = len(self._auto_targets)
+        self._log(f'Working on {self._ch_label(ch)} '
+                  f'({idx + 1} of {n} bad channels):')
+        self._auto_color_cell(ch, _COL_AUTO_WORKING)
+        self._auto_nudge_channel(ch)
+        self._auto_run_soak()
+
+    def _auto_evaluate_channel(self):
+        """Evaluate only the current target channel; advance or retry."""
+        if not self._auto_targets:
+            self._auto_finish(all_pass=False)
+            return
+        ch           = self._auto_targets[self._auto_target_idx]
+        threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
+        max_att      = self.sp_auto_max_iter.value()
+        n            = self.sp_thermal_n.value()
+        recent       = list(self._thermal_buf)[-n:]
+
+        if len(recent) < 2:
+            std_uV = float('inf')
+        else:
+            vals   = [frame[ch] for frame in recent]
+            std_uV = _stdev(vals)
+
+        if std_uV < self._auto_best_std_uV[ch]:
+            self._auto_best_std_uV[ch]      = std_uV
+            self._auto_best_delays_flat[ch] = self._auto_cur_delays_flat[ch]
+
+        std_mv  = std_uV / 1000.0
+        cur_us  = self._auto_cur_delays_flat[ch]
+        mean_v  = (self._thermal_latest[ch] / 1_000_000
+                   if self._thermal_latest else 0.0)
+
+        if std_uV <= threshold_uV:
+            self._log(f'  attempt {self._auto_ch_attempts + 1}: '
+                      f'σ={std_mv:.2f} mV @ {cur_us:.3f} µs  '
+                      f'mean={mean_v:.3f} V  → PASSED')
+            self._auto_color_cell(ch, _COL_DONE)
+            self._auto_target_idx  += 1
+            self._auto_ch_attempts  = 0
+            self._auto_start_next_channel()
+            return
+
+        # Still bad
+        self._log(f'  attempt {self._auto_ch_attempts + 1}/{max_att}: '
+                  f'σ={std_mv:.2f} mV @ {cur_us:.3f} µs  '
+                  f'mean={mean_v:.3f} V  → BAD')
+
+        if self._auto_ch_attempts >= max_att - 1:
+            best_us = self._auto_best_delays_flat[ch]
+            best_mv = self._auto_best_std_uV[ch] / 1000.0
+            self._log(f'  max attempts reached — flagging. '
+                      f'Best: {best_us:.3f} µs (σ={best_mv:.2f} mV)')
+            self._auto_color_cell(ch, _COL_AUTO_FLAGGED)
+            self._auto_target_idx  += 1
+            self._auto_ch_attempts  = 0
+            self._auto_start_next_channel()
+            return
+
+        self._auto_ch_attempts += 1
+        self._auto_nudge_channel(ch)
+        self._auto_run_soak()
+
+    def _auto_nudge_channel(self, ch: int):
+        """Nudge one channel by ±nudge_ns respecting the cap from cal delay."""
+        nudge_us = self.sp_auto_nudge_ns.value() / 1000.0
+        cap_us   = self.sp_auto_cap_ns.value()   / 1000.0
+        cal      = self._auto_cal_delays_flat[ch]
+        cur      = self._auto_cur_delays_flat[ch]
+        d        = self._auto_dir_flat[ch]
+
+        proposed = _snap_8ns(cur + d * nudge_us)
+
+        if abs(proposed - cal) <= cap_us:
+            self._auto_cur_delays_flat[ch] = proposed
+            self._log(f'  nudging {d * self.sp_auto_nudge_ns.value():+d} ns '
+                      f'→ {proposed:.3f} µs '
+                      f'(Δ {(proposed - cal) * 1000:+.0f} ns from cal)')
+        elif not self._auto_dir_flipped[ch]:
+            self._auto_dir_flipped[ch] = True
+            new_d = -d
+            self._auto_dir_flat[ch] = new_d
+            # Reset to cal and take first step in the new direction
+            self._auto_cur_delays_flat[ch] = cal
+            proposed2 = _snap_8ns(cal + new_d * nudge_us)
+            if abs(proposed2 - cal) <= cap_us:
+                self._auto_cur_delays_flat[ch] = proposed2
+                self._log(f'  cap hit ({d:+d} side) — flipping direction; '
+                          f'reset to cal {cal:.3f} µs → {proposed2:.3f} µs')
+            else:
+                self._log(f'  cap hit both sides (nudge_ns > cap_ns) — staying at cal')
+        else:
+            self._log(f'  both directions capped — no nudge; best-std fallback applies')
+
+    def _auto_finish(self, all_pass: bool):
+        """Update calibration table with best delays, report ΔV, export profile."""
+        self._auto_state   = 'idle'
+        self._auto_running = False
+        if self.serial.isOpen():
+            self.send_command('E')
+
+        n_cells      = self._thermal_n_cells
+        n_ch         = self._thermal_n_channels
+        threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
+
+        self._log('── Auto Nudge results ──')
+        n_still_bad = 0
+        for ch in range(n_ch):
+            if self._auto_skip_flat[ch]:
+                continue
+            b          = ch // n_cells
+            c          = ch  % n_cells
+            best_delay = self._auto_best_delays_flat[ch]
+            best_std   = self._auto_best_std_uV[ch]
+            cal_delay  = self._auto_cal_delays_flat[ch]
+            passed     = (best_std <= threshold_uV)
+
+            item = self.table.item(b, c)
+            if item:
+                item.setText(f'{best_delay:.3f}')
+            self._auto_color_cell(ch, _COL_DONE if passed else _COL_AUTO_FLAGGED)
+
+            delta_ns  = round((best_delay - cal_delay) * 1000)
+            status    = 'PASS' if passed else 'FLAGGED'
+            log_line  = (f'  {self._ch_label(ch)}: {best_delay:.3f} µs '
+                         f'(Δ{delta_ns:+d} ns)  '
+                         f'σ={best_std / 1000:.2f} mV  [{status}]')
+            if self._thermal_latest is not None and delta_ns != 0:
+                target_uV = self._targets_v[c] * 1_000_000
+                delta_mv  = (self._thermal_latest[ch] - target_uV) / 1000.0
+                log_line += f'  ΔV={delta_mv:+.1f} mV'
+            self._log(log_line)
+
+            if not passed:
+                n_still_bad += 1
+
+        n_active = sum(1 for s in self._auto_skip_flat if not s)
+        n_pass   = n_active - n_still_bad
+        if n_still_bad == 0:
+            summary = f'Auto complete — all {n_active} active cells passed.'
+        else:
+            summary = (f'Auto complete — {n_pass}/{n_active} passed, '
+                       f'{n_still_bad} flagged red.')
+        self._log(summary)
+
+        # Compact adjusted-delays summary (only channels where delay changed)
+        adjusted = [
+            ch for ch in range(n_ch)
+            if not self._auto_skip_flat[ch]
+            and round((self._auto_best_delays_flat[ch]
+                       - self._auto_cal_delays_flat[ch]) * 1000) != 0
+        ]
+        if adjusted:
+            self._log('── Adjusted delays ──')
+            for ch in adjusted:
+                best_us  = self._auto_best_delays_flat[ch]
+                cal_us   = self._auto_cal_delays_flat[ch]
+                delta_ns = round((best_us - cal_us) * 1000)
+                passed   = self._auto_best_std_uV[ch] <= threshold_uV
+                self._log(
+                    f'  {self._ch_label(ch):<32s}'
+                    f'  {cal_us:.3f} → {best_us:.3f} µs'
+                    f'  ({delta_ns:+d} ns)'
+                    f'  [{("PASS" if passed else "FLAGGED")}]')
+        else:
+            self._log('No delays were adjusted.')
+
+        self.lbl_auto_status.setText(summary)
+        self.lbl_thermal_status.setText('')
+        self.statusBar().showMessage(summary)
+        self.progress_label.setText(
+            f'{summary}  ·  {len(adjusted)} delay(s) adjusted')
+
+        self.pb_auto.setEnabled(True)
+        self.pb_auto.setStyleSheet('')
+        self.pb_auto_stop.setEnabled(False)
+        self.pb_run.setEnabled(self.serial.isOpen())
+        self.pb_thermal.setEnabled(bool(self._fp_pairs))
+        self.pb_export.setEnabled(True)
+        self.pb_export_profile.setEnabled(True)
+
+        self.export_profile()
 
     # ------------------------------------------------------------------
     # CSV export
@@ -827,6 +1520,71 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'Export error: {e}')
 
     # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+    def _load_settings(self):
+        try:
+            with open(SETTINGS_PATH) as f:
+                s = json.load(f)
+            self.le_port.setText(             s.get('port',              self.le_port.text()))
+            self.sp_start.setValue(           s.get('start_delay',       self.sp_start.value()))
+            self.sp_step.setValue(            s.get('step_size',         self.sp_step.value()))
+            self.sp_max.setValue(             s.get('max_delay',         self.sp_max.value()))
+            self.sp_avg.setValue(             s.get('averages',          self.sp_avg.value()))
+            self.le_fp_pairs.setText(         s.get('fp_pairs',          self.le_fp_pairs.text()))
+            self.le_targets.setText(          s.get('targets',           self.le_targets.text()))
+            self.sp_thermal_secs.setValue(    s.get('thermal_secs',      self.sp_thermal_secs.value()))
+            self.sp_thermal_n.setValue(       s.get('thermal_n',         self.sp_thermal_n.value()))
+            self.sp_auto_soak_s.setValue(     s.get('auto_soak_s',       self.sp_auto_soak_s.value()))
+            self.sp_auto_max_iter.setValue(   s.get('auto_max_iter',     self.sp_auto_max_iter.value()))
+            self.sp_auto_threshold_mv.setValue(s.get('auto_threshold_mv', self.sp_auto_threshold_mv.value()))
+            self.sp_auto_nudge_ns.setValue(   s.get('auto_nudge_ns',     self.sp_auto_nudge_ns.value()))
+            self.sp_auto_cap_ns.setValue(     s.get('auto_cap_ns',       self.sp_auto_cap_ns.value()))
+            # Window geometry
+            w = int(s.get('window_w', 1440))
+            h = int(s.get('window_h', 1200))
+            self.resize(w, h)
+            x, y = s.get('window_x'), s.get('window_y')
+            if x is not None and y is not None:
+                self.move(int(x), int(y))
+            # Splitter sizes (deferred so widget is laid out first)
+            splitter_sizes = s.get('splitter')
+            if splitter_sizes and len(splitter_sizes) == 2:
+                QTimer.singleShot(0, lambda: self.v_splitter.setSizes(
+                    [int(v) for v in splitter_sizes]))
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            self.resize(1440, 1200)  # first run — use default size
+
+    def _save_settings(self):
+        s = {
+            'port':              self.le_port.text(),
+            'start_delay':       self.sp_start.value(),
+            'step_size':         self.sp_step.value(),
+            'max_delay':         self.sp_max.value(),
+            'averages':          self.sp_avg.value(),
+            'fp_pairs':          self.le_fp_pairs.text(),
+            'targets':           self.le_targets.text(),
+            'thermal_secs':      self.sp_thermal_secs.value(),
+            'thermal_n':         self.sp_thermal_n.value(),
+            'auto_soak_s':       self.sp_auto_soak_s.value(),
+            'auto_max_iter':     self.sp_auto_max_iter.value(),
+            'auto_threshold_mv': self.sp_auto_threshold_mv.value(),
+            'auto_nudge_ns':     self.sp_auto_nudge_ns.value(),
+            'auto_cap_ns':       self.sp_auto_cap_ns.value(),
+            'window_w':          self.width(),
+            'window_h':          self.height(),
+            'window_x':          self.x(),
+            'window_y':          self.y(),
+            'splitter':          self.v_splitter.sizes(),
+        }
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(s, f, indent=2)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
     # Status bar
     # ------------------------------------------------------------------
     def _update_status_bar(self):
@@ -837,6 +1595,8 @@ class MainWindow(QMainWindow):
     # Cleanup
     # ------------------------------------------------------------------
     def closeEvent(self, event):
+        self._save_settings()
+        self._stop_auto()
         self._stop_thermal()
         if self.serial.isOpen():
             self.send_command('E')
@@ -847,7 +1607,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.resize(1200, 850)
+    window = MainWindow()   # _load_settings() sets geometry; default 1440×1200 on first run
     window.show()
     sys.exit(app.exec())
