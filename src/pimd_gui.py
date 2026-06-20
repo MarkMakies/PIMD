@@ -1,8 +1,11 @@
 ###############################################################################
-# PIMD GUI v4.10
+# PIMD GUI v4.11
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop
 #
+# v4.11 serial protocol updated to match MCU v4.23: * command now sends
+#       freq in Hz (integer) and pulse/delay in ns (integer); * record parsing
+#       updated accordingly. Title standardised to 'PIMD GUI v<N> by Mark Makies'.
 # v4.10 read_from_serial: drain all buffered lines first, then dispatch — only
 #       the last * packet per readyRead call gets the full chart/UI update; earlier
 #       ones still write to file (skip_display=True path). Eliminates progressive
@@ -111,7 +114,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle('Pulse Induction Metal Detector v4.10 by Mark Makies')
+        self.setWindowTitle('PIMD GUI v4.11 by Mark Makies')
 
         # Editable port field (mirrors pimd_classviz.py) — added below the existing
         # Connect/Start/filename rows in the same label+control grid layout.
@@ -541,9 +544,9 @@ class MainWindow(QMainWindow):
         self.sample_delay = delay_us
         command_str = (
             '*'
-            + str(self.frequency) + ', '
-            + '{:.3f}'.format(pulse_us) + ', '
-            + '{:.3f}'.format(delay_us) + ', '
+            + str(freq_hz) + ','
+            + str(round(pulse_us * 1000)) + ','
+            + str(round(delay_us * 1000)) + ','
             + str(self.down_sample))
         self.send_command(command_str)
 
@@ -610,9 +613,9 @@ class MainWindow(QMainWindow):
                 p_timestamp = int(parts[0])
                 p_voltage = int(parts[1])
                 p_stddev = int(parts[2])
-                p_frequency = int(float(parts[3]) * 1000)
-                p_pulse_width = float(parts[4])
-                p_sample_delay = float(parts[5])
+                p_frequency = int(parts[3])            # Hz (was kHz × 1000)
+                p_pulse_width = int(parts[4]) / 1000.0  # ns → µs
+                p_sample_delay = int(parts[5]) / 1000.0  # ns → µs
             except Exception as e:
                 print('Packet parsing error:', e)
                 return
@@ -650,7 +653,7 @@ class MainWindow(QMainWindow):
 
         elif line.startswith('R'):
             # Raw-path boxcar-average record:
-            # R<time_ms>,<value_uV>,<stddev_uV>,<x>,<freq_kHz>,<pulse_us>,<delay_us>,<min_uV>,<max_uV>
+            # R<time_ms>,<value_uV>,<stddev_uV>,<x>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>
             # min_uV/max_uV (firmware v4.15+) — sample extremes within the
             # boxcar window; diagnostic for outlier samples hiding inside the
             # mean/std (see CHANGELOG.md). Parsed defensively in case an older

@@ -1,4 +1,15 @@
 
+### mcu/pimd_mcu.py — v4.23 · src/pimd_gui.py — v4.11 — serial protocol: freq in Hz, pulse/delay in ns
+
+Protocol change to eliminate decimal-place rounding ambiguity in the serial wire format.
+All timing fields previously reported in kHz (1 d.p.) or µs (1 d.p.) now use exact integers:
+freq in Hz, pulse and delay in ns. No decimal points, no conversion arithmetic on the PC side.
+At the 8 ns PWM grid, all values are exact multiples of 8, so integer ns is both lossless and
+unambiguous. Affects * record output, R record output, V response, L response, and the inbound
+* config command. GUI title standardised to 'PIMD GUI v4.11 by Mark Makies'. (2026-06-20)
+
+---
+
 ### src/pimd_gui.py — v4.10 — fix display lag and file-write spam after stop
 
 Two serial-handling bugs fixed:

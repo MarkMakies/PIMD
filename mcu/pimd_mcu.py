@@ -1,5 +1,5 @@
 ###############################################################################
-# Pulse Induction Metal Detector, v4.22, coil v4
+# Pulse Induction Metal Detector, v4.23, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -9,8 +9,8 @@
 # Mode 1  — filtered/interrupt-driven acquisition
 #   S/s  start streaming '*' telemetry
 #   E/e  stop (shared with Mode 2)
-#   *<freq_kHz>,<pulse_us>,<delay_us>,<downsample>  configure
-#   output: *<time_ms>,<value_uV>,<stddev_uV>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>
+#   *<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>  configure
+#   output: *<time_ms>,<value_uV>,<stddev_uV>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>
 #   rate: pulse_freq / downsample (e.g. ~20/s at 5 kHz / 256)
 #
 # Mode 2  — raw interleaved moving-average sweep (see PROFILES table)
@@ -26,11 +26,14 @@
 #
 # Other commands (both modes):
 #   A<n>  acquire N boxcar-averaged raw samples at held config (Mode 1 or idle only)
-#         -> R<time_ms>,<mean_uV>,<std_uV>,<n>,<freq_kHz>,<pulse_us>,<delay_us>,<min_uV>,<max_uV>
-#   V/v/? identify -> V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>
-#   L     list profiles -> one L<idx>,<freq_kHz>,<n_pulses>,<n_delays>,<averages>,<name> line each
+#         -> R<time_ms>,<mean_uV>,<std_uV>,<n>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>
+#   V/v/? identify -> V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>
+#   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
+# v4.23 serial protocol: freq now in Hz (was kHz), pulse/delay now in ns (was µs),
+#       in *, R, V, L output records and in the * config command.  No rounding
+#       ambiguity: values are exact integers at 8 ns PWM grid resolution.
 # v4.22 updated SAMPLE_PULSE_CORRECTION 0.908 → 0.904 µs: 10.904 µs total delay
 #       = 1363 × 8 ns exactly, eliminating the half-step dither that caused the
 #       alternating ±8 ns delay jitter at 0.1 µs GUI steps.
@@ -263,7 +266,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.22'
+FW_VERSION = '4.23'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -497,9 +500,11 @@ def measurement_cycle():
     std_raw = int(calculate_standard_deviation(filtered_samples))
     std_uV = (std_raw * 5_000_000) // (2 ** 31)
     elapsed = ticks_diff(ticks_ms(), base_time_ms)
-    print('*{0:d}, {1:d}, {2:d}, {3:1.1f}, {4:1.1f}, {5:1.1f}, {6:d}'.format(
+    print('*{0:d},{1:d},{2:d},{3:d},{4:d},{5:d},{6:d}'.format(
         elapsed, current_uV, std_uV,
-        sample_frequency_hz / 1000, pulse_width_us, sample_delay_us, down_sample))
+        sample_frequency_hz,
+        round(pulse_width_us * 1000), round(sample_delay_us * 1000),
+        down_sample))
 
 
 # ---------------------------------------------------------------------------
@@ -873,9 +878,9 @@ def check_for_commands(timeout_ms=1):
                 print('Command Input ERROR: * rejected while Mode 2 running (send E first)')
                 return
             parts = line[1:].split(',')
-            new_freq_hz = int(1000 * float(parts[0]))
-            new_pulse_us = float(parts[1])
-            new_delay_us = float(parts[2])
+            new_freq_hz = int(parts[0])
+            new_pulse_us = int(parts[1]) / 1000.0
+            new_delay_us = int(parts[2]) / 1000.0
             new_down = int(parts[3])
             dd, sd = compute_pulse_duties(new_pulse_us, new_delay_us, new_freq_hz)
             if pulse_duties_valid(dd, sd):
@@ -905,30 +910,33 @@ def check_for_commands(timeout_ms=1):
                 return
             mean_uV, std_uV, min_uV, max_uV = acquire_raw_average(n_samples)
             elapsed = ticks_diff(ticks_ms(), base_time_ms)
-            print('R{0:d}, {1:d}, {2:d}, {3:d}, {4:.1f}, {5:.1f}, {6:.1f}, {7:d}, {8:d}'.format(
+            print('R{0:d},{1:d},{2:d},{3:d},{4:d},{5:d},{6:d},{7:d},{8:d}'.format(
                 elapsed, mean_uV, std_uV, n_samples,
-                sample_frequency_hz / 1000, pulse_width_us, sample_delay_us,
+                sample_frequency_hz,
+                round(pulse_width_us * 1000), round(sample_delay_us * 1000),
                 min_uV, max_uV))
 
         elif cmd in ('V', 'v', '?'):
-            print('V{0},{1},{2},{3},{4:.1f},{5:.1f},{6:.1f},{7:d}'.format(
+            print('V{0},{1},{2},{3},{4:d},{5:d},{6:d},{7:d}'.format(
                 FW_VERSION, board_id_hex, NUM_PROFILES, active_profile_index,
-                sample_frequency_hz / 1000, pulse_width_us, sample_delay_us, down_sample))
+                sample_frequency_hz,
+                round(pulse_width_us * 1000), round(sample_delay_us * 1000),
+                down_sample))
 
         elif cmd == 'L':
             for idx, p in enumerate(PROFILES):
                 n_bands = len(p['bands'])
                 n_cells = sum(len(d) for _, _, d in p['bands'])
-                first_freq_khz = p['bands'][0][0] / 1000
-                print('L{0:d},{1:.1f},{2:d},{3:d},{4:d},{5}'.format(
-                    idx, first_freq_khz, n_bands, n_cells, p['averages'], p['name']))
+                first_freq_hz = p['bands'][0][0]
+                print('L{0:d},{1:d},{2:d},{3:d},{4:d},{5}'.format(
+                    idx, first_freq_hz, n_bands, n_cells, p['averages'], p['name']))
             if dynamic_profile is not None:
                 p = dynamic_profile
                 n_bands = len(p['bands'])
                 n_cells = sum(len(d) for _, _, d in p['bands'])
-                first_freq_khz = p['bands'][0][0] / 1000
-                print('L{0:d},{1:.1f},{2:d},{3:d},{4:d},{5}'.format(
-                    DYNAMIC_PROFILE_INDEX, first_freq_khz, n_bands, n_cells,
+                first_freq_hz = p['bands'][0][0]
+                print('L{0:d},{1:d},{2:d},{3:d},{4:d},{5}'.format(
+                    DYNAMIC_PROFILE_INDEX, first_freq_hz, n_bands, n_cells,
                     p['averages'], p['name']))
 
         elif cmd in ('B', 'b'):
