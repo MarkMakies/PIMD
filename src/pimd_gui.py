@@ -1,7 +1,36 @@
 ###############################################################################
-# Pulse Induction Metal Detector GUI — Mode 1 display
+# PIMD GUI v4.10
+# — Mode 1 display
 # Runs on Ubuntu desktop / laptop
 #
+# v4.10 read_from_serial: drain all buffered lines first, then dispatch — only
+#       the last * packet per readyRead call gets the full chart/UI update; earlier
+#       ones still write to file (skip_display=True path). Eliminates progressive
+#       display lag when the event loop can't keep up with 39 SPS chart redraws.
+#       process_packet: add skip_display=False parameter; early-return after file
+#       write when skip_display is True. start_stop / closeEvent / setup_file_logging:
+#       set self.file = None after close() — fixes "File write error, probably last
+#       packet after stop" spam (closed file object is truthy; if self.file: passed
+#       even after close, causing ValueError on write).
+# v4.08 (a) lFreq/lPulse/lSample QLineEdit for direct precision entry: freq in
+#       exact Hz (integer), pulse/delay to 3 dp in µs; orange highlight when
+#       not on the 8 ns PWM grid or not a clean 125 MHz divisor. QLineEdit is
+#       authoritative for the * command; sliders for coarse adjustment.
+#       (b) Frequency slider re-ranged 0–17: each position is one of 18 clean
+#       125 MHz divisors from 1–50 kHz (CLEAN_FREQS_KHZ list). Pulse/delay
+#       sliders re-ranged in 8 ns counts (1 unit = 8 ns = 0.008 µs): slPulse
+#       625–5000 (5–40 µs), slSample 625–3750 (5–30 µs). All slider positions
+#       are inherently on-grid; +/- buttons step by one unit.
+#       (c) Boxcar and Raw Avg buttons default ON.
+#       (d) read_from_serial drains buffer in a while-canReadLine loop (was
+#       single-line read → event-storm at high SPS → progressive UI freeze).
+#       (e) closeEvent added: sends E, flushes serial, closes port and log file.
+#       Removes fragile aboutToQuit lambda; F12 triggers closeEvent via self.close().
+# v4.09 quit_app: QApplication.instance().exit() → self.close() so F12 actually
+#       triggers closeEvent (QApplication.exit() bypasses closeEvent entirely).
+#       (f) setup_file_logging closes previous file handle before opening new one.
+# v4.07 remove range (min…max) from footer raw status string; fix horizontal
+#       grid lines (axis_z) back to light gray (#cccccc, was blue).
 # v4.06 chart corruption fix: trim series_v/series_raw_mean by x-axis range
 #       (not by point count) so no off-screen polyline segment crosses the
 #       visible area when the warmup spike scrolls off the left edge. Add
@@ -13,8 +42,6 @@
 #       not just on DEL/Clear or toggle-off. Stale data from a previous session
 #       left phantom traces — polyline from old off-screen points to new ones
 #       — visible as multiple overlapping orange plots on the chart.
-# v4.07 remove range (min…max) from footer raw status string; fix horizontal
-#       grid lines (axis_z) back to light gray (#cccccc, was blue).
 # v4.04 extend R record parsing: pimd_mcu.py v4.15 appends min_uV and max_uV
 #       to the R record (format: R<t>,<mean>,<std>,<n>,<freq>,<pulse>,<delay>,
 #       <min>,<max>). Parse parts[7]/parts[8] defensively.
@@ -60,6 +87,19 @@ DEFAULT_PORT = '/dev/ttyACM0'
 
 SLOPE_COUNT = 100               # Rolling average slope count (derivative)
 
+# RP2040 PWM clock = 125 MHz → 8 ns per count.
+# Clean frequencies: 125_000_000 % f == 0 (exact integer WRAP, no rounding).
+SYS_CLK_HZ = 125_000_000
+CLEAN_FREQS_HZ = frozenset(f for f in range(1000, 65001) if SYS_CLK_HZ % f == 0)
+
+# Ordered subset used by the frequency slider (index 0–17, 1–50 kHz).
+# All are exact 125 MHz divisors; spaced by ×1.25 or ×1.28 per step.
+CLEAN_FREQS_KHZ = [1.0, 1.25, 1.6, 2.0, 2.5, 3.125, 4.0, 5.0,
+                   6.25, 8.0, 10.0, 12.5, 15.625, 20.0, 25.0, 31.25, 40.0, 50.0]
+
+# Must match firmware SAMPLE_PULSE_CORRECTION (µs). 0.904 µs = 904 ns = 113 × 8 ns exactly.
+SAMPLE_PULSE_CORRECTION_US = 0.904
+
 class MainWindow(QMainWindow):
     # Color constants for button styling
     MY_GREEN = 'background-color: rgb(143, 240, 164);'
@@ -71,7 +111,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle('Pulse Induction Metal Detector v4.07 by Mark Makies')
+        self.setWindowTitle('Pulse Induction Metal Detector v4.10 by Mark Makies')
 
         # Editable port field (mirrors pimd_classviz.py) — added below the existing
         # Connect/Start/filename rows in the same label+control grid layout.
@@ -203,9 +243,9 @@ class MainWindow(QMainWindow):
         sc_w = QShortcut(QKeySequence(Qt.Key.Key_W), self)
         sc_w.activated.connect(self.ui.pbFreqDown.animateClick)
         sc_r = QShortcut(QKeySequence(Qt.Key.Key_R), self)
-        sc_r.activated.connect(lambda: (self.ui.slFreq.setValue(self.ui.slFreq.value() + 10), self.change_parameters()))
+        sc_r.activated.connect(lambda: (self.ui.slFreq.setValue(self.ui.slFreq.value() + 1), self.change_parameters()))
         sc_q = QShortcut(QKeySequence(Qt.Key.Key_Q), self)
-        sc_q.activated.connect(lambda: (self.ui.slFreq.setValue(self.ui.slFreq.value() - 10), self.change_parameters()))
+        sc_q.activated.connect(lambda: (self.ui.slFreq.setValue(self.ui.slFreq.value() - 1), self.change_parameters()))
 
         # Pulse width selector shortcuts
         sc_d = QShortcut(QKeySequence(Qt.Key.Key_D), self)
@@ -260,8 +300,9 @@ class MainWindow(QMainWindow):
         self.ui.pbFreqDown.clicked.connect(self.change_parameters)
         self.ui.slFreq.sliderReleased.connect(self.change_parameters)
         self.ui.slFreq.valueChanged.connect(
-            lambda value: self.ui.lFreq.setText('{:2.1f} kHz'.format(value / 10))
+            lambda value: self._set_freq_display(CLEAN_FREQS_KHZ[value] * 1000)
         )
+        self.ui.lFreq.editingFinished.connect(self._on_freq_edited)
 
         # Pulse width slider and buttons
         self.ui.pbPulseUp.clicked.connect(lambda: self.ui.slPulse.setValue(self.ui.slPulse.value() + 1))
@@ -270,8 +311,9 @@ class MainWindow(QMainWindow):
         self.ui.pbPulseDown.clicked.connect(self.change_parameters)
         self.ui.slPulse.sliderReleased.connect(self.change_parameters)
         self.ui.slPulse.valueChanged.connect(
-            lambda value: self.ui.lPulse.setText('{:2.1f} us'.format(value / 10))
+            lambda value: self._set_pulse_display(value * 0.008)
         )
+        self.ui.lPulse.editingFinished.connect(self._on_pulse_edited)
 
         # Sample delay slider and buttons
         self.ui.pbSampleUp.clicked.connect(lambda: self.ui.slSample.setValue(self.ui.slSample.value() + 1))
@@ -280,12 +322,90 @@ class MainWindow(QMainWindow):
         self.ui.pbSampleDown.clicked.connect(self.change_parameters)
         self.ui.slSample.sliderReleased.connect(self.change_parameters)
         self.ui.slSample.valueChanged.connect(
-            lambda value: self.ui.lSample.setText('{:2.1f} us'.format(value / 10))
+            lambda value: self._set_delay_display(value * 0.008)
         )
+        self.ui.lSample.editingFinished.connect(self._on_delay_edited)
 
         # Button groups for vertical and horizontal scale changes
         self.ui.VoltageButtonGroup.buttonToggled.connect(self.vert_scale)
         self.ui.TimeButtonGroup.buttonToggled.connect(self.horiz_scale)
+
+    # ------------------------------------------------------------------
+    # QLineEdit display helpers — update text and 8 ns / clean-freq flag
+    # ------------------------------------------------------------------
+
+    def _set_freq_display(self, freq_hz):
+        """Set lFreq text (Hz integer); highlight orange if not a clean 125 MHz divisor."""
+        hz = int(round(freq_hz))
+        self.ui.lFreq.setText(str(hz))
+        self.ui.lFreq.setStyleSheet(
+            '' if hz in CLEAN_FREQS_HZ else 'background-color: #ff8c00;'
+        )
+
+    def _set_pulse_display(self, pulse_us):
+        """Set lPulse text (µs, 3 dp); highlight orange if not a multiple of 8 ns."""
+        self.ui.lPulse.setText('{:.3f}'.format(pulse_us))
+        self.ui.lPulse.setStyleSheet(
+            '' if round(pulse_us * 1000) % 8 == 0 else 'background-color: #ff8c00;'
+        )
+
+    def _set_delay_display(self, delay_us):
+        """Set lSample text (µs, 3 dp); highlight orange if total delay not on 8 ns grid."""
+        self.ui.lSample.setText('{:.3f}'.format(delay_us))
+        total_ns = round((delay_us + SAMPLE_PULSE_CORRECTION_US) * 1000)
+        self.ui.lSample.setStyleSheet(
+            '' if total_ns % 8 == 0 else 'background-color: #ff8c00;'
+        )
+
+    # ------------------------------------------------------------------
+    # editingFinished handlers — parse QLineEdit, update slider, apply
+    # ------------------------------------------------------------------
+
+    def _on_freq_edited(self):
+        """Parse Hz from lFreq; clamp, snap slider to nearest clean freq, apply."""
+        try:
+            freq_hz = int(float(self.ui.lFreq.text()))
+            freq_hz = max(1000, min(65000, freq_hz))
+        except ValueError:
+            freq_hz = int(round(self.frequency * 1000))
+        freq_khz = freq_hz / 1000
+        slider_val = min(range(len(CLEAN_FREQS_KHZ)),
+                         key=lambda i: abs(CLEAN_FREQS_KHZ[i] - freq_khz))
+        self.ui.slFreq.blockSignals(True)
+        self.ui.slFreq.setValue(slider_val)
+        self.ui.slFreq.blockSignals(False)
+        self._set_freq_display(freq_hz)
+        self.change_parameters()
+
+    def _on_pulse_edited(self):
+        """Parse µs from lPulse; clamp, sync slider (no feedback), apply."""
+        try:
+            pulse_us = float(self.ui.lPulse.text())
+            pulse_us = max(5.0, min(100.0, pulse_us))
+        except ValueError:
+            pulse_us = self.pulse_width
+        slider_val = max(self.ui.slPulse.minimum(),
+                         min(self.ui.slPulse.maximum(), round(pulse_us * 125)))
+        self.ui.slPulse.blockSignals(True)
+        self.ui.slPulse.setValue(slider_val)
+        self.ui.slPulse.blockSignals(False)
+        self._set_pulse_display(pulse_us)
+        self.change_parameters()
+
+    def _on_delay_edited(self):
+        """Parse µs from lSample; clamp, sync slider (no feedback), apply."""
+        try:
+            delay_us = float(self.ui.lSample.text())
+            delay_us = max(5.0, min(100.0, delay_us))
+        except ValueError:
+            delay_us = self.sample_delay
+        slider_val = max(self.ui.slSample.minimum(),
+                         min(self.ui.slSample.maximum(), round(delay_us * 125)))
+        self.ui.slSample.blockSignals(True)
+        self.ui.slSample.setValue(slider_val)
+        self.ui.slSample.blockSignals(False)
+        self._set_delay_display(delay_us)
+        self.change_parameters()
 
     def set_factor(self):
         toggle_map = {'256': '1024', '1024': '256'}
@@ -302,6 +422,9 @@ class MainWindow(QMainWindow):
         Creates a timestamped filename and opens it for logging.
         Can be called from multiple places.
         """
+        if self.file:
+            self.file.close()
+            self.file = None
         now = datetime.now()
         fname = 'data/' + now.strftime('P%d%m-%H%M%S.csv')
         self.ui.leFileName.setText(fname)  # Update UI field with filename
@@ -309,13 +432,13 @@ class MainWindow(QMainWindow):
 
     def apply_soc_defaults(self):
         """
-        Standard Operating Conditions (see CHANGELOG.md) \u2014 10.0 kHz / 20.0 us
-        pulse / 10.0 us delay / 256 decimation. Sets slider/button state only;
-        the '*' command goes out the normal way when Start is pressed.
+        Standard Operating Conditions (see CHANGELOG.md) \u2014 10.0 kHz / 20.0 \u00b5s
+        pulse / 10.0 \u00b5s delay / 256 decimation. Sets slider/button state and
+        QLineEdit display; '*' command goes out when Start is pressed.
         """
-        self.ui.slFreq.setValue(100)    # 10.0 kHz
-        self.ui.slPulse.setValue(200)   # 20.0 us
-        self.ui.slSample.setValue(100)  # 10.0 us
+        self.ui.slFreq.setValue(10)     # index 10 \u2192 10.0 kHz
+        self.ui.slPulse.setValue(2500)  # 2500 \u00d7 8 ns = 20.0 \u00b5s
+        self.ui.slSample.setValue(1250) # 1250 \u00d7 8 ns = 10.0 \u00b5s
         self.ui.pbFactor.setText('256')
         self.down_sample = 256
 
@@ -333,6 +456,8 @@ class MainWindow(QMainWindow):
         self.apply_soc_defaults()
         self.connect_port()
         self.send_command('E')
+        self.pb_boxcar_mode.setChecked(True)
+        self.pb_show_raw_mean.setChecked(True)
 
     def connect_port(self):
         # Open or close the serial port based on the current state.
@@ -367,6 +492,7 @@ class MainWindow(QMainWindow):
             self.raw_poll_timer.stop()
             if self.file:
                 self.file.close()
+                self.file = None
 
     def poll_raw_average(self):
         # Request a boxcar-averaged raw-path sample (Task 2 'A<x>' primitive,
@@ -397,16 +523,28 @@ class MainWindow(QMainWindow):
         self.ui.TimeButtonGroup.button(ix).setChecked(True)
 
     def change_parameters(self):
-        # Read the current slider values, update parameters, and send the configuration command via serial.
-        self.frequency = self.ui.slFreq.value() / 10
-        self.pulse_width = self.ui.slPulse.value() / 10
-        self.sample_delay = self.ui.slSample.value() / 10
+        # Read from QLineEdit fields (authoritative) and send configuration command.
+        try:
+            freq_hz = int(float(self.ui.lFreq.text()))
+        except ValueError:
+            freq_hz = int(round(self.frequency * 1000))
+        try:
+            pulse_us = float(self.ui.lPulse.text())
+        except ValueError:
+            pulse_us = self.pulse_width
+        try:
+            delay_us = float(self.ui.lSample.text())
+        except ValueError:
+            delay_us = self.sample_delay
+        self.frequency = freq_hz / 1000          # kHz — kept for backwards compat
+        self.pulse_width = pulse_us
+        self.sample_delay = delay_us
         command_str = (
-            '*' 
+            '*'
             + str(self.frequency) + ', '
-            + str(self.pulse_width) + ', '
-            + str(self.sample_delay) + ', '
-            + str(self.down_sample) )
+            + '{:.3f}'.format(pulse_us) + ', '
+            + '{:.3f}'.format(delay_us) + ', '
+            + str(self.down_sample))
         self.send_command(command_str)
 
     def serial_open(self, flag):
@@ -434,15 +572,28 @@ class MainWindow(QMainWindow):
             return True
 
     def read_from_serial(self):
-        # Read an incoming line from the serial port and process it.
-        data = self.serial.readLine().data().decode('utf-8').rstrip()
-        if data:
-            self.process_packet(data)
+        lines = []
+        while self.serial.canReadLine():
+            data = self.serial.readLine().data().decode('utf-8').rstrip()
+            if data:
+                lines.append(data)
+        if not lines:
+            return
+        # Only run the expensive chart/UI update for the last * packet in this
+        # batch; earlier ones still get their file write via skip_display=True.
+        last_star = max(
+            (i for i, l in enumerate(lines) if l.startswith('*')),
+            default=None
+        )
+        for i, line in enumerate(lines):
+            self.process_packet(line, skip_display=(
+                line.startswith('*') and i != last_star
+            ))
 
-    def process_packet(self, line):
+    def process_packet(self, line, skip_display=False):
         REFERENCE_VOLTAGE = 5  # Volts
         self.last_packet = line  ## MM: store the current packet in an instance attribute
-        
+
         if line.startswith('*'):
             line = line[1:]
             try:
@@ -450,6 +601,9 @@ class MainWindow(QMainWindow):
                     self.file.write(line + '\n')
             except Exception as e:
                 print('File write error, probably last packet after stop:', e)
+
+            if skip_display:
+                return
 
             parts = line.split(',')
             try:
@@ -713,21 +867,23 @@ class MainWindow(QMainWindow):
         # Update the last command sent
         self.last_command = text
 
-    def exit_handler(self):
-        # Handle application exit.
-        print('Exiting...')
+    def closeEvent(self, event):
+        self.raw_poll_timer.stop()
+        if self.serial.isOpen():
+            self.send_command('E')
+            self.serial.waitForBytesWritten(200)
+            self.serial.close()
         if self.file:
             self.file.close()
+            self.file = None
+        super().closeEvent(event)
 
     def quit_app(self):
-        # Quit the application.
-        QApplication.instance().exit()
+        self.close()
 
 
 if __name__ == '__main__':
     app = QApplication([])
-    # Connect the exit handler
-    app.aboutToQuit.connect(lambda: window.exit_handler() if (window := getattr(sys.modules[__name__], 'window', None)) else None)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

@@ -1,5 +1,5 @@
 ###############################################################################
-# Pulse Induction Metal Detector, v4.21, coil v4
+# Pulse Induction Metal Detector, v4.22, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -31,6 +31,9 @@
 #   L     list profiles -> one L<idx>,<freq_kHz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
+# v4.22 updated SAMPLE_PULSE_CORRECTION 0.908 → 0.904 µs: 10.904 µs total delay
+#       = 1363 × 8 ns exactly, eliminating the half-step dither that caused the
+#       alternating ±8 ns delay jitter at 0.1 µs GUI steps.
 # v4.21 FIX read_raw_sample: wrap BUSY poll + SPI read in disable_irq/enable_irq
 #       so USB CDC IRQs cannot fire between the BUSY-low edge and the SPI clock.
 #       Eliminates two Mode 2 anomaly types confirmed in quiet 45-channel recordings:
@@ -260,7 +263,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.21'
+FW_VERSION = '4.22'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -298,7 +301,7 @@ ltc2508_sel0 = Pin(12, Pin.OUT)
 # ---------------------------------------------------------------------------
 PWM_SCALING_NUMERATOR = 2 ** 16       # 65536
 PWM_SCALING_DENOMINATOR_NS = 10 ** 9  # 1_000_000_000
-SAMPLE_PULSE_CORRECTION = 0.908       # µs: measured offset between PWM edge and ADC trigger
+SAMPLE_PULSE_CORRECTION = 0.904       # µs: measured offset between PWM edge and ADC trigger
 
 # -------------------------------------------------------------------1--------
 # Raw ADC constants
@@ -328,7 +331,7 @@ OUTLIER_GATE_FRAC = 10  # per-cell raw14 plausibility gate: reject samples devia
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
 # ---------------------------------------------------------------------------
-pulse_width_us = 10.0
+pulse_width_us = 20.0
 sample_delay_us = 10.0
 sample_frequency_hz = 10000
 down_sample = 256

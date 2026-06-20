@@ -1,5 +1,6 @@
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) — Mode 2 adaptive profile viewer
+# PIMD Signature Visualiser (ClassViz) v1.07
+# — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Connects to the board, sends Q4/G to start Mode 2 streaming with the default
@@ -13,17 +14,11 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.07+
 #
-# v1.00 initial version: heatmap + baseline + labelled CSV logger + 3D surface
-# v1.01 add Stats tab (per-cell value/mean/std, mV) + single-cell isolation mode
-# v1.02 Resume Sweep now auto-sends G — sweep restarts immediately without extra click
-# v1.03 Stats tab: Save table as CSV button (saves whatever is currently displayed)
-# v1.04 profile dimensions (N_BANDS/N_CELLS/BANDS_META/etc) moved from module
-#       constants to instance state set by _apply_profile(); added Profile
-#       Builder tab to edit/save/load profiles and send them to the board's new
-#       D command (RAM-only dynamic profile, Q<DYNAMIC_PROFILE_INDEX>); default
-#       Q4-on-connect behaviour unchanged
-# v1.05 fix _fmt(): remove thousands-separator from format string so saved CSV
-#       files are machine-parseable (4373.6 not 4,373.6)
+# v1.09 _band_labels: pulse width and frequency now show 3 d.p. (was 0 d.p. / 1 d.p.).
+#       Stats table Delay column: now 3 d.p. (was 2 d.p.).  Matches 8 ns grid precision.
+# v1.08 Stats tab std-dev window: changed from seconds-based (QDoubleSpinBox, 0.5–60 s)
+#       to sample-count-based (QSpinBox, 2–2000, default 50) to match pimd_delaycal.py.
+#       Std column now shows 2 decimal places (was 1 d.p.).
 # v1.07 process_packet: 64-frame circular median glitch filter on display path.
 #       _latest_raw (→ heatmap, stats tab) uses median-substituted values when a
 #       channel deviates >100 mV from its 64-frame median; _rolling_buf and
@@ -36,6 +31,17 @@
 #       raw W-record frames (fw_time_ms, wall_time_s, ch0…chN-1 in µV); auto-saves
 #       to data/frames_YYYYMMDD_HHMMSS.csv on stop. Recording is also auto-stopped
 #       when streaming stops or the profile changes.
+# v1.05 fix _fmt(): remove thousands-separator from format string so saved CSV
+#       files are machine-parseable (4373.6 not 4,373.6)
+# v1.04 profile dimensions (N_BANDS/N_CELLS/BANDS_META/etc) moved from module
+#       constants to instance state set by _apply_profile(); added Profile
+#       Builder tab to edit/save/load profiles and send them to the board's new
+#       D command (RAM-only dynamic profile, Q<DYNAMIC_PROFILE_INDEX>); default
+#       Q4-on-connect behaviour unchanged
+# v1.03 Stats tab: Save table as CSV button (saves whatever is currently displayed)
+# v1.02 Resume Sweep now auto-sends G — sweep restarts immediately without extra click
+# v1.01 add Stats tab (per-cell value/mean/std, mV) + single-cell isolation mode
+# v1.00 initial version: heatmap + baseline + labelled CSV logger + 3D surface
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false
@@ -69,7 +75,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.07'
+APP_VERSION = '1.09'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -218,7 +224,7 @@ class MainWindow(QMainWindow):
         # the rest of the file (was the module-level BANDS_META tuple).
         self._bands_meta = [(b['freq_hz'], b['pulse_us'], tuple(b['delays_us']))
                              for b in bands]
-        self._band_labels = ['{0:.0f}µs/{1:.1f}kHz'.format(b['pulse_us'], b['freq_hz'] / 1000)
+        self._band_labels = ['{0:.3f}µs/{1:.3f}kHz'.format(b['pulse_us'], b['freq_hz'] / 1000)
                               for b in bands]
         self._has_threshold_v = all(
             'threshold_v' in b and len(b['threshold_v']) == n_cells for b in bands)
@@ -510,13 +516,11 @@ class MainWindow(QMainWindow):
         self.pb_freeze_stats.toggled.connect(self._on_freeze_stats_toggled)
         ctrl.addWidget(self.pb_freeze_stats)
 
-        ctrl.addWidget(QLabel('Window:'))
-        self.sp_stats_window = QDoubleSpinBox()
-        self.sp_stats_window.setRange(0.5, 60.0)
-        self.sp_stats_window.setSingleStep(0.5)
-        self.sp_stats_window.setDecimals(1)
-        self.sp_stats_window.setValue(ROLLING_SECS_DEFAULT)
-        self.sp_stats_window.setSuffix(' s')
+        ctrl.addWidget(QLabel('Std dev N:'))
+        self.sp_stats_window = QSpinBox()
+        self.sp_stats_window.setRange(2, 2000)
+        self.sp_stats_window.setSingleStep(10)
+        self.sp_stats_window.setValue(50)
         ctrl.addWidget(self.sp_stats_window)
 
         pb_save_stats = QPushButton('Save table CSV…')
@@ -530,7 +534,7 @@ class MainWindow(QMainWindow):
         ctrl.addWidget(self.pb_record)
 
         ctrl.addStretch(1)
-        ctrl.addWidget(QLabel('All values in mV · 1 d.p.'))
+        ctrl.addWidget(QLabel('All values in mV'))
         layout.addLayout(ctrl)
 
         # Stats table: Band | Threshold | Delay µs | Latest mV | Mean mV | Std mV
@@ -609,7 +613,7 @@ class MainWindow(QMainWindow):
                 row = b * self._n_cells + c
                 for col, text in enumerate([self._band_labels[b],
                                             self._cell_labels[c],
-                                            '{0:.2f}'.format(delays[c])]):
+                                            '{0:.3f}'.format(delays[c])]):
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(_C)
                     self.tbl_stats.setItem(row, col, item)
@@ -1128,12 +1132,11 @@ class MainWindow(QMainWindow):
             return
 
         raw    = self._latest_raw   # (n_channels,)
-        window = self.sp_stats_window.value()
-        cutoff = time.time() - window
-        frames = [arr for ts, arr in self._rolling_buf if ts >= cutoff]
+        n      = self.sp_stats_window.value()
+        recent = list(self._rolling_buf)[-n:]
 
-        if len(frames) >= 2:
-            mat   = np.array(frames, dtype=float)
+        if len(recent) >= 2:
+            mat   = np.array([arr for _, arr in recent], dtype=float)
             means = mat.mean(0)
             stds  = mat.std(0)
         else:
@@ -1143,7 +1146,7 @@ class MainWindow(QMainWindow):
         for i in range(self._n_channels):
             self.tbl_stats.item(i, 3).setText(_fmt(raw[i]))
             self.tbl_stats.item(i, 4).setText(_fmt(means[i]))
-            self.tbl_stats.item(i, 5).setText(_fmt(stds[i]))
+            self.tbl_stats.item(i, 5).setText('{0:.2f}'.format(stds[i] / 1000.0))
 
     def _save_stats_csv(self):
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')

@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Delay Calibration v1.01
+# PIMD Delay Calibration v1.03
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -8,26 +8,44 @@
 # target voltage threshold.  Results are shown in a live-updating table:
 #   rows    = freq/pulse pairs  (e.g. "25kHz/10us")
 #   columns = target voltages (V)
-#   cells   = delay (µs) at threshold crossing, to 0.01 µs precision
+#   cells   = delay (µs) at threshold crossing, snapped to 8 ns PWM grid (0.008 µs)
 #
 # Firmware commands used:
 #   E                                      — safe state (on connect / stop / done)
 #   *<freq_kHz>,<pulse_us>,<delay_us>,256  — configure PWM (no streaming)
 #   A<n>                                   — raw boxcar average; returns R record
+#   D<avg>;<freq_hz>,<pulse_us>,<d0>,...;… — define dynamic profile (thermal mode)
+#   Q<n>                                   — select profile
+#   G                                      — start Mode 2 streaming
 #
-# v1.00 initial version
-# v1.01 freq and pulse width paired as tuples (freq/pulse input field, e.g. 25/10)
+# v1.05 Snap interpolated threshold-crossing delays to the 8 ns PWM clock grid
+#       before storing in the table and exporting; display to 3 d.p. (0.008 µs
+#       precision) instead of 2 d.p.  Off-grid delays cause ±1 LSB PWM jitter
+#       (documented in pimd_gui.py v4.08 / pimd_mcu.py v4.22).
+# v1.04 Thermal std dev: display to 2 decimal places (was integer mV).
+# v1.03 Profile export: autosave calibrated delays as a classviz-compatible JSON
+#       profile to data/profiles/ (timestamped, same format as pimd_classviz.py
+#       _default_profile()).  Thermal monitoring mode: streams Mode 2 with the
+#       exported profile for a configurable countdown, showing live latest-mean
+#       and rolling-std-dev tables (rate-limited to 10 Hz).  Config panel widened
+#       280→320 px; window resized 1050×620→1200×850.
 # v1.02 fix double-send bug: _on_r_record() no longer advances state when _check_thresholds()
 #        already called _advance_pair(); saves current_delay before threshold check so
 #        _prev_delay is always the actual measured delay, not the post-reset start_delay
+# v1.01 freq and pulse width paired as tuples (freq/pulse input field, e.g. 25/10)
+# v1.00 initial version
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false
 # pyright: reportAttributeAccessIssue=false
 
+import json
 import os
 import sys
+import time
+from collections import deque
 from datetime import datetime
+from statistics import stdev as _stdev
 
 os.environ.setdefault('QT_API', 'pyqt6')
 
@@ -38,10 +56,20 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QFileDialog, QHeaderView,
 )
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
-from PyQt6.QtCore import QIODevice, Qt  # noqa: E402
+from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.02'
+APP_VERSION = '1.05'
+
+DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
+PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'data', 'profiles')
+
+def _snap_8ns(delay_us):
+    """Round a delay to the nearest 8 ns RP2040 PWM clock boundary."""
+    ns = round(delay_us * 1000)          # µs → ns, integer
+    return (round(ns / 8) * 8) / 1000   # snap to 8 ns grid, back to µs
+
 
 # Cell background colours
 _COL_PENDING  = QColor(200, 220, 255)   # light blue: in progress
@@ -77,6 +105,17 @@ class MainWindow(QMainWindow):
         self._step_count  = 0       # steps taken this pair (avoids float accumulation)
         self._prev_delay  = None    # delay of last R record (µs)
         self._prev_uV     = None    # mean_uV of last R record
+
+        # Thermal / profile state
+        self._thermal_state      = 'idle'       # 'idle' | 'running'
+        self._thermal_remaining  = 0.0
+        self._thermal_timer: 'QTimer | None' = None
+        self._thermal_buf: deque = deque(maxlen=10_000)
+        self._thermal_latest: 'list | None' = None  # µV ints, length n_channels
+        self._thermal_n_bands    = 0
+        self._thermal_n_cells    = 0
+        self._thermal_n_channels = 0
+        self._thermal_last_redraw = 0.0         # rate-limit redraws to ~10 Hz
 
         self._build_ui()
 
@@ -124,6 +163,12 @@ class MainWindow(QMainWindow):
         self.pb_export.clicked.connect(self.export_csv)
         top.addWidget(self.pb_export)
 
+        self.pb_export_profile = QPushButton('Export Profile')
+        self.pb_export_profile.setFixedWidth(110)
+        self.pb_export_profile.setEnabled(False)
+        self.pb_export_profile.clicked.connect(self.export_profile)
+        top.addWidget(self.pb_export_profile)
+
         top.addSpacing(10)
         self.status_label = QLabel('Connect the board to begin.')
         top.addWidget(self.status_label, stretch=1)
@@ -136,7 +181,7 @@ class MainWindow(QMainWindow):
 
         # Config panel
         cfg_box = QGroupBox('Configuration')
-        cfg_box.setFixedWidth(280)
+        cfg_box.setFixedWidth(320)
         form = QFormLayout(cfg_box)
         form.setSpacing(6)
 
@@ -196,6 +241,68 @@ class MainWindow(QMainWindow):
             QTableWidget.EditTrigger.NoEditTriggers)
         right.addWidget(self.table, stretch=1)
 
+        # ── Thermal monitoring section ────────────────────────────────
+        therm_grp = QGroupBox('Thermal Monitoring')
+        therm_layout = QVBoxLayout(therm_grp)
+        therm_layout.setSpacing(4)
+
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(6)
+
+        self.pb_thermal = QPushButton('THERMAL')
+        self.pb_thermal.setFixedWidth(90)
+        self.pb_thermal.setEnabled(False)
+        self.pb_thermal.clicked.connect(self._start_thermal)
+        ctrl.addWidget(self.pb_thermal)
+
+        self.sp_thermal_secs = QSpinBox()
+        self.sp_thermal_secs.setRange(10, 3600)
+        self.sp_thermal_secs.setValue(240)
+        self.sp_thermal_secs.setSuffix(' s')
+        self.sp_thermal_secs.setFixedWidth(80)
+        ctrl.addWidget(self.sp_thermal_secs)
+
+        self.pb_thermal_stop = QPushButton('Stop')
+        self.pb_thermal_stop.setFixedWidth(60)
+        self.pb_thermal_stop.setEnabled(False)
+        self.pb_thermal_stop.clicked.connect(self._stop_thermal)
+        ctrl.addWidget(self.pb_thermal_stop)
+
+        ctrl.addSpacing(16)
+        ctrl.addWidget(QLabel('Std dev N:'))
+
+        self.sp_thermal_n = QSpinBox()
+        self.sp_thermal_n.setRange(2, 2000)
+        self.sp_thermal_n.setValue(50)
+        self.sp_thermal_n.setFixedWidth(70)
+        ctrl.addWidget(self.sp_thermal_n)
+
+        self.lbl_thermal_status = QLabel('')
+        ctrl.addWidget(self.lbl_thermal_status, stretch=1)
+
+        therm_layout.addLayout(ctrl)
+
+        therm_layout.addWidget(QLabel('Latest mean (mV):'))
+
+        self.tbl_thermal_mean = QTableWidget(0, 0)
+        self.tbl_thermal_mean.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_thermal_mean.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self.tbl_thermal_mean.setMaximumHeight(140)
+        therm_layout.addWidget(self.tbl_thermal_mean)
+
+        therm_layout.addWidget(QLabel('Std dev (mV):'))
+
+        self.tbl_thermal_std = QTableWidget(0, 0)
+        self.tbl_thermal_std.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_thermal_std.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self.tbl_thermal_std.setMaximumHeight(140)
+        therm_layout.addWidget(self.tbl_thermal_std)
+
+        right.addWidget(therm_grp)
+        # ─────────────────────────────────────────────────────────────
+
         content.addLayout(right, stretch=1)
         root.addLayout(content, stretch=1)
 
@@ -219,6 +326,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage('Serial port error.')
         else:
             self.stop_calibration()
+            self._stop_thermal()
             self._serial_open(False)
             self.pb_connect.setText('Not Connected')
             self.pb_connect.setStyleSheet(self.MY_YELLOW)
@@ -252,6 +360,11 @@ class MainWindow(QMainWindow):
                 continue
             self.last_packet = raw
             self._update_status_bar()
+
+            if self._thermal_state == 'running' and raw.startswith('W'):
+                self._on_thermal_w_record(raw)
+                continue
+
             if raw.startswith('R'):
                 self._on_r_record(raw)
             elif 'ERROR' in raw:
@@ -355,6 +468,8 @@ class MainWindow(QMainWindow):
         self.pb_run.setEnabled(False)
         self.pb_stop.setEnabled(True)
         self.pb_export.setEnabled(False)
+        self.pb_export_profile.setEnabled(False)
+        self.pb_thermal.setEnabled(False)
 
         self.send_command('E')     # ensure firmware is in ready state
         self._send_next_step()
@@ -422,7 +537,8 @@ class MainWindow(QMainWindow):
             if mean_uV > target_uV:
                 break   # not yet crossed
 
-            # Crossed — linear interpolation between previous and current reading
+            # Crossed — linear interpolation between previous and current reading,
+            # then snap to the 8 ns PWM clock grid to avoid ±1 LSB jitter.
             if (self._prev_uV is not None
                     and self._prev_uV > target_uV
                     and self._prev_uV != mean_uV):
@@ -430,9 +546,10 @@ class MainWindow(QMainWindow):
                 interp = self._prev_delay + frac * (self._delay - self._prev_delay)
             else:
                 interp = self._delay   # first step already at or below threshold
+            interp = _snap_8ns(interp)
 
             self._fill_cell(self._pair_idx, self._thresh_idx,
-                            f'{interp:.2f}', color=_COL_DONE)
+                            f'{interp:.3f}', color=_COL_DONE)
             self._thresh_idx += 1
 
         if self._thresh_idx >= len(self._thresholds):
@@ -475,8 +592,10 @@ class MainWindow(QMainWindow):
         self.pb_run.setEnabled(True)
         self.pb_stop.setEnabled(False)
         self.pb_export.setEnabled(True)
+        self.pb_export_profile.setEnabled(True)
+        self.pb_thermal.setEnabled(True)
         self.progress_label.setText('Calibration complete.')
-        self.status_label.setText('Done — use Export CSV to save results.')
+        self.status_label.setText('Done — Export CSV / Export Profile / THERMAL.')
         self.statusBar().showMessage('Calibration complete.')
 
     def stop_calibration(self):
@@ -486,8 +605,201 @@ class MainWindow(QMainWindow):
         self.pb_run.setEnabled(self.serial.isOpen())
         self.pb_stop.setEnabled(False)
         self.pb_export.setEnabled(self.table.rowCount() > 0)
+        self.pb_export_profile.setEnabled(
+            self.table.rowCount() > 0 and bool(self._fp_pairs))
         self.progress_label.setText('Stopped.')
         self.status_label.setText('Sweep stopped.')
+
+    # ------------------------------------------------------------------
+    # Profile export
+    # ------------------------------------------------------------------
+    def _build_profile(self):
+        """Build a classviz-compatible profile dict from the calibration table."""
+        max_delay = self.sp_max.value()
+        bands = []
+        for r, (freq_khz, pulse_us) in enumerate(self._fp_pairs):
+            delays = []
+            for c in range(len(self._targets_v)):
+                item = self.table.item(r, c)
+                text = item.text() if item else ''
+                if text and text != 'N/R':
+                    try:
+                        delays.append(_snap_8ns(float(text)))
+                    except ValueError:
+                        delays.append(_snap_8ns(max_delay))
+                else:
+                    delays.append(_snap_8ns(max_delay))
+            bands.append({
+                'freq_hz':    int(round(freq_khz * 1000)),
+                'pulse_us':   pulse_us,
+                'delays_us':  delays,
+                'threshold_v': list(self._targets_v),
+            })
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return {
+            'name':     f'cal_{ts}',
+            'averages': 32,
+            'bands':    bands,
+        }
+
+    def export_profile(self):
+        if not self._fp_pairs or not self._targets_v:
+            self.statusBar().showMessage('No calibration data to export.')
+            return
+        profile = self._build_profile()
+        os.makedirs(PROFILES_DIR, exist_ok=True)
+        path = os.path.join(PROFILES_DIR, f"{profile['name']}.json")
+        with open(path, 'w') as f:
+            json.dump(profile, f, indent=2)
+        self.statusBar().showMessage(f'Profile saved: {path}')
+        self.status_label.setText(f'Profile → {os.path.basename(path)}')
+
+    # ------------------------------------------------------------------
+    # D command builder (same format as pimd_classviz.py)
+    # ------------------------------------------------------------------
+    def _build_d_command(self, profile):
+        parts = [f'D{profile["averages"]}']
+        for b in profile['bands']:
+            fields = [str(b['freq_hz']), str(b['pulse_us'])]
+            fields += [f'{d:.3f}' for d in b['delays_us']]
+            parts.append(','.join(fields))
+        return ';'.join(parts)
+
+    # ------------------------------------------------------------------
+    # Thermal monitoring
+    # ------------------------------------------------------------------
+    def _start_thermal(self):
+        if not self.serial.isOpen():
+            self.statusBar().showMessage('Not connected.')
+            return
+        if not self._fp_pairs or not self._targets_v:
+            self.statusBar().showMessage('Run calibration first.')
+            return
+
+        profile = self._build_profile()
+        n_bands = len(profile['bands'])
+        n_cells = len(profile['bands'][0]['delays_us'])
+        self._thermal_n_bands    = n_bands
+        self._thermal_n_cells    = n_cells
+        self._thermal_n_channels = n_bands * n_cells
+        self._thermal_buf.clear()
+        self._thermal_latest     = None
+        self._thermal_remaining  = float(self.sp_thermal_secs.value())
+        self._thermal_state      = 'running'
+
+        # Define dynamic profile and start Mode 2 streaming
+        self.send_command('E')
+        self.send_command(self._build_d_command(profile))
+        self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
+        self.send_command('G')
+
+        self._rebuild_thermal_tables(profile)
+
+        self._thermal_timer = QTimer(self)
+        self._thermal_timer.setInterval(1000)
+        self._thermal_timer.timeout.connect(self._thermal_tick)
+        self._thermal_timer.start()
+
+        self.pb_thermal.setEnabled(False)
+        self.pb_thermal.setStyleSheet(self.MY_GREEN)
+        self.pb_thermal_stop.setEnabled(True)
+        self.pb_run.setEnabled(False)
+        self.lbl_thermal_status.setText(
+            f'Running — {int(self._thermal_remaining)} s remaining')
+        self.statusBar().showMessage('Thermal monitoring started.')
+
+    def _stop_thermal(self):
+        if self._thermal_state != 'running':
+            return
+        self._thermal_state = 'idle'
+        if self._thermal_timer:
+            self._thermal_timer.stop()
+            self._thermal_timer = None
+        if self.serial.isOpen():
+            self.send_command('E')
+        self.pb_thermal.setEnabled(bool(self._fp_pairs))
+        self.pb_thermal.setStyleSheet('')
+        self.pb_thermal_stop.setEnabled(False)
+        self.pb_run.setEnabled(self.serial.isOpen())
+        self.lbl_thermal_status.setText('Stopped.')
+        self.statusBar().showMessage('Thermal monitoring stopped.')
+
+    def _thermal_tick(self):
+        self._thermal_remaining -= 1.0
+        if self._thermal_remaining <= 0:
+            self.lbl_thermal_status.setText('Complete.')
+            self._stop_thermal()
+        else:
+            self.lbl_thermal_status.setText(
+                f'Running — {int(self._thermal_remaining)} s remaining')
+
+    def _rebuild_thermal_tables(self, profile):
+        """Size both thermal tables to match the profile dimensions."""
+        row_labels = [
+            self._row_label(b['freq_hz'] / 1000, b['pulse_us'])
+            for b in profile['bands']
+        ]
+        col_labels = [f'{v:.1f} V' for v in self._targets_v]
+        n_rows, n_cols = len(row_labels), len(col_labels)
+
+        for tbl in (self.tbl_thermal_mean, self.tbl_thermal_std):
+            tbl.setRowCount(n_rows)
+            tbl.setColumnCount(n_cols)
+            tbl.setVerticalHeaderLabels(row_labels)
+            tbl.setHorizontalHeaderLabels(col_labels)
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    item = QTableWidgetItem('—')
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    tbl.setItem(r, c, item)
+
+    def _on_thermal_w_record(self, line):
+        """Parse W record from Mode 2 streaming and feed thermal display."""
+        line = line.replace(', ', ',')
+        parts = line.split(',')
+        try:
+            w_idx = int(parts[0][1:])
+            if w_idx != DYNAMIC_PROFILE_INDEX:
+                return
+            if len(parts) != 2 + self._thermal_n_channels:
+                return
+            raw = [int(parts[2 + i]) for i in range(self._thermal_n_channels)]
+        except (ValueError, IndexError):
+            return
+
+        self._thermal_latest = raw
+        self._thermal_buf.append(raw)
+        self._update_thermal_tables()
+
+    def _update_thermal_tables(self):
+        """Update mean and std-dev tables; rate-limited to ~10 Hz."""
+        now = time.time()
+        if now - self._thermal_last_redraw < 0.1:
+            return
+        self._thermal_last_redraw = now
+
+        if self._thermal_latest is None:
+            return
+
+        latest = self._thermal_latest
+        n = self.sp_thermal_n.value()
+        recent = list(self._thermal_buf)[-n:]
+
+        for b in range(self._thermal_n_bands):
+            for c in range(self._thermal_n_cells):
+                ch = b * self._thermal_n_cells + c
+
+                item_m = self.tbl_thermal_mean.item(b, c)
+                if item_m:
+                    item_m.setText(str(int(latest[ch] / 1000)))
+
+                item_s = self.tbl_thermal_std.item(b, c)
+                if item_s:
+                    if len(recent) >= 2:
+                        vals = [frame[ch] for frame in recent]
+                        item_s.setText(f'{_stdev(vals) / 1000:.2f}')
+                    else:
+                        item_s.setText('0.00')
 
     # ------------------------------------------------------------------
     # CSV export
@@ -525,6 +837,7 @@ class MainWindow(QMainWindow):
     # Cleanup
     # ------------------------------------------------------------------
     def closeEvent(self, event):
+        self._stop_thermal()
         if self.serial.isOpen():
             self.send_command('E')
             self.serial.waitForBytesWritten(200)
@@ -535,6 +848,6 @@ class MainWindow(QMainWindow):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(1050, 620)
+    window.resize(1200, 850)
     window.show()
     sys.exit(app.exec())

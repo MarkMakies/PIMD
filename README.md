@@ -3,12 +3,13 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 · **Firmware:** v4.19 · **PC tools:** gui v4.07 · scope v4.01 · classviz v1.04 · delaycal v1.02 · **Coil:** v4
 **Last bench update:** 2026-06-18 (CLASSIFY_EP confirmed; BUSY-sync fix; SoC established)
-**Doc rev:** 1.2 (2026-06-18) — §16 consolidation pass: updated versions (fw v4.19, all tools); added Profile 4 CLASSIFY_EP (§10); added SoC conditions (§3); added BUSY-sync notes (§7); updated §9 protocol records; updated §15 inventory (pimd_classviz.py added, asset paths → References/, stale notes dropped); expanded §17. Bump this line on every edit.
+**Doc rev:** 1.3 (2026-06-19) — split agent-facing guidance out to `CLAUDE.md`: removed the §16 working brief and the scattered reviewer/agent notes (§1, §17 intro); repurposed §16 as Build/Run/Deploy; added `CLAUDE.md` and `ARCHIVE.md` to the §15 inventory. No project facts changed. (Previous: 1.2 (2026-06-18) — consolidation pass: versions fw v4.19 + all tools; Profile 4 CLASSIFY_EP §10; SoC §3; BUSY-sync §7; §9 records; §15 inventory; §17.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
-> *(measured)*; everything else is a nominal/design figure. **§16 is the agent-facing
-> brief** (intent, invariants, conventions). **§17 is the living test log.**
+> *(measured)*; everything else is a nominal/design figure. **How an agent should behave
+> when editing this project lives in `CLAUDE.md`**, not here — this README is the project
+> reference. **§17 is the living test log.**
 
 ---
 
@@ -31,12 +32,6 @@ operational: first metal-detection response 2026-06-16; CLASSIFY_EP (profile 4,
 45-channel sweep) confirmed streaming 2026-06-17 with stable W4 records. The RX front end
 was reworked June 2026 (§7). Remaining work is **refinement** (thermal drift, supply noise)
 and the ML/classification layer — not redesign.
-
-> **Reviewer/agent note:** the goal of any review is refinement — lower noise, less drift,
-> more robust firmware. Do **not** propose ground-up redesigns or "should have used X"
-> rewrites unless a concrete defect justifies it. If your analysis implies the detector
-> "can't work" the way it's built, you are missing context — the builder has scope captures
-> proving otherwise. **Flag the concern; don't assert a contradiction.**
 
 ---
 
@@ -111,7 +106,7 @@ Separate TX and RX windings (a two-winding "transformer", **not** a shared mono 
 
 **Coil v4:** two coils slotted into 12 mm Perspex, RX shielded with copper tape,
 both embedded for mechanical stability (earlier coils shifted under rover vibration;
-epoxy/Perspex fixed the resulting drift). Faraday shield with **no closed loop**.
+epoxy/Perspex fixed the resulting drift). Faraday shield on RX with **no closed loop**.
 
 TX 520 × 360 mm, 10 turns 0.5 mm (24 AWG) enamelled, 17.6 m, 1.7 Ω ·
 RX 430 × 265 mm, 50 turns 0.25 mm (30 AWG) Teflon silver-plated wire-wrap, 30.8 m, 22.9 Ω.
@@ -133,7 +128,7 @@ are tuned empirically on a scope, not by formula.
 - **Gate driver:** U4C → U4D (TL074 sections) level-shift the 3.3 V `COIL-DRIVE` logic up to
   a ~10 V gate swing. Design intent throughout: fast, non-linear FET switching with
   parasitic-capacitance management.
-- **Gate / damping network:** R10 270 Ω, R11 220 Ω 5 W (damping). **R12/R13 are now 0 Ω**
+- **Gate / damping network:** R12/R13 are now 0 Ω 
   (originally 4.7 Ω 5 W, added on expert advice to slow the gate edge for SOA; this build
   performs better without them).
 - **Turn-off** *(measured, 10 kHz / 40 µs)*: gate **11.47 V → 0.44 V in 733 ns** — clean,
@@ -154,8 +149,7 @@ RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
                       └─ 47R ─► LT6203 +input (single +12V supply)
 ```
 
-- **R1 = 1.3k (shunt) is the RX damping resistor.** A pot across the RX coil rings ~25 µs
-  (+100/−50 V) at 25 k and **critically damps at ≈ 1.3–1.4k** *(measured)*, which also
+- **R1 = 1.3k (shunt) is the RX damping resistor. **critically damps at ≈ 1.3–1.4k** *(measured)*, which also
   cleans up TX via mutual coupling.
 - **R9 = 4.7k (series) is clamp current-limit only**, not damping — it holds clamp current
   to ≈ 9.6 mA at the +50 V damped peak, well inside the LT6203 rating.
@@ -173,8 +167,7 @@ RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
   - **SDOB (SPI0):** no-latency raw value (firmware/diary call it 14-bit; schematic annotates
     "22-bit composite = 14-bit differential + 8-bit common-mode") — baseline + sample-timing
     search *(noise ≈ ±1400 µV)*.
-  - **Decimation** SEL0 (GPIO12): 256 (operating) or 1024. SEL1 is not wired, so only those
-    two ratios are reachable on the filtered path; the raw path is unaffected.
+  - **Decimation** SEL0 (GPIO12): 256 (operating) or 1024. 
   - **Conversion sync:** the falling edge of GPIO5 (`SAMPLE`/`MCLK`) starts each conversion,
     so every TX cycle yields one timed sample at exactly `sample_delay` after coil turn-off.
 - **References:** U5 LTC6655-5 (precision 5 V), U7 LT1762-2.5 (low-noise 2.5 V for ADC).
@@ -268,7 +261,7 @@ Profiles are fixed/compiled-in RAM constants (no flash writes). Geometry is cons
 profile, so any future ML classifier is trained per profile and the table is the
 firmware↔ML contract.
 
-### Scan-grid sizing (guidance — 10 kHz, slow movement)
+### Scan-grid sizing (WIP)
 A profile *is* a scan grid: **averages** raw samples per cell, across **n_delays** sample
 delays, for **n_pulses** pulse widths. Sensible starting point:
 - **averages ≈ 32** → ~250 µV (raw floor ≈ 1400 µV, noise = 1400/√averages), ~3.2 ms/cell.
@@ -282,13 +275,9 @@ delays, for **n_pulses** pulse widths. Sensible starting point:
 ## 11. Invariants — do not break
 
 - **Same-slice PWM phase-locking** (GPIO4/GPIO5, slice 2).
-- The **serial wire format**, both modes (§9).
-- The **µV scaling** constants: `5_000_000 // 2**31` (Mode 1) and `raw14 * 10_000_000 / 2**14`
-  (Mode 2).
-- The deliberate **over-damping / early-sample** design philosophy.
-- The **prime-ish pulse-rate** choice (noise mitigation, not arbitrary).
-- **No scan scheduler or PC-defined logic in firmware** beyond the fixed profile loop; **no
-  flash writes** in normal operation (flash writes spike the noise floor ~10×).
+- **serial wire format**, both modes (§9).
+- **No scan scheduler or PC-defined logic in firmware** beyond the fixed profile loop; 
+- **no flash writes** in normal operation (flash writes spike the noise floor ~10×).
 
 ---
 
@@ -316,25 +305,19 @@ flash raises the noise floor ~10×.
 
 - Sampling the **0.5 V – 4.5 V** band of the flyback decay rather than the usual bottom ~700 mV —
   found to carry more discrimination information and sit well above the noise floor.
-- **rectangular RX inside larger TX** to cut mutual coupling and enable
-  very early sampling.
 
 ---
 
-## 14. Open problems (priority order)
+## 14. Open problems
 
 1. **Thermal drift.** Wider pulses heat the TX damping/gate resistors; the drive circuit
-   drifts and the sensitive RX side drifts with it — the main ceiling on using pulse-width as
-   a discrimination axis. *Current measured baseline ≈ **−89 µV/s** at 5 kHz / 40 µs; target
-   for any compensation work.*
+   drifts and the sensitive RX side drifts with it.
 2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path ~50 % noisier than USB; unresolved.
 3. **General supply noise floor** (battery vs USB, flash penalty — partially mitigated).
 4. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET
    duty note (see §17) — Q1 (IRF610) is being pushed past its noted SOA; a higher-rated
    replacement FET is probably warranted.
 5. **Coil mechanical stability** — largely solved (epoxy + Perspex).
-6. **RX front-end damping/clamp** — resolved June 2026 (§7). Open sub-items: confirm
-   clip-release didn't regress; re-measure RX coil L/C.
 
 ---
 
@@ -357,47 +340,17 @@ flash raises the noise floor ~10×.
 | `References/GUI-SteadyState.jpg` | SoC steady-state reference capture — settled noise floor and thermal drift; Mode 1 at SoC conditions, first half DS 256 / second half DS 1024 |
 | `References/LTC2508-32.pdf` | ADC datasheet — source for the settling/bandwidth math |
 | `References/DiscriminationTests.JPEG` | *Not yet cited in text* |
-| `CHANGELOG.md` | Running change log — agents write here; this README is consolidated from it (§16) |
-| `README.md` | **This file** (the single working document) |
+| `CHANGELOG.md` | Running change log — the source this README is consolidated from (logging conventions in `CLAUDE.md`) |
+| `ARCHIVE.md` | Older `CHANGELOG.md` entries, preserved verbatim at each consolidation pass |
+| `README.md` | **This file** — project reference (specs, design, measured values); a curated snapshot consolidated from `CHANGELOG.md` |
+| `CLAUDE.md` | AI-agent working brief — how to behave when editing this repo (mindset, conventions, don'ts). Not project facts |
 
 ---
 
-## 16. For Claude / CC — working brief
+## 16. Build, run & deploy
 
-Everything an AI agent needs to make safe edits. (The hard facts above — envelope §3,
-invariants §11, wire format §9, profiles §10 — are the ground truth; this section is the
-*how to behave* layer.)
-
-### Mindset
-- **It already works.** Refine; don't redesign. No "you should have used X" rewrites without a
-  concrete defect. If your analysis says it "can't work," you're missing context — **flag,
-  don't assert.** The builder has scope captures.
-- When you **cannot** determine something from text (analogue behaviour, PCB layout, scope
-  data), **say so explicitly** rather than guessing.
-- Keep changes **minimal and reversible** — prefer a flagged main-loop fix over restructuring
-  the ISR/acquisition model unless asked.
-
-### Control model — MCU stays a simple primitive
-- The MCU must **not** grow a PC-driven scan engine. 
-- **No flash writes** in the hot path (they spike the noise floor ~10×). 
-- Keep a single read-line / write-line transport seam (USB-serial).
-
-### Coding conventions / environment
-- **MicroPython** on RP2040 for `mcu/pimd_mcu.py`; pure-Python only, no CPython-only libs.
-- PC tools are **PyQt6**: `pimd_gui.py` (Mode 1), `pimd_scope.py` (Mode 2 scope), `pimd_classviz.py`
-  (Mode 2 signature visualiser), `pimd_delaycal.py` (delay cal). `pimd302.py` is the superseded v3.x GUI.
-- **Bump the version number and add a header changelog line on every file edit — this is
-  important.** (Detailed changelogs live in the source-file headers; this README keeps only a
-  one-line summary.)
-- always use a venv
-
-### This README is read-only for agents
-- **Do not edit this file.** Record every change you make — firmware, PC tools, hardware, or
-  new findings — in a separate **`CHANGELOG.md`** (component · what changed · why · date).
-- This README is regenerated from `CHANGELOG.md` by a periodic human-run consolidation pass
-  (using a more capable model). Treat it as a stable reference snapshot, not a scratchpad.
-- The Test Log (§17) follows the same rule: append observations to `CHANGELOG.md`, and the
-  consolidation pass folds them in here.
+No build step for either the PC tools or the firmware. (Agent conventions — version
+bumps, changelog discipline, the "don't edit this README" rule — live in `CLAUDE.md`.)
 
 ### Run / deploy (PC venv)
 ```bash
@@ -428,33 +381,24 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 
 ---
 
-## 17. Test log / observations (curated — see §16)
+## 17. Test log / observations (curated)
 
 Per-entry: **date · fw/hw rev · one-line summary**, grouped by subject. Detailed changelogs
-stay in source-file headers. When an observation **supersedes** an envelope value (§3), update
-the envelope in place with a dated note and record the raw observation in `CHANGELOG.md`. **Agents: log new observations to `CHANGELOG.md`, not directly here** — §17 is refreshed at consolidation (§16).
+stay in source-file headers. This log is curated — it is refreshed from `CHANGELOG.md` at each
+consolidation pass. When an observation **supersedes** an envelope value (§3), the envelope is
+updated in place with a dated note and the raw observation is recorded in `CHANGELOG.md`.
+(Logging conventions for agents live in `CLAUDE.md`.)
 
 ### 17.1 Power / current vs pulse width
-*Method: for each pulse width, raise PRF until the bench-supply draw reaches 0.5 A. Below
-20 µs the supply current can't reach 0.5 A — a frequency/duty ceiling is hit first.
-"current" = average bench-supply current (at 20 V), not peak coil current. The 40 µs / 10.6 kHz
-/ 500 mA row matches the schematic annotation "10 kHz 40 µs pulses, 500 mA from bench supply
-at 20 V."*
+"current" = average bench-supply current (at 20 V), not peak coil current. 
 
-| Pulse (µs) | Freq Req (Hz) | Freq (actual) | Current (mA) | Note |
-|---|---|---|---|---|
-| 40 | 10601 | 10601.025 | 500 | raise freq until 0.5 A |
-| 30 | 17599 | 17599.127 | 500 | as above |
-| 20 | 29201 | 29201.343 | 410 | now frequency/duty-cycle constrained |
-| 10 | 43003 | 43003.354 | 201 | as above |
-| 5 | 56992 | 56933.047 | 105 | as above |
-
-Note that freq taken to next achievable/actual (after conversion to PWM) prime
-
-> **Flag (builder's note):** the duty at these points (pulse × freq ≈ 28–58 %) is far above the
-> schematic's < 2 % FET-duty note and above the ~20 % of the 5 kHz / 40 µs operating point.
-> Q1 (IRF610) is being pushed past its noted SOA — **a higher-rated replacement FET is probably
-> warranted.** Recorded as raw notes; entry: *2026-06-16 · fw v4.02 · power sweep, bench supply 20 V.*
+| Pulse (µs) | Freq Req (Hz) | Freq (actual) | Current (mA) |
+|---|---|---|---|
+| 40 | 10.6 | 500 | raise freq until 0.5 A |
+| 30 | 17599 | 500 | as above |
+| 20 | 29201 | 410 | now frequency/duty-cycle constrained |
+| 10 | 43003 | 201 | as above |
+| 5 | 56992 | 105 | as above |
 
 ### 17.2 Standard Operating Conditions / noise floor
 
@@ -468,27 +412,9 @@ Reference capture: `References/GUI-SteadyState.jpg` — first half of plot at DS
 second half (after DS Factor toggle) at DS 1024. Shows the settled noise floor and slow
 thermal drift; this is the trace future comparisons should be checked against.
 
-### 17.3 Mode 2 — CLASSIFY_EP (profile 4) streaming
+### 17.3 Mode 2 — profile streaming
 
-*2026-06-17 · fw v4.13 (cell-misattribution fix) / v4.05 (prime-ish freqs) · pimd_classviz.py v1.00+*
-
-**CLASSIFY_EP confirmed streaming:** firmware flashed; 45-channel W4 records verified.
-Two consecutive records (50 ms apart):
-
-```
-W4,47439,4597625,4120578,...,562667,227699
-W4,47489,4597492,4120426,...,562667,227699
-```
-
-Values in µV. Channels decrease monotonically across each band's delay sweep (shortest
-delay → highest signal ≈ 4.5 V; longest delay → lowest ≈ 0.23 V). Values stable between
-records. All 5 bands × 9 cells populated correctly.
-
-Cell-misattribution bug (v4.13) and inter-band leakage (v4.06) both fixed; std devs
-mostly single-digit to ≈ 20 mV after fixes. Band 0 (10.6 kHz) still shows elevated
-std dev (22–138 mV) — not yet investigated, lower priority since absolute values are sane.
-
----
+WIP - fixing bugs atm to ensure data consistency
 
 
 

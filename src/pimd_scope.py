@@ -1,5 +1,6 @@
 ###############################################################################
-# PIMD Scope — Mode 2 streaming visualiser
+# PIMD Scope v4.01
+# — Mode 2 streaming visualiser
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Connects to the board, sends Q<n>/G to start Mode 2 streaming, and plots
@@ -8,9 +9,9 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...
 # Board firmware: pimd_mcu.py v4.00+
 #
-# v4.00 initial version (replaces pimd_scope_cal.py poll-based approach)
 # v4.01 PROFILES_META converted to bands format; _update_titles updated for
 #       multi-freq profiles; profile 4 CLASSIFY_EP added (5 bands × 9 cells)
+# v4.00 initial version (replaces pimd_scope_cal.py poll-based approach)
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false
