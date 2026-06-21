@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 · **Firmware:** v4.19 · **PC tools:** gui v4.07 · scope v4.01 · classviz v1.04 · delaycal v1.02 · **Coil:** v4
-**Last bench update:** 2026-06-18 (CLASSIFY_EP confirmed; BUSY-sync fix; SoC established)
-**Doc rev:** 1.3 (2026-06-19) — split agent-facing guidance out to `CLAUDE.md`: removed the §16 working brief and the scattered reviewer/agent notes (§1, §17 intro); repurposed §16 as Build/Run/Deploy; added `CLAUDE.md` and `ARCHIVE.md` to the §15 inventory. No project facts changed. (Previous: 1.2 (2026-06-18) — consolidation pass: versions fw v4.19 + all tools; Profile 4 CLASSIFY_EP §10; SoC §3; BUSY-sync §7; §9 records; §15 inventory; §17.) Bump this line on every edit.
+**Hardware rev:** 6.04 · **Firmware:** v4.23 · **PC tools:** gui v4.13 · classviz v1.14 · delaycal v1.19 · **Coil:** v4
+**Last bench update:** 2026-06-20 (80 ns delay sweep; LC ringing zones identified)
+**Doc rev:** 1.4 (2026-06-21) — consolidation pass: fw v4.23; gui v4.13; classviz v1.14; delaycal v1.19; pimd_scope.py removed; §9 protocol updated to integer Hz/ns; §8 SAMPLE_PULSE_CORRECTION 0.904 µs; §15 inventory updated; §17.3 Mode 2 status updated; §17.4 new delay-sweep bench observation; ARCHIVE.md removed from inventory. (Previous: 1.3 (2026-06-19) — split agent-facing guidance to CLAUDE.md; repurposed §16 as Build/Run/Deploy.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -218,7 +218,7 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   core timing mechanism — never split these onto different slices.** *(timing precision
   ≈ 5 ns, measured.)*
 - **Pulse width:** 5–50 µs. **Sample delay:** software-set, with an empirical
-  `SAMPLE_PULSE_CORRECTION = 0.908 µs` offset between the PWM edge and the ADC trigger.
+  `SAMPLE_PULSE_CORRECTION = 0.904 µs` offset between the PWM edge and the ADC trigger.
 - **Pulse rate:** 5-50 kHz typical. A **prime-ish** rate  halved noise by
   avoiding beat frequencies — the rate choice is deliberate, not arbitrary.
 - **SPI map:** SPI0 raw (SCKB GPIO2 / SDOB GPIO0 / BUSY GPIO15); SPI1 filtered (SCKA GPIO10 /
@@ -231,10 +231,12 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
 Two **mutually exclusive** acquisition modes over one serial link (115200 baud). Starting
 one requires `E` first. *(Literal field separator in records and the `*` config string is
 `", "` — comma-space — shown below comma-only for readability; parsers tolerate either.)*
+*(All timing fields are exact integers: freq in Hz, pulse and delay in ns — no decimal points.
+At the 8 ns PWM grid every value is an exact multiple of 8.)*
 
 **Mode 1 — filtered / interrupt-driven** (mature; all baselines & field tests):
-- **in:** `S`/`s` start · `E`/`e` stop · `*<freq_kHz>,<pulse_us>,<delay_us>,<downsample>` configure
-- **out:** `*<time_ms>,<value_uV>,<stddev_uV>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
+- **in:** `S`/`s` start · `E`/`e` stop · `*<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>` configure
+- **out:** `*<time_ms>,<value_uV>,<stddev_uV>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>`
 - **rate:** pulse_freq / downsample (~20/s at 5 kHz / 256)
 
 **Mode 2 — raw interleaved moving-average sweep** (new; under active development):
@@ -243,9 +245,9 @@ one requires `E` first. *(Literal field separator in records and the `*` config 
 - **rate:** min(100 Hz, profile_freq / n_cells); `S` rejected while Mode 2 runs
 
 **Both modes:**
-- `V`/`v`/`?` identify → `V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_kHz>,<pulse_us>,<delay_us>,<downsample>`
-- `L` list profiles → one `L<idx>,<freq_kHz>,<n_bands>,<n_cells>,<averages>,<name>` line each
-- `A<n>` raw boxcar average (idle / Mode 1 only) → one `R<time_ms>,<mean_uV>,<std_uV>,<count>,<freq_kHz>,<pulse_us>,<delay_us>,<min_uV>,<max_uV>` line
+- `V`/`v`/`?` identify → `V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>`
+- `L` list profiles → one `L<idx>,<freq_hz>,<n_bands>,<n_cells>,<averages>,<name>` line each
+- `A<n>` raw boxcar average (idle / Mode 1 only) → one `R<time_ms>,<mean_uV>,<std_uV>,<count>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>` line
 - `E` is the universal stop. Modes are mutually exclusive.
 
 **µV scaling (invariant):** filtered (Mode 1) `raw32 * 5_000_000 // 2**31`; raw (Mode 2 / `A`)
@@ -323,12 +325,11 @@ flash raises the noise floor ~10×.
 
 | File | Role |
 |------|------|
-| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.19**) — both modes, all profiles; BUSY edge sync required for SDOB accuracy |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.23**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23) |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
-| `src/pimd_gui.py` | PC PyQt6 GUI **v4.07** — Mode 1 filtered telemetry display; boxcar-mode toggle for raw SDOB overlay |
-| `src/pimd_scope.py` | PC PyQt6 scope **v4.01** — Mode 2 raw streaming visualiser; supports CLASSIFY_EP and multi-band profiles |
-| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.04**) — real-time 5×9 heatmap of CLASSIFY_EP cell deviations, stats table, ML CSV logger, single-cell isolation mode |
-| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.02**; header title line still reads v1.01 — reconcile). Steps `sample_delay` per freq/pulse pair via `*`+`A<n>` and records the delay at which the ADC reading crosses each target voltage — i.e. measures clip-release / earliest-valid-sample |
+| `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.14**) — real-time heatmap (bands sorted delay-descending), stats table, ML CSV logger, profile builder tab, 64-frame glitch filter, frame recording, settings persistence |
+| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.19**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); profile export/import; thermal monitoring; auto-nudge (parallel or sequential); activity log; settings persistence |
 | `src/pimd302.py` | Legacy PC GUI v3.02 (superseded; kept for reference) |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` |
 | `src/requirements.txt` | Python deps for PC tools |
@@ -338,8 +339,7 @@ flash raises the noise floor ~10×.
 | `References/GUI-SteadyState.jpg` | SoC steady-state reference capture — settled noise floor and thermal drift; Mode 1 at SoC conditions, first half DS 256 / second half DS 1024 |
 | `References/LTC2508-32.pdf` | ADC datasheet — source for the settling/bandwidth math |
 | `References/DiscriminationTests.JPEG` | *Not yet cited in text* |
-| `CHANGELOG.md` | Running change log — the source this README is consolidated from (logging conventions in `CLAUDE.md`) |
-| `ARCHIVE.md` | Older `CHANGELOG.md` entries, preserved verbatim at each consolidation pass |
+| `CHANGELOG.md` | Running change log — the source this README is consolidated from (logging conventions in `CLAUDE.md`); archive entries for previous consolidation passes are preserved below the marker line |
 | `README.md` | **This file** — project reference (specs, design, measured values); a curated snapshot consolidated from `CHANGELOG.md` |
 | `CLAUDE.md` | AI-agent working brief — how to behave when editing this repo (mindset, conventions, don'ts). Not project facts |
 
@@ -358,7 +358,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r src/requirements.txt
 cd src
 python pimd_gui.py        # Mode 1 GUI (filtered telemetry)
-python pimd_scope.py      # Mode 2 scope (raw streaming)
+python pimd_classviz.py   # Mode 2 signature visualiser
 python pimd_delaycal.py   # delay-calibration sweep
 ```
 PC tools connect to `/dev/ttyACMx` @ 115200.
@@ -375,7 +375,7 @@ PC tools connect to `/dev/ttyACMx` @ 115200.
 V                     → version / identify
 L                     → list profiles
 Q4  then  G           → Mode 2 streaming CLASSIFY_EP (W4 records, 45-ch, ≤100 Hz);  E to stop
-*5,40,8.4,256  then S → Mode 1 streaming (* records, ~20/s);    E to stop
+*5000,40000,8400,256  then S → Mode 1 streaming (* records, ~20/s);    E to stop
 A32                   → one raw boxcar average (R record), idle/Mode 1 only
 ```
 
@@ -414,7 +414,40 @@ thermal drift; this is the trace future comparisons should be checked against.
 
 ### 17.3 Mode 2 — profile streaming
 
-WIP - fixing bugs atm to ensure data consistency
+Acquisition bugs resolved in fw v4.20–v4.23 (boundary settling, cell-misattribution read/write
+ordering, IRQ critical section around BUSY+SPI). Mode 2 streaming is functionally stable.
+Active development is now in the tooling layer (`pimd_classviz.py`, `pimd_delaycal.py`).
+
+### 17.4 Delay calibration sweep
+
+*2026-06-20 · fw v4.23 · 20 kHz / 20 µs pulse · OBS P2006-113356.csv*
+
+First data set with fw v4.23 integer Hz/ns protocol. 13 delay steps, 7088–8048 ns in 80 ns
+increments (~5 s/step), warm-up 30 s. All delays land exactly on the 8 ns PWM grid.
+
+| delay (ns) | delay (µs) | V mean (mV) | V σ (µV) | fw_sd (µV) | status |
+|---:|---:|---:|---:|---:|:---|
+| 7088 | 7.088 | 4877.3 | 1835 | 242 | settled — slow filter tail (rolling-window flush artefact) |
+| 7168 | 7.168 | 4809.2 | 71 | 65 | **clean** |
+| 7248 | 7.248 | 4736.3 | 378 | 125 | settled — moderate |
+| 7328 | 7.328 | — | — | 500–1400 | **never settled** |
+| 7408 | 7.408 | — | — | 500–1400 | **never settled** |
+| 7488 | 7.488 | 4477.5 | 227 | 158 | settled — ok |
+| 7568 | 7.568 | 4379.3 | 177 | 161 | settled — ok |
+| 7648 | 7.648 | 4273.8 | 179 | 111 | settled — ok |
+| 7728 | 7.728 | 4161.5 | 176 | 139 | settled — ok |
+| 7808 | 7.808 | — | — | 500–1400 | **never settled** |
+| 7888 | 7.888 | — | — | 500–1400 | **never settled** |
+| 7968 | 7.968 | 3795.4 | 180 | 105 | settled — ok |
+| 8048 | 8.048 | 3666.1 | 319 | 143 | settled — moderate |
+
+Key findings: (1) 8 ns grid fix confirmed — no two-stage settling artefact seen (was present
+in v4.21 off-grid dataset P2006-103607). (2) Four delays never settle: 7328+7408 and
+7808+7888 — two 160 ns noisy zones exactly 480 ns apart, consistent with ~2.08 MHz LC ringing
+in the coil/preamp persisting to 7–8 µs after TX cutoff. (3) 7088 ns: high V σ (1835 µV) but
+low fw_sd (242 µV) — voltage drift ~5.6 mV/24 s from the 256-sample rolling window still
+flushing the previous step (3.28 s flush time), not physical noise. (4) Best operating window
+at 20 kHz / 20 µs: **7488–7728 ns** (320 ns clean band).
 
 ## 18. Change Log Consolidation Pass.
 

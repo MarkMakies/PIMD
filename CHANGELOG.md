@@ -1,3 +1,6 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-06-21
 
 ### src/pimd_scope.py — removed — superseded by pimd_classviz.py
 
@@ -511,11 +514,7 @@ breaking machine parsing.
 
 ---
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
-
 ## Archive — consolidated 2026-06-18
-
-*The following block was the complete CHANGELOG.md at the time of the §17 README consolidation pass (Doc rev 1.2). README.md has been updated from this content; this file preserves the raw entries for reference.*
 
 ---
 
