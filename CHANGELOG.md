@@ -1,4 +1,11 @@
 
+### src/pimd_scope.py — removed — superseded by pimd_classviz.py
+
+pimd_scope.py (v4.02, Mode 2 streaming visualiser) removed from the repository.
+All functionality is covered by pimd_classviz.py. (2026-06-21)
+
+---
+
 ### src/pimd_delaycal.py — v1.18 — draggable left/right splitter
 
 Left column (config panel + activity log) was fixed at 420 px and did not grow
