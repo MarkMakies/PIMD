@@ -1,5 +1,16 @@
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
+### src/pimd_classviz.py — v1.15 — Stats: Std colour bands + row-height +/−
+
+Stats tab controls row: two QDoubleSpinBox widgets (lower/upper, default 0.50/1.00 mV)
+set colour thresholds for the Std (mV) column — green (< lower), yellow (between), red
+(> upper) using the same RGB values as MY_GREEN/YELLOW/RED used throughout the app.
+Two +/− QPushButtons adjust `tbl_stats` default row section height in 4 px steps
+(clamped 12–48 px) so all rows stay visible at any density.  QBrush/QColor imported
+from PyQt6.QtGui. (2026-06-21)
+
+---
+
 ## Archive — consolidated 2026-06-21
 
 ### src/pimd_scope.py — removed — superseded by pimd_classviz.py

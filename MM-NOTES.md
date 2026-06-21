@@ -111,3 +111,40 @@ After I confirm the plan, implement it.
 21 July
 
 consolidating
+
+
+You are writing ONE single-page cheat sheet for the PIMD project, for the module: pimd_mcu.
+
+GROUND TRUTH
+- Read @mcu/pimd_mcu.py as the authority for behaviour, modes, and serial commands.
+- Use README.md (§9 protocol, §15 inventory) only for framing/context.
+- If the source and README disagree, follow the source and add a one-line "⚠ README §X says
+  otherwise" note. Do NOT invent or smooth over gaps — if something isn't in the source, say
+  "not specified in source" rather than guessing.
+
+SCOPE
+- Create exactly one new file: docs/cheatsheets/<<MODULE>>.md
+- Do NOT edit README.md, CLAUDE.md, CHANGELOG.md, or any source file. Do NOT bump any version
+  or Doc-rev line. Create nothing else.
+
+LENGTH
+- One page: target ~400–500 words, must fit one side of A4 when rendered. Be dense and
+  scannable — prefer a compact command/record TABLE over prose for the protocol section.
+
+TEMPLATE (use these exact headings, in this order):
+1. What it is — 1–2 sentences (the role of this module in the system).
+2. What it does — 3–5 bullets of core function.
+3. Modes of operation — the modes/states this module runs in; if only one, say so.
+4. Serial protocol — a table. For the firmware: commands ACCEPTED and records EMITTED.
+   For an app: commands it SENDS to the MCU and records it CONSUMES. Columns:
+   Direction | Token/format | Meaning. Keep to what THIS module actually uses.
+5. Key parameters / defaults — anything an operator sets (freq, pulse, delay, downsample,
+   profile, etc.) with default/SoC values where the source defines them.
+6. Gotchas / pertinent notes — non-obvious behaviour, ordering requirements, known limits.
+
+PROCESS
+- First, list the serial tokens you found by reading the source (just the list).
+- Then write the file.
+
+Current versions per README: fw v4.23 · gui v4.13 · classviz v1.14 · delaycal v1.19.
+Audience: maker, future me & operator.

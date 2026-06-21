@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.14
+# PIMD Signature Visualiser (ClassViz) v1.15
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -14,6 +14,11 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.15 Stats tab: Std (mV) column colour-coded green/yellow/red against a lower/
+#       upper threshold pair (default 0.50/1.00 mV) set via two QDoubleSpinBox
+#       widgets added to the controls row.  +/− QPushButton pair adjusts the
+#       tbl_stats default row height in 4 px steps (12–48 px) so all rows remain
+#       visible at any zoom level.  QBrush/QColor imported from PyQt6.QtGui.
 # v1.14 Stats table and Profile Builder table rows now sorted ascending by first
 #       delay value (lowest delay first).  _band_stats_order / _stats_band_labels
 #       added to _set_profile_dims(); _rebuild_stats_table() and
@@ -87,6 +92,7 @@ import numpy as np
 os.environ.setdefault('QT_API', 'pyqt6')
 
 from PyQt6.QtCore import QIODevice, QTimer, Qt  # noqa: E402
+from PyQt6.QtGui import QBrush, QColor  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
@@ -103,7 +109,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.14'
+APP_VERSION = '1.15'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -223,6 +229,7 @@ class MainWindow(QMainWindow):
 
         # Data state — stats
         self._freeze_stats = False
+        self._stats_row_height = 22
 
         self._setup_colormaps()
         self._build_ui()
@@ -569,7 +576,37 @@ class MainWindow(QMainWindow):
         self.pb_record.toggled.connect(self._toggle_record_frames)
         ctrl.addWidget(self.pb_record)
 
+        ctrl.addWidget(QLabel('Std:'))
+        self.sp_std_lower = QDoubleSpinBox()
+        self.sp_std_lower.setRange(0.0, 999.0)
+        self.sp_std_lower.setDecimals(2)
+        self.sp_std_lower.setSingleStep(0.05)
+        self.sp_std_lower.setValue(0.50)
+        self.sp_std_lower.setMaximumWidth(70)
+        ctrl.addWidget(self.sp_std_lower)
+
+        ctrl.addWidget(QLabel('–'))
+
+        self.sp_std_upper = QDoubleSpinBox()
+        self.sp_std_upper.setRange(0.0, 999.0)
+        self.sp_std_upper.setDecimals(2)
+        self.sp_std_upper.setSingleStep(0.05)
+        self.sp_std_upper.setValue(1.00)
+        self.sp_std_upper.setMaximumWidth(70)
+        ctrl.addWidget(self.sp_std_upper)
+
         ctrl.addStretch(1)
+
+        pb_rows_shrink = QPushButton('−')
+        pb_rows_shrink.setMaximumWidth(28)
+        pb_rows_shrink.clicked.connect(self._stats_rows_shrink)
+        ctrl.addWidget(pb_rows_shrink)
+
+        pb_rows_grow = QPushButton('+')
+        pb_rows_grow.setMaximumWidth(28)
+        pb_rows_grow.clicked.connect(self._stats_rows_grow)
+        ctrl.addWidget(pb_rows_grow)
+
         ctrl.addWidget(QLabel('All values in mV'))
         layout.addLayout(ctrl)
 
@@ -1091,7 +1128,17 @@ class MainWindow(QMainWindow):
                 proto_ch = b * self._n_cells + c
                 self.tbl_stats.item(row, 3).setText(_fmt(raw[proto_ch]))
                 self.tbl_stats.item(row, 4).setText(_fmt(means[proto_ch]))
-                self.tbl_stats.item(row, 5).setText('{0:.2f}'.format(stds[proto_ch] / 1000.0))
+                std_mv = stds[proto_ch] / 1000.0
+                item5 = self.tbl_stats.item(row, 5)
+                item5.setText('{0:.2f}'.format(std_mv))
+                lo = self.sp_std_lower.value()
+                hi = self.sp_std_upper.value()
+                if std_mv < lo:
+                    item5.setBackground(QBrush(QColor(143, 240, 164)))
+                elif std_mv > hi:
+                    item5.setBackground(QBrush(QColor(246, 97, 81)))
+                else:
+                    item5.setBackground(QBrush(QColor(249, 240, 107)))
 
     def _save_stats_csv(self):
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
@@ -1233,6 +1280,14 @@ class MainWindow(QMainWindow):
     def _on_freeze_stats_toggled(self, checked):
         self._freeze_stats = checked
         self.pb_freeze_stats.setStyleSheet(self.MY_YELLOW if checked else '')
+
+    def _stats_rows_shrink(self):
+        self._stats_row_height = max(12, self._stats_row_height - 4)
+        self.tbl_stats.verticalHeader().setDefaultSectionSize(self._stats_row_height)
+
+    def _stats_rows_grow(self):
+        self._stats_row_height = min(48, self._stats_row_height + 4)
+        self.tbl_stats.verticalHeader().setDefaultSectionSize(self._stats_row_height)
 
     # ------------------------------------------------------------------
     # ML bridge
