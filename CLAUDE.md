@@ -33,30 +33,23 @@ might touch one.
   beyond the fixed profile loop. (Invariant, §11.)
 - Keep a single read-line / write-line **serial transport seam** (USB-serial).
 - `mcu/pimd_mcu.py` is **MicroPython, pure-Python only** — no CPython-only libs.
-
-## PC tools
-
-- PC tools are **PyQt6**. See **README §15** for the file inventory and which file
-  owns which mode. `pimd302.py` is the superseded v3.x GUI — don't extend it.
+- Ensure that Invariants, **README.md §11**, are ALWAYS respected.  Flag if there is a conflict.
 
 ## Environment & deploy
 
 - **Always work inside a venv.**
 - Exact run / deploy / firmware-flash / bench-test commands are in **README §16** —
-  use those, don't improvise. (Firmware deploys by copy-then-power-cycle, *not*
-  `mpremote reset`.)
+  use those, don't improvise. 
 
 ## Versioning & changelog (important)
-
-- **On every file edit: bump that file's version number and add an entry to
+- Stage everything as commits I can review before they land; **don't commit yourself**.
+- **On every file edit:** bump that file's version number and add an entry to
   the file's header changelog.** Required, not optional.
 - **Record every change in `CHANGELOG.md`** — firmware, PC tools, hardware, or new
   findings. One entry per change, added above the marker line, in the format at the
   foot of `CHANGELOG.md`: `### <file> — v<N> — <short title>`, then a short
   paragraph covering *what changed · why · (date)*.
 - **Do not edit `README.md` directly.** It is a curated snapshot, regenerated from
-  `CHANGELOG.md` by a periodic human-run consolidation pass. Treat it as stable
+  `CHANGELOG.md` by a periodic human-run consolidation pass, see README.md section 18. Treat it as stable
   reference, not a scratchpad. (Only exception: a deliberate, human-directed
   restructuring — and then bump the Doc-rev line at the top of the README.)
-- **Test-log observations go in `CHANGELOG.md` too**, not into README §17 directly —
-  they are folded into §17 at consolidation.

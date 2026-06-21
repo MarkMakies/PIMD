@@ -7,9 +7,7 @@
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
-> *(measured)*; everything else is a nominal/design figure. **How an agent should behave
-> when editing this project lives in `CLAUDE.md`**, not here — this README is the project
-> reference. **§17 is the living test log.**
+> *(measured)*; everything else is a nominal/design figure. 
 
 ---
 
@@ -349,6 +347,8 @@ flash raises the noise floor ~10×.
 
 ## 16. Build, run & deploy
 
+**Don't commit yourself**
+
 No build step for either the PC tools or the firmware. (Agent conventions — version
 bumps, changelog discipline, the "don't edit this README" rule — live in `CLAUDE.md`.)
 
@@ -416,5 +416,33 @@ thermal drift; this is the trace future comparisons should be checked against.
 
 WIP - fixing bugs atm to ensure data consistency
 
+## 18. Change Log Consolidation Pass.
 
+You are performing a "human-run consolidation pass".
+For THIS task only, you are authorised to edit README.md (the read-only rule is
+suspended for this pass).
 
+CHANGELOG.md is the source of truth for everything that has changed since the last
+consolidation.  For this consolidation only focus on the lines in CHANGELOG.md above 
+the marker: '<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+IMPORTANT — the CHANGELOG is NOT in chronological order. Do not replay entries.
+First determine the NET CURRENT STATE per file, then
+synthesise. The README is a consolidated snapshot, not a concatenation — keep the
+existing "one-line summary, detail lives in source headers" philosophy.
+
+Before editing, produce these for my review:
+  1. Current version of each file (firmware, pimd_gui, pimd_classviz,
+     pimd_delaycal) as you read them from the CHANGELOG.
+  2. An asset mapping table: each existing README asset path → its Reference/
+     target. Flag any old reference with no clear match, and any file in Reference/
+     not yet cited anywhere — do NOT guess a match.
+  3. Which README sections you'll change, and the net change for each (expect at
+     least: header/Doc-rev line).
+  4. Anything you plan to drop or significantly reword.
+
+Preserve policy text and structure;  bump the Doc-rev line.  Fold new bench observations into §17. Do NOT delete content that is still accurate.
+
+After I approve and you've updated README.md:
+  - Reset CHANGELOG.md by moving the marker to the top of the file.
+  - Adding  a line under the moved marker: '## Archive — consolidated YYYY-MM-DD'
