@@ -1,4 +1,18 @@
 
+### src/pimd_delaycal.py — v1.17 — thermal monitoring tables rows in ascending pulse_us order
+
+"Latest mean" and "Std dev" thermal monitoring tables now display rows sorted
+ascending by pulse_us (shortest delay first); the calibration table row order is
+unchanged (run order).  `_rebuild_thermal_tables()` computes `_thermal_display_order`
+(display_row → protocol_band) and `_thermal_proto_to_display` (inverse) and uses
+the sorted order for row labels.  `_update_thermal_tables()` iterates by display
+row `d` (mapping back to protocol band `b` for channel data), so value and colour
+updates remain correct.  `_auto_color_cell()` applies colour to the calibration
+table at row `b` and to the thermal tables at row `d = _thermal_proto_to_display[b]`,
+preserving Auto Nudge cell highlighting. (2026-06-21)
+
+---
+
 ### src/pimd_classviz.py — v1.14 — stats table and profile editor rows in ascending delay order
 
 Stats table and Profile Builder table rows are now sorted by first delay value

@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Delay Calibration v1.16
+# PIMD Delay Calibration v1.17
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -18,6 +18,15 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.17 Thermal monitoring tables (Latest mean / Std dev) rows now sorted
+#       ascending by pulse_us so shortest-delay rows appear first.
+#       _rebuild_thermal_tables() stores _thermal_display_order (display_row →
+#       protocol_band) and _thermal_proto_to_display (inverse map).
+#       _update_thermal_tables() uses display row d for item access and protocol
+#       band b for channel data.  _auto_color_cell() uses b for the calibration
+#       table and d (via _thermal_proto_to_display) for the thermal tables, so
+#       Auto Nudge cell highlighting remains correct.  Calibration table row
+#       order is unchanged.
 # v1.16 Row labels reformatted: frequency in Hz with thousands separator, pulse
 #       in µs to 1 d.p.  e.g. '31,250Hz / 6.2us' instead of '31.25kHz/6us'.
 #       _row_label() now multiplies freq_khz × 1000 and formats with {:,}.
@@ -132,7 +141,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.16'
+APP_VERSION = '1.17'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -197,6 +206,8 @@ class MainWindow(QMainWindow):
         self._thermal_n_cells    = 0
         self._thermal_n_channels = 0
         self._thermal_last_redraw = 0.0         # rate-limit redraws to ~10 Hz
+        self._thermal_display_order: list = []  # display_row → protocol_band (asc pulse_us)
+        self._thermal_proto_to_display: dict = {}  # protocol_band → display_row
 
         # Auto Nudge state
         # Sequential model: initial soak → identify bad channels in order →
@@ -592,8 +603,12 @@ class MainWindow(QMainWindow):
             return
         b = ch // self._thermal_n_cells
         c = ch  % self._thermal_n_cells
-        for tbl in (self.table, self.tbl_thermal_mean, self.tbl_thermal_std):
-            item = tbl.item(b, c)
+        cal_item = self.table.item(b, c)
+        if cal_item:
+            cal_item.setBackground(color)
+        d = self._thermal_proto_to_display.get(b, b)
+        for tbl in (self.tbl_thermal_mean, self.tbl_thermal_std):
+            item = tbl.item(d, c)
             if item:
                 item.setBackground(color)
 
@@ -1102,9 +1117,15 @@ class MainWindow(QMainWindow):
                 f'Running — {int(self._thermal_remaining)} s remaining')
 
     def _rebuild_thermal_tables(self, profile):
+        bands = profile['bands']
+        # Sort thermal table rows ascending by pulse_us; calibration table stays in
+        # protocol (run) order.  _thermal_proto_to_display maps protocol_band → display_row
+        # so _auto_color_cell and _update_thermal_tables can stay in sync.
+        self._thermal_display_order = sorted(range(len(bands)), key=lambda i: bands[i]['pulse_us'])
+        self._thermal_proto_to_display = {b: d for d, b in enumerate(self._thermal_display_order)}
         row_labels = [
-            self._row_label(b['freq_hz'] / 1000, b['pulse_us'])
-            for b in profile['bands']
+            self._row_label(bands[b]['freq_hz'] / 1000, bands[b]['pulse_us'])
+            for b in self._thermal_display_order
         ]
         col_labels = [f'{v:.1f} V' for v in self._targets_v]
         n_rows, n_cols = len(row_labels), len(col_labels)
@@ -1158,15 +1179,16 @@ class MainWindow(QMainWindow):
         recent = list(self._thermal_buf)[-n:]
         threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
 
-        for b in range(self._thermal_n_bands):
+        for d in range(self._thermal_n_bands):
+            b  = self._thermal_display_order[d] if self._thermal_display_order else d
             for c in range(self._thermal_n_cells):
                 ch = b * self._thermal_n_cells + c
 
-                item_m = self.tbl_thermal_mean.item(b, c)
+                item_m = self.tbl_thermal_mean.item(d, c)
                 if item_m:
                     item_m.setText(str(int(latest[ch] / 1000)))
 
-                item_s = self.tbl_thermal_std.item(b, c)
+                item_s = self.tbl_thermal_std.item(d, c)
                 if item_s:
                     if len(recent) >= 2:
                         vals   = [frame[ch] for frame in recent]
