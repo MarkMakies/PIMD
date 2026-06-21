@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Delay Calibration v1.08
+# PIMD Delay Calibration v1.16
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -18,6 +18,27 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.16 Row labels reformatted: frequency in Hz with thousands separator, pulse
+#       in µs to 1 d.p.  e.g. '31,250Hz / 6.2us' instead of '31.25kHz/6us'.
+#       _row_label() now multiplies freq_khz × 1000 and formats with {:,}.
+# v1.15 Coarse+fine two-phase sweep per freq/pulse pair.  A fast coarse hunt
+#       (sp_coarse_step, default 1 µs) steps up from start delay until the ADC
+#       reading drops below sp_signal_v (default 4.9 V), indicating real signal.
+#       The sweep then backs up to the last clean coarse position and switches to
+#       the existing fine step (sp_step) for accurate threshold crossing detection.
+#       For long-pulse pairs (e.g. 1.6 kHz / 100 µs) this eliminates dozens of
+#       wasted fine steps before any signal appears.  'Step size:' label renamed
+#       'Fine step:'.  Two new settings keys: 'coarse_step', 'signal_v'.
+# v1.14 _rebuild_thermal_tables now sets each thermal table's minimumHeight
+#       dynamically (header + n_rows × 30 px) so all rows are always visible
+#       without a scrollbar regardless of how many freq/pulse bands are configured.
+#       The static 120 px floor remains but is overridden upward for > 3 bands.
+# v1.13 Add 'Latest delay (us):' bold label above calibration table to match the
+#       mean/std-dev labels below.  Splitter stretch factors changed to (1, 0) so
+#       the top pane absorbs all window-resize slack and the bottom monitoring
+#       section stays at its natural size — the top table's empty rows compress
+#       instead of the bottom tables.  Thermal table minimum height raised 80→120
+#       px so the bottom tables never need a scrollbar at typical band counts.
 # v1.12 QSplitter between calibration table and monitoring section so the bottom
 #       tables maintain size rather than compressing; splitter state + window
 #       geometry (size + position) persisted in settings.  _auto_color_cell now
@@ -111,7 +132,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.12'
+APP_VERSION = '1.16'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -162,6 +183,9 @@ class MainWindow(QMainWindow):
         self._step_count  = 0       # steps taken this pair (avoids float accumulation)
         self._prev_delay  = None    # delay of last R record (µs)
         self._prev_uV     = None    # mean_uV of last R record
+        self._coarse_phase = False  # True during coarse hunt; False during fine sweep
+        self._coarse_step  = 1.0   # µs — snapshot of sp_coarse_step at run time
+        self._signal_uV    = 4_900_000  # µV — snapshot of sp_signal_v at run time
 
         # Thermal / profile state
         self._thermal_state      = 'idle'       # 'idle' | 'running'
@@ -285,7 +309,30 @@ class MainWindow(QMainWindow):
         self.sp_step.setValue(0.10)
         self.sp_step.setSuffix(' us')
         self.sp_step.setDecimals(2)
-        form.addRow('Step size:', self.sp_step)
+        form.addRow('Fine step:', self.sp_step)
+
+        self.sp_coarse_step = QDoubleSpinBox()
+        self.sp_coarse_step.setRange(0.1, 50.0)
+        self.sp_coarse_step.setSingleStep(0.1)
+        self.sp_coarse_step.setValue(1.0)
+        self.sp_coarse_step.setSuffix(' us')
+        self.sp_coarse_step.setDecimals(1)
+        self.sp_coarse_step.setToolTip(
+            'Coarse hunt step per pair: sweeps from start delay in large steps\n'
+            'until the signal drops below "Signal detect V", then backs up to\n'
+            'the last clean coarse position and switches to the fine step.')
+        form.addRow('Coarse step:', self.sp_coarse_step)
+
+        self.sp_signal_v = QDoubleSpinBox()
+        self.sp_signal_v.setRange(0.1, 5.0)
+        self.sp_signal_v.setSingleStep(0.1)
+        self.sp_signal_v.setValue(4.9)
+        self.sp_signal_v.setSuffix(' V')
+        self.sp_signal_v.setDecimals(1)
+        self.sp_signal_v.setToolTip(
+            'Voltage below which a real signal is considered present.\n'
+            'Coarse hunt advances until a reading falls below this value.')
+        form.addRow('Signal detect:', self.sp_signal_v)
 
         self.sp_max = QDoubleSpinBox()
         self.sp_max.setRange(1.0, 200.0)
@@ -340,6 +387,10 @@ class MainWindow(QMainWindow):
 
         self.progress_label = QLabel('Ready — configure parameters and press Run.')
         cal_layout.addWidget(self.progress_label)
+
+        lbl_cal = QLabel('Latest delay (us):')
+        lbl_cal.setStyleSheet('font-weight: bold;')
+        cal_layout.addWidget(lbl_cal)
 
         self.table = QTableWidget(0, 0)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -401,7 +452,7 @@ class MainWindow(QMainWindow):
         self.tbl_thermal_mean.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_thermal_mean.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tbl_thermal_mean.setMinimumHeight(80)
+        self.tbl_thermal_mean.setMinimumHeight(120)
         therm_layout.addWidget(self.tbl_thermal_mean, stretch=1)
 
         lbl_std = QLabel('Std dev (mV):')
@@ -412,7 +463,7 @@ class MainWindow(QMainWindow):
         self.tbl_thermal_std.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_thermal_std.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tbl_thermal_std.setMinimumHeight(80)
+        self.tbl_thermal_std.setMinimumHeight(120)
         therm_layout.addWidget(self.tbl_thermal_std, stretch=1)
 
         # ── Auto Nudge sub-section ────────────────────────────────────
@@ -505,8 +556,8 @@ class MainWindow(QMainWindow):
         self.v_splitter = QSplitter(Qt.Orientation.Vertical)
         self.v_splitter.addWidget(cal_container)
         self.v_splitter.addWidget(therm_grp)
-        self.v_splitter.setStretchFactor(0, 2)
-        self.v_splitter.setStretchFactor(1, 1)
+        self.v_splitter.setStretchFactor(0, 1)
+        self.v_splitter.setStretchFactor(1, 0)
         right.addWidget(self.v_splitter, stretch=1)
 
         content.addLayout(right, stretch=1)
@@ -648,9 +699,8 @@ class MainWindow(QMainWindow):
         return fp_pairs, thresholds_uV, targets_v
 
     def _row_label(self, freq_khz, pulse_us):
-        freq_str  = f'{freq_khz:.0f}' if freq_khz == int(freq_khz) else f'{freq_khz:.1f}'
-        pulse_str = f'{pulse_us:.0f}' if pulse_us  == int(pulse_us)  else f'{pulse_us:.1f}'
-        return f'{freq_str}kHz/{pulse_str}us'
+        freq_hz = round(freq_khz * 1000)
+        return f'{freq_hz:,}Hz / {pulse_us:.1f}us'
 
     def _rebuild_table(self, fp_pairs, targets_v):
         self.table.clear()
@@ -686,13 +736,16 @@ class MainWindow(QMainWindow):
         self._targets_v   = targets_v
         self._pair_idx    = 0
         self._thresh_idx  = 0
-        self._start_delay = self.sp_start.value()
-        self._step_size   = self.sp_step.value()
-        self._step_count  = 0
-        self._delay       = self._start_delay
-        self._prev_delay  = None
-        self._prev_uV     = None
-        self._state       = 'sweeping'
+        self._start_delay  = self.sp_start.value()
+        self._step_size    = self.sp_step.value()
+        self._coarse_step  = self.sp_coarse_step.value()
+        self._signal_uV    = int(round(self.sp_signal_v.value() * 1_000_000))
+        self._step_count   = 0
+        self._delay        = self._start_delay
+        self._prev_delay   = None
+        self._prev_uV      = None
+        self._coarse_phase = (self._coarse_step > self._step_size)
+        self._state        = 'sweeping'
 
         self._rebuild_table(fp_pairs, targets_v)
         self._mark_row_pending(0)
@@ -721,15 +774,20 @@ class MainWindow(QMainWindow):
             self._advance_pair()
             return
 
-        self._log(f'→ {self._row_label(freq, pulse)}  delay {self._delay:.3f} µs')
+        phase_tag = 'COARSE' if self._coarse_phase else '→'
+        self._log(f'{phase_tag} {self._row_label(freq, pulse)}  delay {self._delay:.3f} µs')
         self.send_command(f'*{int(round(freq * 1000))},{int(round(pulse * 1000))},{int(round(self._delay * 1000))},256')
         self.send_command(f'A{n}')
 
-        total = len(self._fp_pairs) * len(self._thresholds)
-        done  = self._pair_idx * len(self._thresholds) + self._thresh_idx
-        self.progress_label.setText(
-            f'{self._row_label(freq, pulse)} | Delay {self._delay:.2f} us | '
-            f'{done}/{total} thresholds found')
+        if self._coarse_phase:
+            self.progress_label.setText(
+                f'{self._row_label(freq, pulse)} | Coarse scan — delay {self._delay:.2f} µs')
+        else:
+            total = len(self._fp_pairs) * len(self._thresholds)
+            done  = self._pair_idx * len(self._thresholds) + self._thresh_idx
+            self.progress_label.setText(
+                f'{self._row_label(freq, pulse)} | Delay {self._delay:.2f} us | '
+                f'{done}/{total} thresholds found')
 
     def _on_r_record(self, line):
         if self._state != 'sweeping':
@@ -747,8 +805,33 @@ class MainWindow(QMainWindow):
             f'{self._row_label(freq, pulse)} | Delay {self._delay:.2f} us | '
             f'Reading {voltage_v:.4f} V  (σ = {std_uV / 1000:.1f} mV)')
 
+        current_delay = self._delay
+
+        # ── Coarse hunt ───────────────────────────────────────────────
+        if self._coarse_phase:
+            if mean_uV >= self._signal_uV:
+                # No signal yet — advance by coarse step
+                self._prev_delay = current_delay
+                self._prev_uV    = mean_uV
+                self._delay      = round(current_delay + self._coarse_step, 6)
+            else:
+                # Signal detected — back up to last clean coarse position
+                # (or start_delay when signal appeared on the very first step)
+                backup = (self._prev_delay
+                          if self._prev_delay is not None
+                          else self._start_delay)
+                self._coarse_phase = False
+                self._delay        = backup
+                self._step_count   = round((backup - self._start_delay) / self._step_size)
+                self._prev_delay   = None
+                self._prev_uV      = None
+                self._log(f'  Signal at {current_delay:.3f} µs — '
+                          f'backing up to {backup:.3f} µs for fine sweep')
+            self._send_next_step()
+            return
+
+        # ── Fine sweep (existing logic) ───────────────────────────────
         current_pair_idx = self._pair_idx
-        current_delay    = self._delay
 
         self._check_thresholds(mean_uV)
 
@@ -802,12 +885,13 @@ class MainWindow(QMainWindow):
             self._fill_cell(self._pair_idx, c, 'N/R', color=_COL_NR)
 
     def _advance_pair(self):
-        self._pair_idx   += 1
-        self._thresh_idx  = 0
-        self._step_count  = 0
-        self._delay       = self._start_delay
-        self._prev_delay  = None
-        self._prev_uV     = None
+        self._pair_idx    += 1
+        self._thresh_idx   = 0
+        self._step_count   = 0
+        self._delay        = self._start_delay
+        self._prev_delay   = None
+        self._prev_uV      = None
+        self._coarse_phase = (self._coarse_step > self._step_size)
 
         if self._pair_idx >= len(self._fp_pairs):
             self._finish()
@@ -1025,11 +1109,16 @@ class MainWindow(QMainWindow):
         col_labels = [f'{v:.1f} V' for v in self._targets_v]
         n_rows, n_cols = len(row_labels), len(col_labels)
 
+        # Minimum height so all rows are always fully visible (no scrollbar).
+        # 28 px header + 30 px per row + 4 px border, floor at 120 px.
+        min_h = max(28 + n_rows * 30 + 4, 120)
+
         for tbl in (self.tbl_thermal_mean, self.tbl_thermal_std):
             tbl.setRowCount(n_rows)
             tbl.setColumnCount(n_cols)
             tbl.setVerticalHeaderLabels(row_labels)
             tbl.setHorizontalHeaderLabels(col_labels)
+            tbl.setMinimumHeight(min_h)
             for r in range(n_rows):
                 for c in range(n_cols):
                     item = QTableWidgetItem('—')
@@ -1529,6 +1618,8 @@ class MainWindow(QMainWindow):
             self.le_port.setText(             s.get('port',              self.le_port.text()))
             self.sp_start.setValue(           s.get('start_delay',       self.sp_start.value()))
             self.sp_step.setValue(            s.get('step_size',         self.sp_step.value()))
+            self.sp_coarse_step.setValue(     s.get('coarse_step',       self.sp_coarse_step.value()))
+            self.sp_signal_v.setValue(        s.get('signal_v',          self.sp_signal_v.value()))
             self.sp_max.setValue(             s.get('max_delay',         self.sp_max.value()))
             self.sp_avg.setValue(             s.get('averages',          self.sp_avg.value()))
             self.le_fp_pairs.setText(         s.get('fp_pairs',          self.le_fp_pairs.text()))
@@ -1560,6 +1651,8 @@ class MainWindow(QMainWindow):
             'port':              self.le_port.text(),
             'start_delay':       self.sp_start.value(),
             'step_size':         self.sp_step.value(),
+            'coarse_step':       self.sp_coarse_step.value(),
+            'signal_v':          self.sp_signal_v.value(),
             'max_delay':         self.sp_max.value(),
             'averages':          self.sp_avg.value(),
             'fp_pairs':          self.le_fp_pairs.text(),

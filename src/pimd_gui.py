@@ -1,8 +1,15 @@
 ###############################################################################
-# PIMD GUI v4.12
+# PIMD GUI v4.13
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop
 #
+# v4.13 Settings persistence: port, freq, pulse, delay, downsample factor,
+#       avg_n, Boxcar/Raw-Avg toggle state, V/div and H/div button-group
+#       selection, and window geometry (size + position) are saved to
+#       data/gui_settings.json on close and restored at startup.
+#       _load_settings() is called at the end of my_init() so it overrides
+#       apply_soc_defaults(); _save_settings() is the first call in
+#       closeEvent() so geometry is captured before the window is hidden.
 # v4.12 (a) A<n> serial backlog fix: closeEvent and start_stop stop path now
 #       call serial.clear(Direction.Output) before sending 'E', discarding any
 #       queued A<n> commands accumulated in the write buffer. waitForBytesWritten
@@ -89,6 +96,8 @@
 # pyright: reportOptionalMemberAccess=false
 # pyright: reportAttributeAccessIssue=false
 
+import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -101,7 +110,9 @@ from PyQt6.QtCharts import QChart, QLineSeries, QValueAxis
 
 from pimd111_ui import Ui_MainWindow  # This is your auto-generated UI file
 
-DEFAULT_PORT = '/dev/ttyACM0'
+DEFAULT_PORT  = '/dev/ttyACM0'
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'data', 'gui_settings.json')
 
 SLOPE_COUNT = 100               # Rolling average slope count (derivative)
 
@@ -129,7 +140,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle('PIMD GUI v4.12 by Mark Makies')
+        self.setWindowTitle('PIMD GUI v4.13 by Mark Makies')
 
         # Editable port field (mirrors pimd_classviz.py) — added below the existing
         # Connect/Start/filename rows in the same label+control grid layout.
@@ -518,6 +529,7 @@ class MainWindow(QMainWindow):
         self.pb_boxcar_mode.setChecked(True)
         self.pb_show_raw_mean.setChecked(True)
         self._check_avg_n_warning()
+        self._load_settings()
 
     def connect_port(self):
         # Open or close the serial port based on the current state.
@@ -922,7 +934,103 @@ class MainWindow(QMainWindow):
         # Update the last command sent
         self.last_command = text
 
+    # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+    def _load_settings(self):
+        try:
+            with open(SETTINGS_PATH) as f:
+                s = json.load(f)
+            self.le_port.setText(s.get('port', DEFAULT_PORT))
+            # Frequency — snap slider to nearest clean freq, then set exact text
+            freq_hz  = int(s.get('freq_hz', 10000))
+            freq_khz = freq_hz / 1000
+            sl_freq  = min(range(len(CLEAN_FREQS_KHZ)),
+                          key=lambda i: abs(CLEAN_FREQS_KHZ[i] - freq_khz))
+            self.ui.slFreq.setValue(sl_freq)
+            self.ui.lFreq.setText(str(freq_hz))
+            # Pulse width
+            pulse_us = float(s.get('pulse_us', 20.0))
+            sl_pulse = max(self.ui.slPulse.minimum(),
+                           min(self.ui.slPulse.maximum(), round(pulse_us * 125)))
+            self.ui.slPulse.setValue(sl_pulse)
+            self.ui.lPulse.setText('{:.3f}'.format(pulse_us))
+            # Sample delay
+            delay_us  = float(s.get('delay_us', 10.0))
+            sl_sample = max(self.ui.slSample.minimum(),
+                            min(self.ui.slSample.maximum(), round(delay_us * 125)))
+            self.ui.slSample.setValue(sl_sample)
+            self.ui.lSample.setText('{:.3f}'.format(delay_us))
+            # Downsample factor
+            ds = int(s.get('down_sample', 256))
+            self.down_sample = ds
+            self.ui.pbFactor.setText(str(ds))
+            # Avg n
+            avg_n = max(1, min(1000, int(s.get('avg_n', 64))))
+            self.avg_n = avg_n
+            self.le_avg_n.setText(str(avg_n))
+            self._check_avg_n_warning()
+            # Toggle buttons
+            self.pb_boxcar_mode.setChecked(bool(s.get('boxcar_on', True)))
+            self.pb_show_raw_mean.setChecked(bool(s.get('raw_avg_on', True)))
+            # V/div and H/div button groups
+            btn_v = self.ui.VoltageButtonGroup.button(int(s.get('v_div_id', -2)))
+            if btn_v:
+                btn_v.setChecked(True)
+            btn_h = self.ui.TimeButtonGroup.button(int(s.get('h_div_id', -2)))
+            if btn_h:
+                btn_h.setChecked(True)
+            # Window geometry
+            w = int(s.get('window_w', 1200))
+            h = int(s.get('window_h', 900))
+            self.resize(w, h)
+            x, y = s.get('window_x'), s.get('window_y')
+            if x is not None and y is not None:
+                self.move(int(x), int(y))
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            pass  # First run — keep apply_soc_defaults() values
+
+    def _save_settings(self):
+        try:
+            freq_hz = int(float(self.ui.lFreq.text()))
+        except ValueError:
+            freq_hz = int(round(self.frequency * 1000))
+        try:
+            pulse_us = float(self.ui.lPulse.text())
+        except ValueError:
+            pulse_us = self.pulse_width
+        try:
+            delay_us = float(self.ui.lSample.text())
+        except ValueError:
+            delay_us = self.sample_delay
+        s = {
+            'port':        self.le_port.text(),
+            'freq_hz':     freq_hz,
+            'pulse_us':    pulse_us,
+            'delay_us':    delay_us,
+            'down_sample': self.down_sample,
+            'avg_n':       self.avg_n,
+            'boxcar_on':   self.pb_boxcar_mode.isChecked(),
+            'raw_avg_on':  self.pb_show_raw_mean.isChecked(),
+            'v_div_id':    self.ui.VoltageButtonGroup.checkedId(),
+            'h_div_id':    self.ui.TimeButtonGroup.checkedId(),
+            'window_w':    self.width(),
+            'window_h':    self.height(),
+            'window_x':    self.x(),
+            'window_y':    self.y(),
+        }
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(s, f, indent=2)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
     def closeEvent(self, event):
+        self._save_settings()
         self.raw_poll_timer.stop()
         if self.serial.isOpen():
             self.serial.clear(QSerialPort.Direction.Output)
