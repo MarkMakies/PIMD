@@ -146,7 +146,7 @@ from statistics import stdev as _stdev
 os.environ.setdefault('QT_API', 'pyqt6')
 
 from PyQt6.QtWidgets import (  # noqa: E402
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QCheckBox, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QDoubleSpinBox, QSpinBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout,
     QFileDialog, QHeaderView, QPlainTextEdit, QSplitter,
