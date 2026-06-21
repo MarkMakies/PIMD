@@ -1,4 +1,16 @@
 
+### src/pimd_delaycal.py — v1.18 — draggable left/right splitter
+
+Left column (config panel + activity log) was fixed at 420 px and did not grow
+when the window was resized.  Replaced the `QHBoxLayout` content row with a
+horizontal `QSplitter` (`h_splitter`); the left column is now a `QWidget` with
+`setMinimumWidth(300)` and the right pane takes `stretchFactor=1`.  Removed both
+`setFixedWidth(420)` calls from `cfg_box` and `log_box_grp`.  Splitter position
+is saved as `'h_splitter'` in settings and restored on startup alongside the
+existing vertical splitter. (2026-06-21)
+
+---
+
 ### src/pimd_delaycal.py — v1.17 — thermal monitoring tables rows in ascending pulse_us order
 
 "Latest mean" and "Std dev" thermal monitoring tables now display rows sorted

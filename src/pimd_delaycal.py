@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Delay Calibration v1.17
+# PIMD Delay Calibration v1.18
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -18,6 +18,11 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.18 Left/right panes now separated by a draggable QSplitter (h_splitter).
+#       The left column (config + activity log) was previously fixed at 420 px;
+#       it is now a QWidget inside h_splitter with setMinimumWidth(300) so it can
+#       grow when the window is resized or the handle is dragged.  h_splitter
+#       state is persisted alongside v_splitter state in settings.
 # v1.17 Thermal monitoring tables (Latest mean / Std dev) rows now sorted
 #       ascending by pulse_us so shortest-delay rows appear first.
 #       _rebuild_thermal_tables() stores _thermal_display_order (display_row →
@@ -141,7 +146,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.17'
+APP_VERSION = '1.18'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -293,16 +298,17 @@ class MainWindow(QMainWindow):
 
         root.addLayout(top)
 
-        # Content row: config+log left, results right
-        content = QHBoxLayout()
-        content.setSpacing(8)
+        # Content row: config+log left, results right — horizontal splitter
+        self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # ── Left column: config panel + activity log ──────────────────
-        left_col = QVBoxLayout()
+        left_w = QWidget()
+        left_col = QVBoxLayout(left_w)
         left_col.setSpacing(4)
+        left_col.setContentsMargins(0, 0, 4, 0)
 
         cfg_box = QGroupBox('Configuration')
-        cfg_box.setFixedWidth(420)
+        cfg_box.setMinimumWidth(300)
         form = QFormLayout(cfg_box)
         form.setSpacing(6)
 
@@ -372,7 +378,6 @@ class MainWindow(QMainWindow):
 
         # Activity log
         log_box_grp = QGroupBox('Activity Log')
-        log_box_grp.setFixedWidth(420)
         log_layout = QVBoxLayout(log_box_grp)
         log_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -383,12 +388,13 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_box)
 
         left_col.addWidget(log_box_grp, stretch=1)
-        content.addLayout(left_col)
         # ─────────────────────────────────────────────────────────────
 
         # Results area
-        right = QVBoxLayout()
+        right_w = QWidget()
+        right = QVBoxLayout(right_w)
         right.setSpacing(4)
+        right.setContentsMargins(4, 0, 0, 0)
 
         # Calibration table container (upper splitter pane)
         cal_container = QWidget()
@@ -571,8 +577,11 @@ class MainWindow(QMainWindow):
         self.v_splitter.setStretchFactor(1, 0)
         right.addWidget(self.v_splitter, stretch=1)
 
-        content.addLayout(right, stretch=1)
-        root.addLayout(content, stretch=1)
+        self.h_splitter.addWidget(left_w)
+        self.h_splitter.addWidget(right_w)
+        self.h_splitter.setStretchFactor(0, 0)
+        self.h_splitter.setStretchFactor(1, 1)
+        root.addWidget(self.h_splitter, stretch=1)
 
         self.setCentralWidget(central)
         self.statusBar().showMessage('Not connected')
@@ -1665,6 +1674,10 @@ class MainWindow(QMainWindow):
             if splitter_sizes and len(splitter_sizes) == 2:
                 QTimer.singleShot(0, lambda: self.v_splitter.setSizes(
                     [int(v) for v in splitter_sizes]))
+            h_splitter_sizes = s.get('h_splitter')
+            if h_splitter_sizes and len(h_splitter_sizes) == 2:
+                QTimer.singleShot(0, lambda: self.h_splitter.setSizes(
+                    [int(v) for v in h_splitter_sizes]))
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             self.resize(1440, 1200)  # first run — use default size
 
@@ -1691,6 +1704,7 @@ class MainWindow(QMainWindow):
             'window_x':          self.x(),
             'window_y':          self.y(),
             'splitter':          self.v_splitter.sizes(),
+            'h_splitter':        self.h_splitter.sizes(),
         }
         try:
             os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
