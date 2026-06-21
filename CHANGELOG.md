@@ -6,6 +6,21 @@ All functionality is covered by pimd_classviz.py. (2026-06-21)
 
 ---
 
+### src/pimd_delaycal.py — v1.19 — Auto Nudge parallel / sequential toggle
+
+Re-introduces parallel Auto Nudge mode (the v1.07 architecture) alongside the
+existing sequential mode, selectable with a new "Sequential" checkbox in the
+Auto row.  Default (unchecked) = parallel: all bad channels are nudged together
+before each shared soak, completing in 1 + max_iterations soaks regardless of
+how many channels are bad (vs 1 + N×max_attempts for sequential).  New
+`_auto_evaluate_parallel()` evaluates all active channels, tracks best-std/delay
+per channel, nudges all still-bad channels via the existing `_auto_nudge_channel()`
+(which handles direction, cap, and flip), then re-soaks.  The "Max att/cell:"
+label dynamically renames to "Max iterations:" in parallel mode.  Mode is logged
+at run start and persisted in settings as `'auto_sequential'`. (2026-06-21)
+
+---
+
 ### src/pimd_delaycal.py — v1.18 — draggable left/right splitter
 
 Left column (config panel + activity log) was fixed at 420 px and did not grow

@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Delay Calibration v1.18
+# PIMD Delay Calibration v1.19
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -18,6 +18,15 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.19 Auto Nudge parallel / sequential toggle.  New 'Sequential' QCheckBox
+#       in auto_row1; unchecked (default) = parallel mode, checked = sequential
+#       (v1.08 behaviour).  Parallel mode: all bad channels nudged together
+#       each iteration, one shared soak per iteration — up to "Max iterations"
+#       cycles.  New _auto_evaluate_parallel() implements this; existing
+#       _auto_evaluate_initial() and _auto_evaluate_channel() unchanged.
+#       _auto_evaluate() dispatches on _auto_parallel flag.  'Max att/cell:'
+#       label renamed 'Max iterations:' in parallel mode.  Mode + iter counter
+#       logged at start; setting persisted as 'auto_sequential'.
 # v1.18 Left/right panes now separated by a draggable QSplitter (h_splitter).
 #       The left column (config + activity log) was previously fixed at 420 px;
 #       it is now a QWidget inside h_splitter with setMinimumWidth(300) so it can
@@ -146,7 +155,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.18'
+APP_VERSION = '1.19'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -215,8 +224,11 @@ class MainWindow(QMainWindow):
         self._thermal_proto_to_display: dict = {}  # protocol_band → display_row
 
         # Auto Nudge state
-        # Sequential model: initial soak → identify bad channels in order →
-        # for each bad channel: nudge → soak → check (up to max_attempts); advance.
+        # Two modes (toggled by cb_sequential):
+        #   Parallel  (default): all bad channels nudged together each iteration.
+        #   Sequential          : one bad channel at a time, up to max_attempts each.
+        self._auto_parallel = True          # False when Sequential checkbox is ticked
+        self._auto_iter     = 0             # parallel mode iteration counter
         self._auto_state            = 'idle'    # 'idle' | 'soaking'
         self._auto_phase            = 'initial' # 'initial' | 'channel'
         self._auto_targets:  'list[int]' = []   # ordered bad-channel indices (set after initial eval)
@@ -513,14 +525,25 @@ class MainWindow(QMainWindow):
         auto_row1.addWidget(self.sp_auto_soak_s)
 
         auto_row1.addSpacing(8)
-        auto_row1.addWidget(QLabel('Max att/cell:'))
+        self.lbl_max_att = QLabel('Max iterations:')
+        auto_row1.addWidget(self.lbl_max_att)
         self.sp_auto_max_iter = QSpinBox()
         self.sp_auto_max_iter.setRange(1, 20)
         self.sp_auto_max_iter.setValue(5)
         self.sp_auto_max_iter.setFixedWidth(50)
         self.sp_auto_max_iter.setToolTip(
-            'Maximum nudge attempts per channel before flagging it and moving on.')
+            'Parallel: max nudge iterations before flagging remaining bad channels.\n'
+            'Sequential: max nudge attempts per channel before flagging it and moving on.')
         auto_row1.addWidget(self.sp_auto_max_iter)
+
+        auto_row1.addSpacing(8)
+        self.cb_sequential = QCheckBox('Sequential')
+        self.cb_sequential.setToolTip(
+            'Unchecked (default): Parallel — all bad channels nudged together each\n'
+            'iteration; faster for production use.\n'
+            'Checked: Sequential — one bad channel at a time; useful for debugging.')
+        self.cb_sequential.toggled.connect(self._on_auto_mode_toggled)
+        auto_row1.addWidget(self.cb_sequential)
 
         self.lbl_auto_status = QLabel('')
         auto_row1.addWidget(self.lbl_auto_status, stretch=1)
@@ -1228,6 +1251,9 @@ class MainWindow(QMainWindow):
     #   If fail and attempts == max: flag channel (keep best-std delay), advance.
     # All channels stream together in every soak (Mode 2 requires multi-cell).
     # ------------------------------------------------------------------
+    def _on_auto_mode_toggled(self, sequential: bool):
+        self.lbl_max_att.setText('Max att/cell:' if sequential else 'Max iterations:')
+
     def _start_auto(self):
         if not self.serial.isOpen():
             self.statusBar().showMessage('Not connected.')
@@ -1288,12 +1314,16 @@ class MainWindow(QMainWindow):
         self.pb_thermal_stop.setEnabled(False)
         self.lbl_thermal_status.setText('Auto running…')
 
-        self._auto_running = True
-        n_active = sum(1 for s in self._auto_skip_flat if not s)
-        self._log(f'Auto Nudge starting — {n_ch} channels ({n_active} active), '
+        self._auto_running  = True
+        self._auto_parallel = not self.cb_sequential.isChecked()
+        self._auto_iter     = 0
+        n_active  = sum(1 for s in self._auto_skip_flat if not s)
+        mode_str  = 'parallel' if self._auto_parallel else 'sequential'
+        att_label = 'max iterations' if self._auto_parallel else 'max attempts/cell'
+        self._log(f'Auto Nudge starting [{mode_str}] — {n_ch} channels ({n_active} active), '
                   f'threshold {self.sp_auto_threshold_mv.value():.2f} mV, '
-                  f'max {self.sp_auto_max_iter.value()} attempts/cell')
-        self._log('Phase 1: initial soak to identify bad channels…')
+                  f'{att_label} {self.sp_auto_max_iter.value()}')
+        self._log('Initial soak to identify bad channels…')
         self._auto_run_soak()
 
     def _stop_auto(self):
@@ -1341,18 +1371,27 @@ class MainWindow(QMainWindow):
         self._auto_soak_timer.timeout.connect(self._auto_soak_done)
         self._auto_soak_timer.start(soak_ms)
 
-        if self._auto_phase == 'initial':
-            self.lbl_auto_status.setText(
-                f'Initial soak {self.sp_auto_soak_s.value()} s…')
+        soak_s = self.sp_auto_soak_s.value()
+        if self._auto_parallel:
+            max_iter = self.sp_auto_max_iter.value()
+            n_bad    = len(self._auto_targets)
+            if n_bad == 0:
+                self.lbl_auto_status.setText(f'Parallel — initial soak {soak_s} s…')
+            else:
+                self.lbl_auto_status.setText(
+                    f'Parallel — iter {self._auto_iter}/{max_iter}, '
+                    f'{n_bad} ch — soaking {soak_s} s…')
+        elif self._auto_phase == 'initial':
+            self.lbl_auto_status.setText(f'Sequential — initial soak {soak_s} s…')
         else:
-            ch         = self._auto_targets[self._auto_target_idx]
-            n_targets  = len(self._auto_targets)
-            max_att    = self.sp_auto_max_iter.value()
+            ch        = self._auto_targets[self._auto_target_idx]
+            n_targets = len(self._auto_targets)
+            max_att   = self.sp_auto_max_iter.value()
             self.lbl_auto_status.setText(
                 f'{self._ch_label(ch)} — '
                 f'cell {self._auto_target_idx + 1}/{n_targets}, '
                 f'attempt {self._auto_ch_attempts + 1}/{max_att} — '
-                f'soaking {self.sp_auto_soak_s.value()} s…')
+                f'soaking {soak_s} s…')
 
     def _auto_soak_done(self):
         if self._auto_state != 'soaking':
@@ -1367,11 +1406,54 @@ class MainWindow(QMainWindow):
         self._thermal_buf.clear()   # discard any stray frames that arrived during gate
 
     def _auto_evaluate(self):
-        """Dispatch to initial or per-channel evaluator."""
-        if self._auto_phase == 'initial':
+        """Dispatch to parallel evaluator or sequential initial/channel evaluator."""
+        if self._auto_parallel:
+            self._auto_evaluate_parallel()
+        elif self._auto_phase == 'initial':
             self._auto_evaluate_initial()
         else:
             self._auto_evaluate_channel()
+
+    def _auto_evaluate_parallel(self):
+        """Parallel mode: evaluate all active channels, nudge all still-bad ones, loop."""
+        n            = self.sp_thermal_n.value()
+        recent       = list(self._thermal_buf)[-n:]
+        threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
+        max_iter     = self.sp_auto_max_iter.value()
+
+        still_bad = []
+        for ch in range(self._thermal_n_channels):
+            if self._auto_skip_flat[ch]:
+                continue
+            std_uV = (_stdev([frame[ch] for frame in recent])
+                      if len(recent) >= 2 else float('inf'))
+            if std_uV < self._auto_best_std_uV[ch]:
+                self._auto_best_std_uV[ch]     = std_uV
+                self._auto_best_delays_flat[ch] = self._auto_cur_delays_flat[ch]
+            if std_uV > threshold_uV:
+                still_bad.append(ch)
+                self._auto_color_cell(ch, _COL_AUTO_QUEUED)
+            else:
+                self._auto_color_cell(ch, _COL_DONE)
+
+        self._log(f'  Iter {self._auto_iter}: {len(still_bad)} channel(s) above threshold')
+        self._auto_targets = still_bad
+
+        if not still_bad:
+            self._auto_finish(all_pass=True)
+            return
+
+        if self._auto_iter >= max_iter:
+            for ch in still_bad:
+                self._auto_color_cell(ch, _COL_AUTO_FLAGGED)
+            self._auto_finish(all_pass=False)
+            return
+
+        # Nudge all still-bad channels simultaneously then soak again
+        self._auto_iter += 1
+        for ch in still_bad:
+            self._auto_nudge_channel(ch)
+        self._auto_run_soak()
 
     def _auto_evaluate_initial(self):
         """Evaluate all channels; build ordered bad list; start first channel."""
@@ -1662,6 +1744,7 @@ class MainWindow(QMainWindow):
             self.sp_auto_threshold_mv.setValue(s.get('auto_threshold_mv', self.sp_auto_threshold_mv.value()))
             self.sp_auto_nudge_ns.setValue(   s.get('auto_nudge_ns',     self.sp_auto_nudge_ns.value()))
             self.sp_auto_cap_ns.setValue(     s.get('auto_cap_ns',       self.sp_auto_cap_ns.value()))
+            self.cb_sequential.setChecked(   bool(s.get('auto_sequential', False)))
             # Window geometry
             w = int(s.get('window_w', 1440))
             h = int(s.get('window_h', 1200))
@@ -1699,6 +1782,7 @@ class MainWindow(QMainWindow):
             'auto_threshold_mv': self.sp_auto_threshold_mv.value(),
             'auto_nudge_ns':     self.sp_auto_nudge_ns.value(),
             'auto_cap_ns':       self.sp_auto_cap_ns.value(),
+            'auto_sequential':   self.cb_sequential.isChecked(),
             'window_w':          self.width(),
             'window_h':          self.height(),
             'window_x':          self.x(),
