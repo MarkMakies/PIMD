@@ -1,4 +1,125 @@
 
+### src/pimd_classviz.py — v1.14 — stats table and profile editor rows in ascending delay order
+
+Stats table and Profile Builder table rows are now sorted by first delay value
+ascending (lowest delay / highest frequency first).  Added `_band_stats_order`
+and `_stats_band_labels` to `_set_profile_dims()` (ascending, the reverse of
+`_band_display_order`); `_rebuild_stats_table()` and `_update_stats_table()` now
+use these, preserving the correct row↔protocol-channel mapping so per-cell values
+continue to track the right channel.  `_populate_profile_editor()` sorts bands by
+`delays_us[0]` ascending before filling the table.  Heatmap display order is
+unchanged (still descending, highest delay at top). (2026-06-21)
+
+---
+
+### src/pimd_classviz.py — v1.13 — remove single-cell isolation tab section
+
+Removed the Single-cell isolation group box from the Stats tab (now renamed 'Stats'
+from 'Stats && Isolation') and all supporting code: `_rebuild_single_cell_combos()`,
+`_on_sc_band_changed()`, `_update_sc_info()`, `_run_single_cell()`, `_resume_sweep()`,
+`_update_sc_button_states()`, and the Mode-1 `*` packet branch in `process_packet()`.
+`self._mode` and `self._sc_buf` state removed from `__init__()`.  `start_stop()`
+and `_on_send_run_profile()` simplified — no longer need to exit single-cell mode
+before starting/stopping.  `sc_ds` removed from settings persistence. (2026-06-21)
+
+---
+
+### src/pimd_classviz.py — v1.12 — heatmap row sort by delay descending + updated band label format
+
+Added `_band_display_order` (sorted by `delays_us[0]` descending) so that heatmap
+rows are always shown in decreasing delay order regardless of the profile's stream
+order — required for new profiles that interleave high/low pulse-width bands to
+flatten thermal characteristics.  `_display_band_labels` is the display-ordered
+copy used by the heatmap axes, stats table, and mouse tooltip; `_band_labels` and
+`_bands_meta` remain in protocol order so single-cell commands and CSV logging are
+unaffected.  `_redraw()` applies the permutation to raw data, mean, and std before
+passing to `_compute_display_matrix()`; `_update_crossings()` maps display band
+index back to protocol index when accessing `_nominal_baseline_uv`.  Band label
+format changed from `'40.000µs/10.601kHz'` to `'10,601Hz / 40.0µs'` (freq in Hz
+with thousands separator, pulse in µs to 1 d.p.), matching pimd_delaycal.py.
+(2026-06-21)
+
+---
+
+### src/pimd_delaycal.py — v1.16 — row-label format: Hz with thousands separator, pulse to 1 d.p.
+
+_row_label() rewritten: converts freq_khz × 1000 to an integer Hz value, formats
+it with Python's {:,} thousands separator, and formats pulse_us to exactly 1
+decimal place.  Produces labels like '31,250Hz / 6.2us' instead of the previous
+'31.25kHz/6us'.  All three tables (calibration, thermal mean, thermal std-dev)
+and the activity-log / progress-label references update automatically as they all
+call _row_label(). (2026-06-21)
+
+---
+
+### src/pimd_delaycal.py — v1.15 — coarse+fine two-phase sweep per freq/pulse pair
+
+For each freq/pulse pair, a fast coarse hunt (new sp_coarse_step spinbox, default
+1 µs) now steps up from the start delay until the ADC reading drops below a
+configurable signal-detect voltage (new sp_signal_v spinbox, default 4.9 V),
+indicating real signal is present.  The sweep then backs up to the last clean
+coarse position and switches to the existing fine step for accurate threshold
+interpolation.  This avoids tens of wasted serial round-trips for long-pulse pairs
+(e.g. 1.6 kHz / 100 µs) where the first real signal may only appear at 10 µs or
+beyond.  If signal appears at the very first coarse step, the backup target falls
+back to start_delay.  When coarse_step <= fine step, the coarse phase is skipped
+entirely (pure fine scan, backward compatible).  Log lines show 'COARSE' prefix
+during hunt; progress label shows "Coarse scan" instead of threshold count.
+_advance_pair() now resets _coarse_phase for each new pair.  'Step size:' label
+renamed 'Fine step:' for clarity.  Settings keys 'coarse_step' and 'signal_v'
+added to _load_settings() / _save_settings(). (2026-06-21)
+
+---
+
+### src/pimd_gui.py — v4.13 — settings persistence (port, freq, pulse, delay, toggles, scale, geometry)
+
+Added _load_settings() / _save_settings() following the identical pattern used
+by pimd_delaycal.py.  Saves to data/gui_settings.json on close; restores on
+startup at end of my_init() (after apply_soc_defaults()) so saved values
+override SOC defaults.  Fields persisted: port, freq_hz (exact lFreq text),
+pulse_us, delay_us, down_sample factor, avg_n, Boxcar and Raw-Avg toggle states,
+VoltageButtonGroup and TimeButtonGroup checked IDs, and window width/height/x/y.
+Added json and os imports; added SETTINGS_PATH constant. (2026-06-21)
+
+---
+
+### src/pimd_classviz.py — v1.11 — settings persistence (port, heatmap controls, geometry)
+
+Added _load_settings() / _save_settings() following the identical pattern used
+by pimd_delaycal.py.  Saves to data/classviz_settings.json on close; restores
+at end of __init__() after _build_ui().  Fields persisted: port, capture N,
+rolling T, display mode index, baseline mode index, stats std-dev window,
+single-cell downsample, manual range µV, autoscale flag, and window
+width/height/x/y.  Removed the hardcoded window.resize(1100, 900) from
+__main__ — first-run default is now handled by the except branch of
+_load_settings(). (2026-06-21)
+
+---
+
+### src/pimd_delaycal.py — v1.14 — dynamic thermal-table minimum height; all rows always visible
+
+_rebuild_thermal_tables now computes each table's minimumHeight as
+28 px (header) + n_rows × 30 px + 4 px (border), floored at 120 px.  With 6
+freq/pulse bands the minimum becomes 212 px, ensuring all rows are visible
+without a scrollbar regardless of band count.  Previously the static 120 px
+floor was not enough to show > 4-5 rows and the bottom row(s) were cut off.
+(2026-06-21)
+
+---
+
+### src/pimd_delaycal.py — v1.13 — 'Latest delay (us):' label; top-pane-first splitter shrink
+
+Added a bold 'Latest delay (us):' label directly above the calibration table to
+match the 'Latest mean (mV):' and 'Std dev (mV):' labels already present on the
+lower two tables.  Changed splitter stretch factors from (2, 1) to (1, 0) so the
+top (calibration) pane absorbs all window-resize slack first — when the window is
+made smaller the empty space inside the calibration table compresses before the
+monitoring section is touched, so the lower thermal tables never need scrollbars
+at typical band counts.  Thermal table minimum height raised from 80 to 120 px to
+enforce enough room for header + 3–5 rows without a scrollbar. (2026-06-21)
+
+---
+
 ### src/pimd_gui.py — v4.12 — Avg n field; no auto-connect; remove sub-200uV V/div; fix A<n> serial backlog
 
 Root-cause fix for the A<n> serial write-buffer backlog that caused streaming to continue

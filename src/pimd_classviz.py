@@ -1,5 +1,5 @@
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.10
+# PIMD Signature Visualiser (ClassViz) v1.14
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -14,6 +14,31 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.14 Stats table and Profile Builder table rows now sorted ascending by first
+#       delay value (lowest delay first).  _band_stats_order / _stats_band_labels
+#       added to _set_profile_dims(); _rebuild_stats_table() and
+#       _update_stats_table() use these in place of _band_display_order.
+#       _populate_profile_editor() sorts bands by delays_us[0] ascending before
+#       populating the table.  Heatmap display order unchanged (still descending).
+# v1.13 Remove single-cell isolation: QGroupBox, _rebuild_single_cell_combos(),
+#       _on_sc_band_changed(), _update_sc_info(), _run_single_cell(),
+#       _resume_sweep(), _update_sc_button_states() all deleted.  _mode /
+#       _sc_buf state and the Mode-1 '*' packet branch in process_packet()
+#       removed.  start_stop() and _on_send_run_profile() simplified.
+#       Tab renamed 'Stats' (was 'Stats && Isolation').  sc_ds removed from
+#       settings persistence.
+# v1.12 Heatmap row sort: bands displayed in descending delay order regardless of
+#       profile stream order (alternating high/low pulse profiles stay ordered).
+#       Band labels changed to '<freq Hz with ,>Hz / <pulse 1dp>µs' format.
+#       _band_display_order maps display row → protocol band index; used in
+#       _redraw(), stats table, and mouse tooltip. Serial commands and CSV logging
+#       keep protocol (stream) order unchanged.
+# v1.11 Settings persistence: port, capture N, rolling T, display mode, baseline
+#       mode, stats std-dev window, single-cell downsample, manual range, autoscale
+#       flag, and window geometry (size + position) saved to
+#       data/classviz_settings.json on close and restored on startup.
+#       _load_settings() called at end of __init__ after _build_ui(); first-run
+#       default window size 1100×900 is now set there (removed from __main__).
 # v1.10 * command (single-cell Mode 1) updated to match MCU v4.23 protocol:
 #       freq in Hz (integer), pulse and delay in ns (integer).
 #       Title standardised to include author.
@@ -78,7 +103,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.10'
+APP_VERSION = '1.14'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -89,7 +114,9 @@ CAPTURE_FRAMES_DEFAULT = 64
 ROLLING_SECS_DEFAULT   = 3.0
 DEFAULT_PORT = '/dev/ttyACM0'
 
-PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
+PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'data', 'classviz_settings.json')
 
 
 def _default_profile():
@@ -194,13 +221,12 @@ class MainWindow(QMainWindow):
         self._ch_glitch_buf: 'np.ndarray | None' = None  # shape (64, n_channels), circular
         self._ch_glitch_pos  = 0
 
-        # Data state — stats + single-cell
-        self._mode        = 'sweep'     # 'sweep' | 'single_cell'
+        # Data state — stats
         self._freeze_stats = False
-        self._sc_buf: deque = deque(maxlen=1000)   # Mode 1 value_uV readings
 
         self._setup_colormaps()
         self._build_ui()
+        self._load_settings()
 
         self._redraw_timer = QTimer()
         self._redraw_timer.setInterval(REDRAW_MS)
@@ -227,8 +253,16 @@ class MainWindow(QMainWindow):
         # the rest of the file (was the module-level BANDS_META tuple).
         self._bands_meta = [(b['freq_hz'], b['pulse_us'], tuple(b['delays_us']))
                              for b in bands]
-        self._band_labels = ['{0:.3f}µs/{1:.3f}kHz'.format(b['pulse_us'], b['freq_hz'] / 1000)
+        self._band_labels = ['{0:,}Hz / {1:.1f}µs'.format(b['freq_hz'], b['pulse_us'])
                               for b in bands]
+        # Sort display rows by first delay value descending so alternating
+        # pulse-width profiles (high/low interleaved) still render in delay order.
+        self._band_display_order = sorted(
+            range(n_bands), key=lambda i: bands[i]['delays_us'][0], reverse=True)
+        self._display_band_labels = [self._band_labels[i] for i in self._band_display_order]
+        # Ascending delay order — used by the Stats table and Profile Builder table.
+        self._band_stats_order  = list(reversed(self._band_display_order))
+        self._stats_band_labels = [self._band_labels[i] for i in self._band_stats_order]
         self._has_threshold_v = all(
             'threshold_v' in b and len(b['threshold_v']) == n_cells for b in bands)
         if self._has_threshold_v:
@@ -262,7 +296,6 @@ class MainWindow(QMainWindow):
         self._rebuild_heatmap_axes()
         self._rebuild_3d_surface()
         self._rebuild_stats_table()
-        self._rebuild_single_cell_combos()
         self.header_label.setText('Profile {0} — {1} ({2} bands × {3} cells)'.format(
             profile_idx, profile.get('name', '?'), self._n_bands, self._n_cells))
 
@@ -321,7 +354,7 @@ class MainWindow(QMainWindow):
         # Tab widget
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
-        self.tabs.addTab(self._build_stats_tab(),   'Stats && Isolation')
+        self.tabs.addTab(self._build_stats_tab(),   'Stats')
         self.tabs.addTab(self._build_profile_tab(), 'Profile Builder')
         layout.addWidget(self.tabs, stretch=1)
 
@@ -472,7 +505,7 @@ class MainWindow(QMainWindow):
         ax_b.setLabel('Threshold' if self._has_threshold_v else 'Cell')
 
         ax_l = self.plot.getAxis('left')
-        ax_l.setTicks([[(b + 0.5, self._band_labels[b]) for b in range(self._n_bands)]])
+        ax_l.setTicks([[(d + 0.5, self._display_band_labels[d]) for d in range(self._n_bands)]])
         ax_l.setLabel('Band')
 
         self.plot.setXRange(0, self._n_cells, padding=0)
@@ -550,71 +583,16 @@ class MainWindow(QMainWindow):
         self._rebuild_stats_table()
 
         layout.addWidget(self.tbl_stats, stretch=1)
-
-        # ── Single-cell isolation ─────────────────────────────────────
-        grp = QGroupBox('Single-cell isolation  '
-                        '(stop sweep → run one fixed freq/pulse/delay via Mode 1)')
-        grp_layout = QVBoxLayout(grp)
-
-        sc_row1 = QHBoxLayout()
-        sc_row1.addWidget(QLabel('Band:'))
-        self.cb_sc_band = QComboBox()
-        self.cb_sc_band.currentIndexChanged.connect(self._on_sc_band_changed)
-        sc_row1.addWidget(self.cb_sc_band)
-
-        sc_row1.addWidget(QLabel('Cell:'))
-        self.cb_sc_cell = QComboBox()
-        sc_row1.addWidget(self.cb_sc_cell)
-
-        self.lbl_sc_cell_info = QLabel('')
-        sc_row1.addWidget(self.lbl_sc_cell_info, stretch=1)
-
-        sc_row1.addWidget(QLabel('Downsample:'))
-        self.sp_sc_ds = QSpinBox()
-        self.sp_sc_ds.setRange(1, 4096)
-        self.sp_sc_ds.setValue(256)
-        sc_row1.addWidget(self.sp_sc_ds)
-        grp_layout.addLayout(sc_row1)
-
-        sc_row2 = QHBoxLayout()
-        self.pb_run_single = QPushButton('Run Single Cell')
-        self.pb_run_single.setStyleSheet(self.MY_YELLOW)
-        self.pb_run_single.clicked.connect(self._run_single_cell)
-        sc_row2.addWidget(self.pb_run_single)
-
-        self.pb_resume_sweep = QPushButton('Resume Sweep')
-        self.pb_resume_sweep.clicked.connect(self._resume_sweep)
-        self.pb_resume_sweep.setEnabled(False)
-        sc_row2.addWidget(self.pb_resume_sweep)
-        sc_row2.addStretch(1)
-        grp_layout.addLayout(sc_row2)
-
-        # Single-cell readout (Mode 1 `*` records)
-        sc_row3 = QHBoxLayout()
-        self.lbl_sc_value   = QLabel('Value: —')
-        self.lbl_sc_hw_std  = QLabel('HW σ: —')
-        self.lbl_sc_run_mean = QLabel('Run mean: —')
-        self.lbl_sc_run_std  = QLabel('Run σ: —')
-        self.lbl_sc_n        = QLabel('N=0')
-        for lbl in (self.lbl_sc_value, self.lbl_sc_hw_std,
-                    self.lbl_sc_run_mean, self.lbl_sc_run_std, self.lbl_sc_n):
-            sc_row3.addWidget(lbl)
-        sc_row3.addStretch(1)
-        grp_layout.addLayout(sc_row3)
-
-        layout.addWidget(grp)
-
-        # Populate band/cell combos for the current profile
-        self._rebuild_single_cell_combos()
         return w
 
     def _rebuild_stats_table(self):
         self.tbl_stats.setRowCount(self._n_channels)
-        for b in range(self._n_bands):
+        for d in range(self._n_bands):
+            b = self._band_stats_order[d]
             freq_hz, pulse_us, delays = self._bands_meta[b]
             for c in range(self._n_cells):
-                row = b * self._n_cells + c
-                for col, text in enumerate([self._band_labels[b],
+                row = d * self._n_cells + c
+                for col, text in enumerate([self._stats_band_labels[d],
                                             self._cell_labels[c],
                                             '{0:.3f}'.format(delays[c])]):
                     item = QTableWidgetItem(text)
@@ -624,14 +602,6 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem('—')
                     item.setTextAlignment(_R)
                     self.tbl_stats.setItem(row, col, item)
-
-    def _rebuild_single_cell_combos(self):
-        self.cb_sc_band.blockSignals(True)
-        self.cb_sc_band.clear()
-        for label in self._band_labels:
-            self.cb_sc_band.addItem(label)
-        self.cb_sc_band.blockSignals(False)
-        self._on_sc_band_changed(0)
 
     # ------------------------------------------------------------------
     # Tab 2 — Profile Builder
@@ -721,7 +691,7 @@ class MainWindow(QMainWindow):
     def _populate_profile_editor(self, profile):
         self.le_profile_name.setText(profile.get('name', ''))
         self.sp_profile_avg.setValue(profile.get('averages', 32))
-        bands = profile['bands']
+        bands = sorted(profile['bands'], key=lambda b: b['delays_us'][0])
         self.tbl_profile_bands.blockSignals(True)
         self.tbl_profile_bands.setRowCount(len(bands))
         for r, b in enumerate(bands):
@@ -868,11 +838,8 @@ class MainWindow(QMainWindow):
         self.send_command('Q{0}'.format(DYNAMIC_PROFILE_INDEX))
         self.send_command('G')
         self._apply_profile(profile, DYNAMIC_PROFILE_INDEX)
-        if self._mode == 'single_cell':
-            self._mode = 'sweep'
         self.pb_start.setText('Running')
         self.pb_start.setStyleSheet(self.MY_GREEN)
-        self._update_sc_button_states()
         self.statusBar().showMessage('Dynamic profile sent and running: {0}'.format(
             profile['name']))
 
@@ -935,17 +902,9 @@ class MainWindow(QMainWindow):
             self.pb_start.setStyleSheet(self.MY_YELLOW)
             if self._recording:
                 self.pb_record.setChecked(False)   # auto-save recorded frames
-            if self._mode == 'single_cell':
-                self._mode = 'sweep'
-                self._update_sc_button_states()
         else:
             if not self.serial.isOpen():
                 return
-            if self._mode == 'single_cell':
-                # Auto-exit single-cell before resuming sweep
-                self._mode = 'sweep'
-                self._update_sc_button_states()
-                self.send_command('Q{0}'.format(self._active_profile_idx))
             self.send_command('G')
             self.pb_start.setText('Running')
             self.pb_start.setStyleSheet(self.MY_GREEN)
@@ -960,27 +919,6 @@ class MainWindow(QMainWindow):
         line = line.replace(', ', ',')
 
         if not line:
-            return
-
-        # Mode 1 single-cell output: *<time_ms>,<value_uV>,<stddev_uV>,<freq>,<pulse>,<delay>,<ds>
-        if self._mode == 'single_cell' and line[0] == '*':
-            parts = line[1:].split(',')
-            if len(parts) == 7:
-                try:
-                    value_uV  = float(parts[1])
-                    stddev_uV = float(parts[2])
-                    self._sc_buf.append(value_uV)
-                    arr = np.array(self._sc_buf)
-                    self.lbl_sc_value.setText('Value: {0} mV'.format(_fmt(value_uV)))
-                    self.lbl_sc_hw_std.setText('HW σ: {0} mV'.format(_fmt(stddev_uV)))
-                    self.lbl_sc_run_mean.setText(
-                        'Run mean: {0} mV'.format(_fmt(arr.mean())))
-                    self.lbl_sc_run_std.setText(
-                        'Run σ: {0} mV'.format(_fmt(arr.std())))
-                    self.lbl_sc_n.setText('N={0}'.format(len(arr)))
-                except (ValueError, IndexError):
-                    pass
-            self._update_status()
             return
 
         # Mode 2 sweep: W<idx>,<time_ms>,<ch0>,...,<chN-1> — idx must match the
@@ -1146,10 +1084,14 @@ class MainWindow(QMainWindow):
             means = raw.copy()
             stds  = np.zeros(self._n_channels)
 
-        for i in range(self._n_channels):
-            self.tbl_stats.item(i, 3).setText(_fmt(raw[i]))
-            self.tbl_stats.item(i, 4).setText(_fmt(means[i]))
-            self.tbl_stats.item(i, 5).setText('{0:.2f}'.format(stds[i] / 1000.0))
+        for d in range(self._n_bands):
+            b = self._band_stats_order[d]
+            for c in range(self._n_cells):
+                row      = d * self._n_cells + c
+                proto_ch = b * self._n_cells + c
+                self.tbl_stats.item(row, 3).setText(_fmt(raw[proto_ch]))
+                self.tbl_stats.item(row, 4).setText(_fmt(means[proto_ch]))
+                self.tbl_stats.item(row, 5).setText('{0:.2f}'.format(stds[proto_ch] / 1000.0))
 
     def _save_stats_csv(self):
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
@@ -1215,6 +1157,11 @@ class MainWindow(QMainWindow):
         if not self._freeze:
             mean, std = self._get_current_baseline()
             raw_nxn   = self._latest_raw.reshape(self._n_bands, self._n_cells)
+            raw_nxn   = raw_nxn[self._band_display_order]
+            if mean is not None:
+                mean = mean[self._band_display_order]
+                if std is not None:
+                    std = std[self._band_display_order]
             matrix    = self._compute_display_matrix(raw_nxn, mean, std)
             self._update_heatmap(matrix)
             if self._3d_visible:
@@ -1255,7 +1202,7 @@ class MainWindow(QMainWindow):
         for b, cross in enumerate(crossings):
             pol = '+' if delta_nxn[b, 0] > 0 else '−'
             if cross is not None and self._has_threshold_v:
-                tv = self._nominal_baseline_uv[b] / 1_000_000
+                tv = self._nominal_baseline_uv[self._band_display_order[b]] / 1_000_000
                 j  = int(np.floor(cross))
                 frac = cross - j
                 thresh_v = tv[j] * (1 - frac) + tv[min(j + 1, len(tv) - 1)] * frac
@@ -1282,72 +1229,6 @@ class MainWindow(QMainWindow):
                     break
             crossings.append(found)
         return crossings
-
-    # ------------------------------------------------------------------
-    # Single-cell isolation
-    # ------------------------------------------------------------------
-    def _on_sc_band_changed(self, band_idx):
-        freq_hz, pulse_us, delays = self._bands_meta[band_idx]
-        self.cb_sc_cell.clear()
-        for c, delay in enumerate(delays):
-            self.cb_sc_cell.addItem('{0} / {1:.2f}µs'.format(self._cell_labels[c], delay))
-        self._update_sc_info()
-
-    def _update_sc_info(self):
-        b = self.cb_sc_band.currentIndex()
-        c = self.cb_sc_cell.currentIndex()
-        if b < 0 or c < 0:
-            return
-        freq_hz, pulse_us, delays = self._bands_meta[b]
-        self.lbl_sc_cell_info.setText(
-            '→ {0:.3f} kHz  {1:.0f} µs pulse  delay {2:.2f} µs'.format(
-                freq_hz / 1000, pulse_us, delays[c]))
-
-    def _run_single_cell(self):
-        if not self.serial.isOpen():
-            self.statusBar().showMessage('Not connected')
-            return
-        b = self.cb_sc_band.currentIndex()
-        c = self.cb_sc_cell.currentIndex()
-        freq_hz, pulse_us, delays = self._bands_meta[b]
-        delay_us = delays[c]
-        ds       = self.sp_sc_ds.value()
-
-        self.send_command('E')
-        self.send_command('*{0},{1},{2},{3}'.format(
-            freq_hz, int(round(pulse_us * 1000)), int(round(delay_us * 1000)), ds))
-        self.send_command('S')
-
-        self._mode = 'single_cell'
-        self._sc_buf.clear()
-        for lbl in (self.lbl_sc_value, self.lbl_sc_hw_std,
-                    self.lbl_sc_run_mean, self.lbl_sc_run_std):
-            lbl.setText(lbl.text().split(':')[0] + ': —')
-        self.lbl_sc_n.setText('N=0')
-
-        self.pb_run_single.setText('Running: {0} {1}'.format(
-            self._band_labels[b], self._cell_labels[c]))
-        self.pb_run_single.setStyleSheet(self.MY_GREEN)
-        self.pb_start.setText('Stopped')
-        self.pb_start.setStyleSheet(self.MY_YELLOW)
-        self._update_sc_button_states()
-
-    def _resume_sweep(self):
-        self.send_command('E')
-        self._mode = 'sweep'
-        self.send_command('Q{0}'.format(self._active_profile_idx))
-        self.send_command('G')
-        self.pb_start.setText('Running')
-        self.pb_start.setStyleSheet(self.MY_GREEN)
-        self.pb_run_single.setText('Run Single Cell')
-        self.pb_run_single.setStyleSheet(self.MY_YELLOW)
-        self._update_sc_button_states()
-        self.statusBar().showMessage('Sweep running')
-
-    def _update_sc_button_states(self):
-        in_sc = (self._mode == 'single_cell')
-        self.pb_run_single.setEnabled(not in_sc)
-        self.pb_resume_sweep.setEnabled(in_sc)
 
     def _on_freeze_stats_toggled(self, checked):
         self._freeze_stats = checked
@@ -1456,10 +1337,10 @@ class MainWindow(QMainWindow):
             vp = self.plot.vb.mapSceneToView(pos)
             cx, cy = int(vp.x()), int(vp.y())
             if 0 <= cx < self._n_cells and 0 <= cy < self._n_bands:
-                delay_us = self._bands_meta[cy][2][cx]
+                delay_us = self._bands_meta[self._band_display_order[cy]][2][cx]
                 self.statusBar().showMessage(
                     'Band {0} ({1}) | Cell {2} ({3}) | delay = {4:.2f} µs'.format(
-                        cy, self._band_labels[cy], cx, self._cell_labels[cx], delay_us))
+                        cy, self._display_band_labels[cy], cx, self._cell_labels[cx], delay_us))
                 return
         self._update_status()
 
@@ -1469,9 +1350,58 @@ class MainWindow(QMainWindow):
                 self._frame_count, self._last_cmd, self._last_packet[:60]))
 
     # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+    def _load_settings(self):
+        try:
+            with open(SETTINGS_PATH) as f:
+                s = json.load(f)
+            self.le_port.setText(s.get('port', DEFAULT_PORT))
+            self.sp_capture_n.setValue(int(s.get('capture_n', CAPTURE_FRAMES_DEFAULT)))
+            self.sp_rolling_t.setValue(float(s.get('rolling_t', ROLLING_SECS_DEFAULT)))
+            self.cb_display.setCurrentIndex(int(s.get('display_idx', 0)))
+            self.cb_baseline.setCurrentIndex(int(s.get('baseline_idx', 0)))
+            self.sp_stats_window.setValue(int(s.get('stats_window', 50)))
+            autoscale = bool(s.get('autoscale', True))
+            self.cb_autoscale.setChecked(autoscale)
+            if not autoscale:
+                self.sp_range.setValue(float(s.get('range_uv', 200_000.0)))
+            w = int(s.get('window_w', 1100))
+            h = int(s.get('window_h', 900))
+            self.resize(w, h)
+            x, y = s.get('window_x'), s.get('window_y')
+            if x is not None and y is not None:
+                self.move(int(x), int(y))
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            self.resize(1100, 900)  # first run
+
+    def _save_settings(self):
+        s = {
+            'port':         self.le_port.text(),
+            'capture_n':    self.sp_capture_n.value(),
+            'rolling_t':    self.sp_rolling_t.value(),
+            'display_idx':  self.cb_display.currentIndex(),
+            'baseline_idx': self.cb_baseline.currentIndex(),
+            'stats_window': self.sp_stats_window.value(),
+            'range_uv':     self.sp_range.value(),
+            'autoscale':    self.cb_autoscale.isChecked(),
+            'window_w':     self.width(),
+            'window_h':     self.height(),
+            'window_x':     self.x(),
+            'window_y':     self.y(),
+        }
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(s, f, indent=2)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
     # Close
     # ------------------------------------------------------------------
     def closeEvent(self, event):
+        self._save_settings()
         if self.serial.isOpen():
             self.send_command('E')
             self.serial.waitForBytesWritten(100)
@@ -1482,6 +1412,5 @@ class MainWindow(QMainWindow):
 if __name__ == '__main__':
     app = QApplication([])
     window = MainWindow()
-    window.resize(1100, 900)
     window.show()
     sys.exit(app.exec())
