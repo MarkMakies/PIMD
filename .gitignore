@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 
 # Claude Code local permissions (machine-specific)
-.claude/settings.local.json
+.claude
 
 # Private
 MM-NOTES.md
