@@ -1,0 +1,16 @@
+{
+  "port": "/dev/ttyACM0",
+  "freq_hz": 25000,
+  "pulse_us": 100.0,
+  "delay_us": 10.0,
+  "down_sample": 256,
+  "avg_n": 64,
+  "boxcar_on": true,
+  "raw_avg_on": true,
+  "v_div_id": -2,
+  "h_div_id": -2,
+  "window_w": 1107,
+  "window_h": 872,
+  "window_x": 585,
+  "window_y": 195
+}

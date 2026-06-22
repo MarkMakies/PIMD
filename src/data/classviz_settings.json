@@ -1,0 +1,14 @@
+{
+  "port": "/dev/ttyACM0",
+  "capture_n": 32,
+  "rolling_t": 3.0,
+  "display_idx": 0,
+  "baseline_idx": 0,
+  "stats_window": 50,
+  "range_uv": 20000.0,
+  "autoscale": false,
+  "window_w": 1332,
+  "window_h": 923,
+  "window_x": 1568,
+  "window_y": 32
+}
