@@ -39,7 +39,7 @@ and then a decaying eddy-current response. A nearby target perturbs that decay. 
 signal is sampled at precise, calibrated delays.
 
 - **Mode 1** — a single filtered (32-bit) sample at one held delay: the low-noise telemetry path, used for baselines and field tests.
-- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The demonstrated `cal_profile_8b.cal profile spans **8 frequency bands × 9 sample delays = a 72-cell matrix**, at up to ~100 frames/s.
+- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The demonstrated `cal_profile_8b profile spans **8 frequency bands × 9 sample delays = a 72-cell matrix**, at up to ~100 frames/s.
 - Sample delays are **amplitude-calibrated** (anchored to specific voltages on the 0.5–4.8 V region of the decay, where this coil carries the most discrimination information) and snapped to the 8 ns PWM grid, deliberately avoiding the LC-ringing dead zones.
 - **Polarity convention:** ferrous targets read **positive** (stored magnetic energy reinforces the decay); non-ferrous read **negative** (opposing eddy currents weaken it).
 
