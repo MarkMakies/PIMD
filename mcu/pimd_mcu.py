@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
 # Pulse Induction Metal Detector, v4.23, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
@@ -187,14 +189,14 @@
 #       25kHz/10us/7.6us) showed up to ~25-30mV std dev vs Mode 1's <100uV at
 #       identical parameters (verified on scope, identical waveform);
 #       scope-measured pulse-to-sample delay jitter was 60ns in Mode 2 vs <10ns
-#       in Mode 1 (README §8 documents ~15-20ns for the static-PWM baseline).
+#       in Mode 1 (DESIGN §8 documents ~15-20ns for the static-PWM baseline).
 #
 #       ACTUAL finding (isolated by direct A/B, not yet explained at the
 #       RP2040-hardware level): noise is high specifically when the PWM
 #       duty_u16 compare value is held CONSTANT across consecutive periods —
 #       whether by skipping the write (v4.08) or by rewriting the identical
 #       value (original code, and Mode 1's one-time setup). It is LOW
-#       (~310uV, matching the A32/README ~350uV expectation) when the value
+#       (~310uV, matching the A32/DESIGN ~350uV expectation) when the value
 #       actually CHANGES every period. Confirmed with 4 data points: n=1 (any
 #       fix combination) ~24-30mV; n=2 profile with two DIFFERENT delays
 #       (different sample_duty each period) ~310uV; n=2 profile with two

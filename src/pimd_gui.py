@@ -1,4 +1,6 @@
-###############################################################################
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2022-2026 Mark Makies
+# ###############################################################################
 # PIMD GUI v4.13
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop
@@ -465,7 +467,7 @@ class MainWindow(QMainWindow):
 
     def _check_avg_n_warning(self):
         """Orange if A<n> would occupy > 80 % of the 250 ms poll timer at current freq.
-        Effective raw rate ≈ freq/6 (BUSY 1-in-6 catch, README §7).
+        Effective raw rate ≈ freq/6 (BUSY 1-in-6 catch, DESIGN §7).
         A<n> time = 6*n/freq s; warn when > 0.2 s → n > freq/30."""
         if not hasattr(self, 'le_avg_n'):
             return

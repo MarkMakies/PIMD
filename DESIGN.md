@@ -3,7 +3,7 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 · **Firmware:** v4.23 · **PC tools:** gui v4.13 · classviz v1.14 · delaycal v1.19 · **Coil:** v4
 **Last bench update:** 2026-06-20 (80 ns delay sweep; LC ringing zones identified)
-**Doc rev:** 1.4 (2026-06-21) — consolidation pass: fw v4.23; gui v4.13; classviz v1.14; delaycal v1.19; pimd_scope.py removed; §9 protocol updated to integer Hz/ns; §8 SAMPLE_PULSE_CORRECTION 0.904 µs; §15 inventory updated; §17.3 Mode 2 status updated; §17.4 new delay-sweep bench observation; ARCHIVE.md removed from inventory. (Previous: 1.3 (2026-06-19) — split agent-facing guidance to CLAUDE.md; repurposed §16 as Build/Run/Deploy.) Bump this line on every edit.
+**Doc rev:** 1.5 (2026-06-22) — renamed README.md → DESIGN.md; updated all internal self-references and §15 asset paths to current filenames; removed stale entries (pimd302.py, requirements.txt, LTC2508-32.pdf); added 5 new References/ captures. (Previous: 1.4 (2026-06-21) — consolidation pass: fw v4.23; gui v4.13; classviz v1.14; delaycal v1.19; pimd_scope.py removed; §9 protocol updated to integer Hz/ns; §8 SAMPLE_PULSE_CORRECTION 0.904 µs; §15 inventory updated; §17.3 Mode 2 status updated; §17.4 new delay-sweep bench observation; ARCHIVE.md removed from inventory.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -330,17 +330,19 @@ flash raises the noise floor ~10×.
 | `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
 | `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.14**) — real-time heatmap (bands sorted delay-descending), stats table, ML CSV logger, profile builder tab, 64-frame glitch filter, frame recording, settings persistence |
 | `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.19**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); profile export/import; thermal monitoring; auto-nudge (parallel or sequential); activity log; settings persistence |
-| `src/pimd302.py` | Legacy PC GUI v3.02 (superseded; kept for reference) |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` |
-| `src/requirements.txt` | Python deps for PC tools |
-| `References/Schematic%20Baseline.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
-| `References/ScopeBaseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs 
-| `References/GUI-TargetExample.jpg` | App baseline, Mode 1 v4.07, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
-| `References/GUI-SteadyState.jpg` | SoC steady-state reference capture — settled noise floor and thermal drift; Mode 1 at SoC conditions, first half DS 256 / second half DS 1024 |
-| `References/LTC2508-32.pdf` | ADC datasheet — source for the settling/bandwidth math |
-| `References/DiscriminationTests.JPEG` | *Not yet cited in text* |
-| `CHANGELOG.md` | Running change log — the source this README is consolidated from (logging conventions in `CLAUDE.md`); archive entries for previous consolidation passes are preserved below the marker line |
-| `README.md` | **This file** — project reference (specs, design, measured values); a curated snapshot consolidated from `CHANGELOG.md` |
+| `References/schematic-v604.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
+| `References/scope-baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs 
+| `References/GUI-target-example.jpg` | App baseline, Mode 1 v4.07, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
+| `References/GUI-steady-state-256-1024.jpg` | SoC steady-state reference capture — settled noise floor and thermal drift; Mode 1 at SoC conditions, first half DS 256 / second half DS 1024 |
+| `References/GUI-noise-comp.jpg` | GUI noise comparison — DS 256 vs DS 1024 side-by-side, Mode 1 at SoC conditions |
+| `References/early-discrimination-tests.JPEG` | Early discrimination test captures |
+| `References/profile8b-air.jpg` | Profile 8b heatmap — air / no target (72-cell baseline) |
+| `References/profile8b-copper-pipe.jpg` | Profile 8b heatmap — copper pipe target |
+| `References/profile8b-spanner.jpg` | Profile 8b heatmap — spanner target |
+| `References/profile8b-spanner-copper.jpg` | Profile 8b heatmap — spanner + copper pipe combined |
+| `CHANGELOG.md` | Running change log — the source this DESIGN.md is consolidated from (logging conventions in `CLAUDE.md`); archive entries for previous consolidation passes are preserved below the marker line |
+| `DESIGN.md` | **This file** — project reference (specs, design, measured values); a curated snapshot consolidated from `CHANGELOG.md` |
 | `CLAUDE.md` | AI-agent working brief — how to behave when editing this repo (mindset, conventions, don'ts). Not project facts |
 
 ---
@@ -350,7 +352,7 @@ flash raises the noise floor ~10×.
 **Don't commit yourself**
 
 No build step for either the PC tools or the firmware. (Agent conventions — version
-bumps, changelog discipline, the "don't edit this README" rule — live in `CLAUDE.md`.)
+bumps, changelog discipline, the "don't edit this DESIGN.md" rule — live in `CLAUDE.md`.)
 
 ### Run / deploy (PC venv)
 ```bash
@@ -452,7 +454,7 @@ at 20 kHz / 20 µs: **7488–7728 ns** (320 ns clean band).
 ## 18. Change Log Consolidation Pass.
 
 You are performing a "human-run consolidation pass".
-For THIS task only, you are authorised to edit README.md (the read-only rule is
+For THIS task only, you are authorised to edit DESIGN.md (the read-only rule is
 suspended for this pass).
 
 CHANGELOG.md is the source of truth for everything that has changed since the last
@@ -461,21 +463,21 @@ the marker: '<!-- Add new entries above this line. Format: ### <file> — v<N> �
 
 IMPORTANT — the CHANGELOG is NOT in chronological order. Do not replay entries.
 First determine the NET CURRENT STATE per file, then
-synthesise. The README is a consolidated snapshot, not a concatenation — keep the
+synthesise. DESIGN.md is a consolidated snapshot, not a concatenation — keep the
 existing "one-line summary, detail lives in source headers" philosophy.
 
 Before editing, produce these for my review:
   1. Current version of each file (firmware, pimd_gui, pimd_classviz,
      pimd_delaycal) as you read them from the CHANGELOG.
-  2. An asset mapping table: each existing README asset path → its Reference/
+  2. An asset mapping table: each existing DESIGN.md asset path → its Reference/
      target. Flag any old reference with no clear match, and any file in Reference/
      not yet cited anywhere — do NOT guess a match.
-  3. Which README sections you'll change, and the net change for each (expect at
+  3. Which DESIGN.md sections you'll change, and the net change for each (expect at
      least: header/Doc-rev line).
   4. Anything you plan to drop or significantly reword.
 
 Preserve policy text and structure;  bump the Doc-rev line.  Fold new bench observations into §17. Do NOT delete content that is still accurate.
 
-After I approve and you've updated README.md:
+After I approve and you've updated DESIGN.md:
   - Reset CHANGELOG.md by moving the marker to the top of the file.
   - Adding  a line under the moved marker: '## Archive — consolidated YYYY-MM-DD'

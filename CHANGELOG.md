@@ -737,8 +737,8 @@ again.
 
 ### Standard Operating Conditions (SoC) — established 2026-06-18
 
-**TODO: roll this section into README.md §3 ("Measured operating envelope")
-once confirmed stable — README is read-only for agents, left here per
+**TODO: roll this section into DESIGN.md §3 ("Measured operating envelope")
+once confirmed stable — DESIGN.md is read-only for agents, left here per
 existing policy.**
 
 For repeatable bench testing/comparison, the reference test condition is:
@@ -755,7 +755,7 @@ For repeatable bench testing/comparison, the reference test condition is:
 256 decimation, second half (after a DS Factor toggle) at 1024. Shows the
 settled noise floor and the slow thermal drift; this is the trace future
 comparisons should be checked against. (File currently lives in the scratch
-`AI refs/` folder — move into `pics/` if it's to become a permanent README
+`AI refs/` folder — move into `pics/` if it's to become a permanent DESIGN.md
 asset.)
 
 ---
@@ -860,12 +860,12 @@ future cleanup pass.
 — built via the new Profile Builder tab) showed std dev up to 30 mV, vs Mode 1's
 <100 µV at the *identical* parameters (waveforms verified identical on scope).
 Scope-measured pulse-to-sample delay jitter: 60 ns in this Mode 2 case vs <10 ns
-in Mode 1 (README §8 documents ~15–20 ns for the static-PWM baseline).
+in Mode 1 (DESIGN §8 documents ~15–20 ns for the static-PWM baseline).
 
 **First diagnostic (no code):** the existing `A32` raw boxcar-average command
 (same raw SPI0 ADC path as Mode 2, but with a static, never-rewritten PWM
 config) measured ~100 µV–1 mV at the same parameters — ruled out "raw vs
-filtered ADC path" as the dominant cause (README §7 already expected ~350 µV
+filtered ADC path" as the dominant cause (DESIGN §7 already expected ~350 µV
 for M=16 raw averaging).
 
 **v4.08 (hypothesis 1, falsified):** theorised that rewriting `duty_u16()` with
@@ -882,7 +882,7 @@ Also disproved.
 
 **Isolated by elimination — the actual finding:** compared n=1 (~24–30 mV)
 against an n=2 profile with two *different* delays (different `sample_duty`
-each period → ~310 µV, matching the A32/README expectation) against an n=2
+each period → ~310 µV, matching the A32/DESIGN expectation) against an n=2
 profile with two *identical* delays (same `dd`/`sd` every period, just like
 n=1 → back to ~25 mV). The deciding factor is not n=1 vs n>1, write-frequency,
 or poll-throttling — it is specifically whether the **PWM compare value
@@ -995,7 +995,7 @@ meaningful instead of measuring mostly-unrelated averaging depths. Expect
 the raw-path figure to still run somewhat higher than the filtered figure —
 the LTC2508's onboard decimation filter is a proper sinc/FIR design, more
 effective per sample than a plain boxcar average of single-shot raw
-conversions (README §7: raw SDOB single-sample noise ≈ ±1400 µV) — but it
+conversions (DESIGN §7: raw SDOB single-sample noise ≈ ±1400 µV) — but it
 should no longer be off by orders of magnitude.
 
 Values like "30,000 µV" seen before this fix were likely the combination of
@@ -1207,7 +1207,7 @@ from a prior `*` command. Overhead ≤ 5% at 10 kHz; negligible at higher freque
 
 ---
 
-### src/pimd_delaycal.py — v1.02 (new tool, not yet in README §15)
+### src/pimd_delaycal.py — v1.02 (new tool, not yet in DESIGN §15)
 
 New PC tool for calibrating `A<n>` delay pairs. Sends sequential `*` + `A<n>` commands
 across user-specified (freq_kHz, pulse_us) pairs and delay ranges, records threshold

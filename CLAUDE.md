@@ -4,8 +4,8 @@ Working brief for AI agents (Claude Code) editing the **PIMD** project.
 
 This file is *how to behave* in this repo. It is **not** project documentation —
 all specs, measured values, design rationale, the serial protocol, profiles and
-invariants live in **`README.md`**, which is the ground truth. When you need a
-fact, read `README.md` (section pointers below). 
+invariants live in **`DESIGN.md`**, which is the ground truth. When you need a
+fact, read `DESIGN.md` (section pointers below). 
 
 ## Mindset
 
@@ -21,7 +21,7 @@ fact, read `README.md` (section pointers below).
 
 ## Don't break the invariants
 
-Never violate the invariants in **README §11** without an explicit request. In
+Never violate the invariants in **DESIGN §11** without an explicit request. In
 brief: same-slice PWM phase-locking (GPIO4/5, slice 2), the serial wire format
 (§9), **no firmware scan-scheduler**, and **no flash writes in
 the hot path** (they spike the noise floor ~10×). Read §11 before any change that
@@ -33,12 +33,12 @@ might touch one.
   beyond the fixed profile loop. (Invariant, §11.)
 - Keep a single read-line / write-line **serial transport seam** (USB-serial).
 - `mcu/pimd_mcu.py` is **MicroPython, pure-Python only** — no CPython-only libs.
-- Ensure that Invariants, **README.md §11**, are ALWAYS respected.  Flag if there is a conflict.
+- Ensure that Invariants, **DESIGN.md §11**, are ALWAYS respected.  Flag if there is a conflict.
 
 ## Environment & deploy
 
 - **Always work inside a venv.**
-- Exact run / deploy / firmware-flash / bench-test commands are in **README §16** —
+- Exact run / deploy / firmware-flash / bench-test commands are in **DESIGN §16** —
   use those, don't improvise. 
 
 ## Versioning & changelog (important)
@@ -49,7 +49,7 @@ might touch one.
   findings. One entry per change, added above the marker line, in the format at the
   foot of `CHANGELOG.md`: `### <file> — v<N> — <short title>`, then a short
   paragraph covering *what changed · why · (date)*.
-- **Do not edit `README.md` directly.** It is a curated snapshot, regenerated from
-  `CHANGELOG.md` by a periodic human-run consolidation pass, see README.md section 18. Treat it as stable
+- **Do not edit `DESIGN.md` directly.** It is a curated snapshot, regenerated from
+  `CHANGELOG.md` by a periodic human-run consolidation pass, see DESIGN.md section 18. Treat it as stable
   reference, not a scratchpad. (Only exception: a deliberate, human-directed
-  restructuring — and then bump the Doc-rev line at the top of the README.)
+  restructuring — and then bump the Doc-rev line at the top of DESIGN.md.)

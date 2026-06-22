@@ -3,23 +3,8 @@
 __pycache__/
 *.pyc
 
-# PyInstaller build artifacts (see docs/build_notes.md)
-build/
-dist/
-*.spec
-
 # Claude Code local permissions (machine-specific)
 .claude/settings.local.json
 
-# KiCad backups, caches, lock files, and autosaves (all revisions)
-Electronics/**/*-backups/
-Electronics/**/fp-info-cache
-Electronics/**/*.lck
-Electronics/**/*-bak
-Electronics/**/_autosave-*
-Electronics/**/#auto_saved_files#
-Electronics/**/untitled.kicad_sch
-
-# Generated bench-test logs
-/data/
-src/data/
+# Private
+MM-NOTES.md

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
 # PIMD Signature Visualiser (ClassViz) v1.15
 # — Mode 2 adaptive profile viewer

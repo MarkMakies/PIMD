@@ -1,4 +1,6 @@
-###############################################################################
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2022-2026 Mark Makies
+# ###############################################################################
 # PIMD Delay Calibration v1.19
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
