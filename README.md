@@ -8,9 +8,7 @@
 > materials separate *spatially* inside the decay-space matrix — non-ferrous (blue) collapses early,
 > ferrous (red) persists late. Getting that separation out of a pulse-induction detector is the whole point.
 
-**Status:** working and field-tested (discriminates ferrous / non-ferrous in real soil to ~20 cm) · acquisition + visualisation mature · **machine-learning classification layer is the next phase.**
-**Licence:** code GPL-3.0-or-later · hardware + docs CC BY-SA 4.0 ([details](#licence))
-**Build diary:** <https://makies.com.au/pimd/> · **Video:** <https://www.youtube.com/@markmakies>
+**Up to date Build diary:** <https://makies.com.au/pimd/>
 
 ---
 
