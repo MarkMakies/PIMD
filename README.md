@@ -8,9 +8,7 @@
 > materials separate *spatially* inside the decay-space matrix — non-ferrous (blue) collapses early,
 > ferrous (red) persists late. Getting that separation out of a pulse-induction detector is the whole point.
 
-**Status:** working and field-tested (discriminates ferrous / non-ferrous in real soil to ~20 cm) · acquisition + visualisation mature · **machine-learning classification layer is the next phase.**
-**Licence:** code GPL-3.0-or-later · hardware + docs CC BY-SA 4.0 ([details](#licence))
-**Build diary:** <https://makies.com.au/pimd/> · **Video:** <https://www.youtube.com/@markmakies>
+**Up to date Build diary:** <https://makies.com.au/pimd/>
 
 ---
 
@@ -39,7 +37,7 @@ and then a decaying eddy-current response. A nearby target perturbs that decay. 
 signal is sampled at precise, calibrated delays.
 
 - **Mode 1** — a single filtered (32-bit) sample at one held delay: the low-noise telemetry path, used for baselines and field tests.
-- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The demonstrated `cal_profile_8b profile spans **8 frequency bands × 9 sample delays = a 72-cell matrix**, at up to ~100 frames/s.
+- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The demonstrated `cal_profile_8b.cal profile spans **8 frequency bands × 9 sample delays = a 72-cell matrix**, at up to ~100 frames/s.
 - Sample delays are **amplitude-calibrated** (anchored to specific voltages on the 0.5–4.8 V region of the decay, where this coil carries the most discrimination information) and snapped to the 8 ns PWM grid, deliberately avoiding the LC-ringing dead zones.
 - **Polarity convention:** ferrous targets read **positive** (stored magnetic energy reinforces the decay); non-ferrous read **negative** (opposing eddy currents weaken it).
 
@@ -154,5 +152,5 @@ Pulse Induction Metal Detector © 2022–2026 Mark Makies.
 
 ## Author
 
-Built by **Mark Makies** (Australia). Part of the wider Roverling autonomous-platform project.
-Find more work at <https://makies.com.au/>.
+Built by **Mark Makies** (Australia).
+Find more work at <https://makies.au/>.

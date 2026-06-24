@@ -8,3 +8,10 @@ __pycache__/
 
 # Private
 MM-NOTES.md
+assets
+
+src/data/classviz_settings.json
+src/data/delaycal_settings.json
+src/data/gui_settings.json
+
+
