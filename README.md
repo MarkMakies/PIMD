@@ -152,5 +152,5 @@ Pulse Induction Metal Detector © 2022–2026 Mark Makies.
 
 ## Author
 
-Built by **Mark Makies** (Australia). Part of the wider Roverling autonomous-platform project.
-Find more work at <https://makies.com.au/>.
+Built by **Mark Makies** (Australia).
+Find more work at <https://makies.au/>.
