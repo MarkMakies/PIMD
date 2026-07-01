@@ -1,3 +1,10 @@
+### README.md — Fixed broken build diary link
+
+Both "Build diary" links pointed to `https://makies.com.au/pimd/`, which 404s.
+Corrected to `https://makies.com.au/pulse-induction-metal-detector/`, the
+actual live URL. Checked all other `*.md` files in the repo for broken links —
+none found. (2026-07-01)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ### src/pimd_classviz.py — v1.15 — Stats: Std colour bands + row-height +/−

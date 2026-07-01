@@ -8,7 +8,7 @@
 > materials separate *spatially* inside the decay-space matrix — non-ferrous (blue) collapses early,
 > ferrous (red) persists late. Getting that separation out of a pulse-induction detector is the whole point.
 
-**Up to date Build diary:** <https://makies.com.au/pimd/>
+**Up to date Build diary:** <https://makies.com.au/pulse-induction-metal-detector/>
 
 ---
 
@@ -138,7 +138,7 @@ See **DESIGN.md §14** for the full open-problems list.
 
 - **[DESIGN.md](DESIGN.md)** — the complete engineering reference: measured operating envelope, coils, drive and receive chains, timing, serial protocol, power, invariants and curated test log. Self-contained; a new reader (human or agent) can pick up the project cold from it.
 - **[docs/](docs/)** — concise cheat sheets for each tool and the firmware, plus the platform summary.
-- **Build diary** — the full chronological story, with photos and dead-ends: <https://makies.com.au/pimd/>
+- **Build diary** — the full chronological story, with photos and dead-ends: <https://makies.com.au/pulse-induction-metal-detector/>
 - **Video** — <https://www.youtube.com/@markmakies>
 
 ## Licence
