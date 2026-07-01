@@ -14,4 +14,7 @@ src/data/classviz_settings.json
 src/data/delaycal_settings.json
 src/data/gui_settings.json
 
-
+src/data/delaycal*
+src/data/frames*
+src/data/P*
+src/data/stats*
