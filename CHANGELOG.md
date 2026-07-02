@@ -5,6 +5,93 @@ Corrected to `https://makies.com.au/pulse-induction-metal-detector/`, the
 actual live URL. Checked all other `*.md` files in the repo for broken links —
 none found. (2026-07-01)
 
+### src/pimd111.ui — v4.08's slider/QLineEdit changes applied for real
+
+The v4.08 changelog entry (below, "8 ns grid snapping") claimed `pimd111_ui.py
+also updated`, but `pimd111.ui` was never actually edited — none of the three
+sub-changes ((a) QLineEdit fields, (b) frequency slider re-range, (c)
+pulse/delay slider re-range) landed in the Designer source. This went
+unnoticed for 5 versions because most of the mismatch was silent or benign
+until now:
+
+- **(a)** `lFreq`/`lPulse`/`lSample` stayed `QLabel`. `.text()`/`.setText()`
+  work on both classes, but `editingFinished` (QLineEdit-only) doesn't — app
+  crashed on startup (`AttributeError: 'QLabel' object has no attribute
+  'editingFinished'`) since it's wired in `_setup_ui_connections()`.
+- **(b)** `slFreq` stayed ranged 40–400 (old 0.1 kHz-unit scheme, default
+  250) instead of 0–17 (index into `CLEAN_FREQS_KHZ`, default 10). Any slider
+  move raised `IndexError: list index out of range` in the
+  `valueChanged` lambda (`CLEAN_FREQS_KHZ[value]`).
+- **(c)** `slPulse`/`slSample` stayed ranged in old 0.1 µs units (50–400/50–300)
+  instead of 8 ns counts (625–5000/625–3750). This one was silent but wrong:
+  the Python side reads the slider integer directly as an 8 ns count, so an
+  old-scheme value like `slPulse=100` would have been sent to the MCU as
+  0.8 µs instead of the intended 10.0 µs — a real pulse-width hazard, not just
+  a display bug.
+
+Fixed by changing `lFreq`/`lPulse`/`lSample` to `QLineEdit` (dropping
+`lFreq`'s QLabel-only `textFormat` property) and correcting the three
+sliders' `minimum`/`maximum`/`value` to match `apply_soc_defaults()`
+(`slFreq`: 0–17, default 10 → 10.0 kHz; `slPulse`: 625–5000, default 2500 →
+20.0 µs; `slSample`: 625–3750, default 1250 → 10.0 µs). `pimd111_ui.py`
+regenerated from the corrected `.ui` via `pyuic6` (previously PyQt6-generated;
+found already regenerated with `pyside6-uic`/PySide6 imports mid-session by
+an untraced process — possibly an IDE auto-compile-on-save watcher pointed at
+the wrong tool — which would have been its own crash: `pimd_gui.py` imports
+PyQt6, not PySide6. Worth checking your editor's Qt tooling config if this
+recurs.) Verified via `QT_QPA_PLATFORM=offscreen python pimd_gui.py`: starts
+clean, no traceback, process stays up. (2026-07-02)
+
+---
+
+### src/pimd_delaycal.py — v1.20 — 3-decimal voltage headers + zigzag Auto Nudge
+
+**(a)** Voltage column headers (main results table, both thermal tables, CSV export)
+now show 3 decimal places (`4.000 V`) instead of 1 (`4.0 V`), for finer-grained
+target-voltage sets. Three call sites updated: `_rebuild_table()`,
+`_rebuild_thermal_tables()`, `export_csv()`. `_ch_label()`'s voltage formatting
+(used only in activity-log messages, not a column header) left at 1 decimal.
+
+**(b)** Auto Nudge's per-channel search direction was effectively one-directional:
+`_auto_nudge_channel()` walked cumulatively further in the same direction each
+attempt (`cur += d * nudge_us`) until exceeding the cap from the calibrated delay,
+then flipped direction exactly once and gave up if that was also capped. Replaced
+with an expanding zigzag measured from the calibrated delay every attempt:
+`+nudge, -nudge, +2×nudge, -2×nudge, +3×nudge, ...`, continuing until the offset
+exceeds the cap (existing best-std fallback in `_auto_finish()` still applies) or
+the outer loop's max iterations/attempts is reached (unchanged). Per-channel state
+`_auto_dir_flat`/`_auto_dir_flipped` replaced by a single attempt counter
+`_auto_attempt_flat`. (2026-07-02)
+
+### cal profile — cal_20260702_165109 — new profile geometry: geometric pulse ladder + geometric thresholds
+
+Replaced the old profile (cal_profile_8b, pulse widths 6/10/20/30/40/50/75/100 µs,
+linear thresholds 4.8→0.5 V) with a geometric pulse ladder
+6/9/13.44/20/30/45/67.2/100 µs (×1.5 per step) and geometric thresholds
+4.5→0.5 V (×0.76 per step). Frequencies snapped to the CLEAN_FREQS list
+(50/31.25/20/15.625/10/6.25/4/3.125 kHz), duty held at 26.9–31.25%.
+Rationale: pulse width and threshold each sample log-space; constant-ratio
+spacing removes near-duplicate cells (old profile bunched 30–50 µs bands and
+the top three threshold cells). NOTE: geometry change — frames from this
+profile are not comparable with data logged under cal_profile_8b; per
+DESIGN §10 the profile is the firmware↔ML contract. (2026-07-02)
+
+### bench finding — decay is non-exponential across the sample window
+
+Delay-cal data (runs 16:39 and 16:51, 2026-07-02) shows local decay time
+constant shrinking monotonically from ≈3 µs near 4.5 V to ≈1.2 µs near
+0.5 V; both linear- and geometric-threshold cals agree on the shape.
+Suspected clamp-release proximity stretching the apparent τ at the top of
+the window. (2026-07-02)
+
+### open question — possible coil-current plateau above ~67 µs
+
+In both cals the 67.2→100 µs band-to-band first-delay increment is the
+smallest on the ladder (0.44–0.51 µs vs 0.56+ mid-ladder), consistent with
+TX coil current flattening. Not confirmed — needs a scope measurement of
+coil current vs pulse width (τ_coil). Bears on whether the 100 µs band
+justifies its frame-time and thermal cost. (2026-07-02)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ### src/pimd_classviz.py — v1.15 — Stats: Std colour bands + row-height +/−
