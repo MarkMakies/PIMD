@@ -158,6 +158,35 @@ band, same band as the suspected coil-current plateau (see earlier
 open-question entry). No action; to be judged by labelled target data.
 (2026-07-02)
 
+### pimd_classviz.py — v1.16 — session dump recorder
+
+Reworked the existing v1.06 "Record Frames" toggle (RAM-buffered raw W-frame
+capture, flushed once on stop to `data/frames_*.csv`) into a self-describing
+"Record Session" recorder for an AI analyst to work from as a standalone
+file — no external profile file or operator memory required. Extended in
+place per the request rather than adding a parallel recording path: same
+button, same tap point (raw values before the 64-frame glitch filter and
+before any baseline/display scaling), same auto-stop-on-profile-change/
+stream-stop guards.
+
+Saves to `data/sessions/session_YYYYMMDD_HHMMSS.csv`. Rows are now written
+and flushed incrementally as each W frame arrives instead of buffered in RAM
+and flushed once at stop — a crash or serial dropout mid-session loses at
+most the last unflushed row, and because the file's lifecycle is tied only
+to the explicit Start/Stop toggle, a transient gap in the frame stream never
+restarts the file (it just shows up as a `firmware_time_ms` gap). The file
+opens with a `#`-prefixed comment header: session start time, tool version,
+the raw firmware `V` response (a `V` command is now sent on connect,
+alongside the existing `E`/`Q4`, and parsed in `process_packet`), the
+complete active profile embedded as one-line JSON, an explicit per-column
+band/freq/pulse/delay/threshold map, and free-text session notes entered via
+a small dialog when recording starts. Data rows: `pc_wallclock_iso`,
+`firmware_time_ms`, all cell means in µV as received, plus a new `flagged`
+column (1 if the existing 64-frame glitch filter marked any channel that
+frame — previously computed and discarded, now surfaced instead of the
+frame being dropped). Button text and status bar show frame count + elapsed
+time while recording. (2026-07-02)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ### src/pimd_classviz.py — v1.15 — Stats: Std colour bands + row-height +/−

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.15
+# PIMD Signature Visualiser (ClassViz) v1.16
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -16,6 +16,26 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.16 "Record Frames" (v1.06) reworked into a self-describing session-dump
+#       recorder for AI-analyst consumption: renamed "Record Session", saves to
+#       data/sessions/session_YYYYMMDD_HHMMSS.csv instead of data/frames_*.csv.
+#       Rows are now written and flushed incrementally as each W frame arrives
+#       (_session_write_row) instead of RAM-buffered and flushed once on stop
+#       (_record_buf removed) — a crash or serial dropout mid-session loses at
+#       most the last unflushed row, and the file's lifecycle is tied only to
+#       the Start/Stop toggle so a stream gap never restarts the file. File
+#       opens with a '#'-prefixed comment header (_session_write_header):
+#       session start time, tool version, raw V-response firmware string (new
+#       'V' command now sent on connect, parsed in process_packet), the
+#       complete active profile as one-line JSON, an explicit per-column
+#       band/freq/pulse/delay/threshold map, and free-text session_notes
+#       (QInputDialog.getMultiLineText prompt on start). Data rows:
+#       pc_wallclock_iso, firmware_time_ms, ch0_uV..chN-1_uV (raw, pre-glitch-
+#       filter/pre-baseline — same tap point as before), plus a new 'flagged'
+#       column (1 if the 64-frame glitch filter marked any channel that frame,
+#       reusing the existing glitch_mask instead of discarding it). Button
+#       text and status bar now show frame count + elapsed time while
+#       recording (_redraw, _update_status).
 # v1.15 Stats tab: Std (mV) column colour-coded green/yellow/red against a lower/
 #       upper threshold pair (default 0.50/1.00 mV) set via two QDoubleSpinBox
 #       widgets added to the controls row.  +/− QPushButton pair adjusts the
@@ -86,7 +106,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import deque
 
 import numpy as np
@@ -111,7 +131,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.15'
+APP_VERSION = '1.16'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -123,6 +143,7 @@ ROLLING_SECS_DEFAULT   = 3.0
 DEFAULT_PORT = '/dev/ttyACM0'
 
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
+SESSIONS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
 
@@ -194,6 +215,7 @@ class MainWindow(QMainWindow):
         self.serial.readyRead.connect(self.read_from_serial)
         self._last_cmd    = ''
         self._last_packet = ''
+        self._fw_version_line: 'str | None' = None
 
         # Profile dimensions (n_bands, n_cells, labels, etc) — instance state so
         # the heatmap/stats table/single-cell selectors can resize at runtime
@@ -223,8 +245,11 @@ class MainWindow(QMainWindow):
         self._csv_rows           = 0
         self._frame_count        = 0
 
-        self._recording   = False
-        self._record_buf: list = []   # list of (fw_time_ms, wall_time_s, raw_uv_array)
+        self._recording           = False
+        self._session_file        = None   # open file handle while a session is being recorded
+        self._session_path        = None
+        self._session_start_wall  = None   # time.time() at recording start (elapsed display)
+        self._session_frame_count = 0
 
         self._ch_glitch_buf: 'np.ndarray | None' = None  # shape (64, n_channels), circular
         self._ch_glitch_pos  = 0
@@ -572,7 +597,7 @@ class MainWindow(QMainWindow):
         pb_save_stats.clicked.connect(self._save_stats_csv)
         ctrl.addWidget(pb_save_stats)
 
-        self.pb_record = QPushButton('Record Frames')
+        self.pb_record = QPushButton('Record Session')
         self.pb_record.setCheckable(True)
         self.pb_record.setStyleSheet(self.MY_YELLOW)
         self.pb_record.toggled.connect(self._toggle_record_frames)
@@ -907,6 +932,7 @@ class MainWindow(QMainWindow):
                 self.pb_connect.setText('Connected')
                 self.pb_connect.setStyleSheet(self.MY_GREEN)
                 self.send_command('E')
+                self.send_command('V')
                 self.send_command('Q{0}'.format(DEFAULT_PROFILE_IDX))
                 self._apply_profile(_default_profile(), DEFAULT_PROFILE_IDX)
                 self.statusBar().showMessage('Connected — Q4 sent')
@@ -960,6 +986,10 @@ class MainWindow(QMainWindow):
         if not line:
             return
 
+        if line[0] == 'V':
+            self._fw_version_line = line
+            return
+
         # Mode 2 sweep: W<idx>,<time_ms>,<ch0>,...,<chN-1> — idx must match the
         # profile we last selected (DEFAULT_PROFILE_IDX or DYNAMIC_PROFILE_INDEX).
         if len(line) < 2 or line[0] != 'W' or not line[1].isdigit():
@@ -997,8 +1027,8 @@ class MainWindow(QMainWindow):
         self._frame_count += 1
         self._rolling_buf.append((now, raw))
 
-        if self._recording:
-            self._record_buf.append((fw_time_ms, now, raw.copy()))
+        if self._recording and self._session_file:
+            self._session_write_row(fw_time_ms, now, raw, glitch_mask)
 
         if self._capturing:
             self._capture_buf.append(raw.copy())
@@ -1163,41 +1193,88 @@ class MainWindow(QMainWindow):
 
     def _toggle_record_frames(self, checked):
         if checked:
-            self._recording = True
-            self._record_buf = []
-            self.pb_record.setText('■ 0 frames')
-            self.pb_record.setStyleSheet(self.MY_RED)
+            self._session_start()
         else:
-            self._recording = False
-            self.pb_record.setText('Record Frames')
-            self.pb_record.setStyleSheet(self.MY_YELLOW)
-            self._save_frames_csv_auto()
+            self._session_stop()
 
-    def _save_frames_csv_auto(self):
-        if not self._record_buf:
-            self.statusBar().showMessage('Record stopped — no frames to save.')
-            return
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
-        os.makedirs(data_dir, exist_ok=True)
-        path = os.path.join(data_dir,
-            'frames_{0}.csv'.format(datetime.now().strftime('%Y%m%d_%H%M%S')))
-        headers = ['fw_time_ms', 'wall_time_s'] + \
-                  ['ch{0}_uV'.format(i) for i in range(self._n_channels)]
-        with open(path, 'w') as f:
-            f.write(','.join(headers) + '\n')
-            for fw_t, wall_t, raw in self._record_buf:
-                row = [str(fw_t), '{0:.4f}'.format(wall_t)] + \
-                      [str(int(v)) for v in raw]
-                f.write(','.join(row) + '\n')
-        self.statusBar().showMessage(
-            'Frames saved: {0}  ({1} rows)'.format(path, len(self._record_buf)))
+    def _session_start(self):
+        """Open a new self-describing session-dump CSV and write its header."""
+        notes, _ = QInputDialog.getMultiLineText(
+            self, 'Session notes', 'Planned target order / notes for this session:')
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+        ts   = datetime.now()
+        path = os.path.join(SESSIONS_DIR, 'session_{0}.csv'.format(ts.strftime('%Y%m%d_%H%M%S')))
+        f = open(path, 'w')
+        self._session_write_header(f, ts, notes)
+        self._session_file        = f
+        self._session_path        = path
+        self._session_start_wall  = time.time()
+        self._session_frame_count = 0
+        self._recording = True
+        self.pb_record.setText('■ 0 frames')
+        self.pb_record.setStyleSheet(self.MY_RED)
+
+    def _session_write_header(self, f, ts, notes):
+        """Write the '#'-prefixed comment header: everything an AI analyst needs
+        to interpret the data rows without any external profile file or context."""
+        fw_line = self._fw_version_line or 'unknown (no V response received)'
+        f.write('# PIMD session dump\n')
+        f.write('# session_start_iso: {0}\n'.format(ts.isoformat()))
+        f.write('# tool: pimd_classviz.py v{0}\n'.format(APP_VERSION))
+        f.write('# firmware_v_response (V<fw>,<board_id>,<num_profiles>,<active_idx>,'
+                '<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>): {0}\n'.format(fw_line))
+        f.write('# active_profile_idx: {0}\n'.format(self._active_profile_idx))
+        f.write('# n_bands: {0}  n_cells: {1}  n_channels: {2}\n'.format(
+            self._n_bands, self._n_cells, self._n_channels))
+        f.write('# profile_json: {0}\n'.format(json.dumps(self._profile, separators=(',', ':'))))
+        f.write('# colmap_fields: col_index,band_index,freq_hz,pulse_us,delay_us,threshold_v\n')
+        for ch in range(self._n_channels):
+            b, c = ch // self._n_cells, ch % self._n_cells
+            freq_hz, pulse_us, delays = self._bands_meta[b]
+            thr = (self._profile['bands'][b]['threshold_v'][c]
+                   if self._has_threshold_v else '')
+            f.write('# colmap: {0},{1},{2},{3},{4},{5}\n'.format(
+                ch, b, freq_hz, pulse_us, delays[c], thr))
+        if notes.strip():
+            for line in notes.splitlines():
+                f.write('# session_notes: {0}\n'.format(line))
+        else:
+            f.write('# session_notes: (none)\n')
+        headers = ['pc_wallclock_iso', 'firmware_time_ms'] + \
+                  ['ch{0}_uV'.format(i) for i in range(self._n_channels)] + ['flagged']
+        f.write(','.join(headers) + '\n')
+        f.flush()
+
+    def _session_write_row(self, fw_time_ms, wall_ts, raw, glitch_mask):
+        """Append one raw (pre-filter, pre-baseline) frame and flush immediately
+        so a crash or serial dropout mid-session never loses more than one row."""
+        row = [datetime.fromtimestamp(wall_ts).isoformat(), str(fw_time_ms)] + \
+              [str(int(v)) for v in raw] + \
+              ['1' if glitch_mask.any() else '0']
+        self._session_file.write(','.join(row) + '\n')
+        self._session_file.flush()
+        self._session_frame_count += 1
+
+    def _session_stop(self):
+        self._recording = False
+        self.pb_record.setText('Record Session')
+        self.pb_record.setStyleSheet(self.MY_YELLOW)
+        if self._session_file:
+            self._session_file.close()
+            self.statusBar().showMessage('Session saved: {0}  ({1} frames)'.format(
+                self._session_path, self._session_frame_count))
+        self._session_file       = None
+        self._session_path       = None
+        self._session_start_wall = None
 
     # ------------------------------------------------------------------
     # Redraw (30 Hz timer)
     # ------------------------------------------------------------------
     def _redraw(self):
         if self._recording:
-            self.pb_record.setText('■ {0} frames'.format(len(self._record_buf)))
+            elapsed = time.time() - self._session_start_wall
+            self.pb_record.setText('■ {0} frames, {1}'.format(
+                self._session_frame_count, str(timedelta(seconds=int(elapsed)))))
 
         if self._latest_raw is None:
             return
@@ -1402,9 +1479,14 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _update_status(self):
+        rec = ''
+        if self._recording:
+            elapsed = time.time() - self._session_start_wall
+            rec = 'REC {0}f {1}  |  '.format(
+                self._session_frame_count, str(timedelta(seconds=int(elapsed))))
         self.statusBar().showMessage(
-            'Frames: {0}  Cmd: {1:<6}  Last: {2}'.format(
-                self._frame_count, self._last_cmd, self._last_packet[:60]))
+            '{0}Frames: {1}  Cmd: {2:<6}  Last: {3}'.format(
+                rec, self._frame_count, self._last_cmd, self._last_packet[:60]))
 
     # ------------------------------------------------------------------
     # Settings persistence
