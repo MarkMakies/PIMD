@@ -92,6 +92,72 @@ TX coil current flattening. Not confirmed — needs a scope measurement of
 coil current vs pulse width (τ_coil). Bears on whether the 100 µs band
 justifies its frame-time and thermal cost. (2026-07-02)
 
+### src/pimd_delaycal.py — v1.21 — Auto Nudge log lines now identify the channel
+
+Auto Nudge's zigzag nudge log (added in v1.20) printed `nudge #k: ±N ns from cal →
+... µs` with no channel identifier. In parallel mode, several channels nudge per
+iteration and each has its own independent attempt counter, so lines like
+`nudge #11: +240 ns from cal → 7.480 µs` and `nudge #11: +240 ns from cal →
+6.760 µs` appeared back-to-back with no way to tell which channel was which.
+Both log lines in `_auto_nudge_channel()` (the nudge line and the "cap reached"
+line) now prefixed with `self._ch_label(ch)`, matching the convention already
+used elsewhere in the file (`_auto_evaluate_initial`, `_auto_finish`, etc.).
+(2026-07-02)
+
+### src/pimd_delaycal.py — v1.22 — Auto Nudge locks a channel's delay once it passes
+
+In parallel mode, `_auto_evaluate_parallel()` re-measured every active channel's
+std-dev on every iteration, including channels that had already passed. If a
+passed channel's live std later drifted above threshold — noise, thermal drift,
+or cross-talk while other channels were still being nudged and re-soaked — it
+was pushed back into `still_bad` and re-nudged, silently moving a delay that had
+already been accepted as good. New per-channel `_auto_locked_flat` sticks the
+first time a channel passes; locked channels are excluded from `still_bad` and
+`_auto_nudge_channel()` for the rest of the run, so their delay is frozen for
+good. Their cell colour still tracks live pass/fail for visibility: green
+(`_COL_DONE`) while still reading within threshold, new lavender
+`_COL_AUTO_DRIFTED` if the live reading drifts back above threshold post-lock.
+Sequential mode is unaffected — `_auto_evaluate_channel()` already permanently
+advances past a channel the moment it passes and never revisits it. (2026-07-02)
+
+### src/pimd_delaycal.py — v1.23 — Max iterations range raised 20 → 100
+
+`sp_auto_max_iter`'s range was 1–20; raised to 1–100. The zigzag nudge search
+(v1.20) needs more attempts than a single-direction walk to sweep out to the
+cap at small step sizes — Sequential mode's per-channel max-attempts use in
+particular was capping out before reaching the cap. (2026-07-02)
+
+### cal profile — cal_2-7-26-base.json — FROZEN as operating profile
+
+Final calibration of the new geometry (geometric pulse ladder
+6/9/13.44/20/30/45/67.2/100 µs, geometric thresholds 4.5→0.5 V ×0.76/step).
+Renamed from cal_20260702_180813 to cal_2-7-26-base.json. Conditions:
+coil in air 500 mm above floor, bench-top PSU, extended warm-up to
+thermal stability (repeat-cal deltas collapsed to within 8–32 ns of the
+8 ns grid across all bands, vs up to −248 ns when run after only
+minutes). All 72 cells passed auto-cal, 13 delays adjusted (mostly a
+coherent +40 ns shift of the 4.5 V clamp-release column). This profile
+supersedes cal_profile_8b; frames are not comparable with earlier
+geometry (firmware↔ML contract, DESIGN §10). (2026-07-02)
+
+### bench finding — 31.25 kHz is a noisy rep rate; band 2 moved to 25 kHz
+
+With the 9 µs pulse unchanged, band 2 at 31.25 kHz showed row-wide noise
+(σ 2–5 mV, three cells never settled); moving only the frequency to
+25 kHz cured it (σ 0.02–0.10 mV). Noise followed the operating point,
+not pulse/decay alignment — consistent with DESIGN §8 rep-rate/beat
+sensitivity. Band 2 duty is now 22.5%. (2026-07-02)
+
+### watch list — 4.5 V column and band 8 (3.125 kHz/100 µs)
+
+4.5 V column sits at clamp-release (flattest part of decay): highest σ
+and the column that needed the +40 ns nudge; fallback is a 4.4 V top
+anchor if it misbehaves in the field. Band 8 means run a few % above
+the column family with the highest band σ — heaviest, slowest-settling
+band, same band as the suspected coil-current plateau (see earlier
+open-question entry). No action; to be judged by labelled target data.
+(2026-07-02)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ### src/pimd_classviz.py — v1.15 — Stats: Std colour bands + row-height +/−
