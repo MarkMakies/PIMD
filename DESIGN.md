@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 · **Firmware:** v4.23 · **PC tools:** gui v4.13 · classviz v1.14 · delaycal v1.19 · **Coil:** v4
-**Last bench update:** 2026-06-20 (80 ns delay sweep; LC ringing zones identified)
-**Doc rev:** 1.5 (2026-06-22) — renamed README.md → DESIGN.md; updated all internal self-references and §15 asset paths to current filenames; removed stale entries (pimd302.py, requirements.txt, LTC2508-32.pdf); added 5 new References/ captures. (Previous: 1.4 (2026-06-21) — consolidation pass: fw v4.23; gui v4.13; classviz v1.14; delaycal v1.19; pimd_scope.py removed; §9 protocol updated to integer Hz/ns; §8 SAMPLE_PULSE_CORRECTION 0.904 µs; §15 inventory updated; §17.3 Mode 2 status updated; §17.4 new delay-sweep bench observation; ARCHIVE.md removed from inventory.) Bump this line on every edit.
+**Hardware rev:** 6.04 · **Firmware:** v4.23 · **PC tools:** gui v4.13 · classviz v1.16 · delaycal v1.19 · **Coil:** v4 · **Operating profile:** cal_72_air_v2 (locked 2026-07-03)
+**Last bench update:** 2026-07-03 (profile cal_72_air_v2 locked; first 7-target Mode 2 session analysed)
+**Doc rev:** 1.6 (2026-07-03) — consolidation pass: Mode 2 scan profile redesigned (geometric pulse ladder ×1.5, geometric amplitude thresholds ×0.766) and locked as cal_72_air_v2 (§10); 31.25 kHz identified as known-bad rep rate, band 2 moved to 25 kHz (§8, §17.5); decay measured non-exponential across sample window (§17.5); Mode 2 warm-up ≈ 5 min established (§3, §17.5); first 7-target session findings incl. steel-piece sign crossover and mixture superposition (§17.6); classviz v1.16 session-dump recorder (§15); coil-current-plateau open question added (§14). (Previous: 1.5 (2026-06-22) — renamed README.md → DESIGN.md; asset-path and inventory cleanup.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -69,6 +69,11 @@ eddy currents weaken it).
   20.0 µs pulse / 10.0 µs sample delay / DS 256 · coil in air, no targets · 20 V bench
   supply · allow **4 min warm-up** from cold (expect ≈ 50 µV/s drop during warm-up; do not
   take noise-floor readings before this point). Reference capture: `References/GUI-SteadyState.jpg`.
+
+- **Mode 2 warm-up ≈ 5 min** *(established 2026-07-02/03)*: the profile duty is much heavier
+  than Mode 1 SoC; run the profile in ClassViz until thermal drift settles before calibrating
+  or recording. Cold-ish, heavy bands drift up to ~250 ns in calibrated delay; soaked, repeat
+  cals agree to ≤ 40 ns (one 8 ns grid step for the light bands). See §17.5.
 
 ---
 
@@ -221,6 +226,11 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   `SAMPLE_PULSE_CORRECTION = 0.904 µs` offset between the PWM edge and the ADC trigger.
 - **Pulse rate:** 5-50 kHz typical. A **prime-ish** rate  halved noise by
   avoiding beat frequencies — the rate choice is deliberate, not arbitrary.
+  **Known-bad rate: 31.25 kHz** *(measured, 2026-07-02)* — at 31.25 kHz / 9 µs an entire
+  profile band was unusable (three cells never settled, σ 2–5 mV; remaining cells 5–10×
+  noisier than neighbouring bands, non-monotonic means). Moving the band to 25 kHz with the
+  pulse unchanged restored normal behaviour (σ 0.02–0.10 mV) — the noise followed the rep
+  rate, not the pulse/decay alignment. Mechanism unconfirmed; avoid 31.25 kHz in profiles.
 - **SPI map:** SPI0 raw (SCKB GPIO2 / SDOB GPIO0 / BUSY GPIO15); SPI1 filtered (SCKA GPIO10 /
   SDOA GPIO8 / DRL GPIO9); SEL0 = GPIO12.
 
@@ -255,20 +265,45 @@ At the 8 ns PWM grid every value is an exact multiple of 8.)*
 
 ---
 
-## 10. Scan profiles (WIP)
+## 10. Scan profiles
 
 Profiles are fixed/compiled-in RAM constants (no flash writes). Geometry is constant per
 profile, so any future ML classifier is trained per profile and the table is the
-firmware↔ML contract.
+firmware↔ML contract. **Frames from different profile geometries must never be mixed in
+one dataset.**
 
-### Scan-grid sizing (WIP)
-A profile *is* a scan grid: **averages** raw samples per cell, across **n_delays** sample
-delays, for **n_pulses** pulse widths. Sensible starting point:
-- **averages ≈ 32** → ~250 µV (raw floor ≈ 1400 µV, noise = 1400/√averages), ~3.2 ms/cell.
-- **n_delays ≈ 8**, log-spaced ~5–40 µs via `e^(0.3n)−1`.
-- **n_pulses ≈ 3**: 8 / 20 / 40 µs (the ferrous/non-ferrous discriminant axis).
-- Frame ≈ averages·n_delays·n_pulses·100 µs ≈ 77 ms (~13 frames/s); at 0.2 m/s a target
-  dwells ~20 frames.
+### Operating profile — `cal_72_air_v2` (locked 2026-07-03)
+
+8 bands × 9 delays = 72 cells, **averages 32** per cell (raw floor ≈ 1400 µV / √32 ≈ 250 µV),
+raw path (SDOB). Design principles, established 2026-07-02/03:
+
+- **Pulse widths geometric ×≈1.5** (6 → 100 µs). Pulse width is a target-time-constant-selective
+  excitation axis; constant-ratio spacing gives equal discrimination information per band and
+  removes the near-duplicate bands of the earlier even-spread guesses.
+- **Frequencies from the CLEAN_FREQS 125 MHz-divisor list**, chosen to hold duty near 30 %
+  (22.5–31.25 %) so per-band heating stays roughly even. Duty absorbs the grid quantisation;
+  the pulse ladder is kept exact.
+- **Sample thresholds geometric ×0.766** from a 4.2 V anchor to a 0.5 V floor (amplitude-anchored
+  delays, snapped to the 8 ns PWM grid by `pimd_delaycal.py`). The anchor was moved down from
+  4.8 → 4.5 → 4.2 V: near the ~4.7 V clamp rail the curve is flattest and the top column was
+  consistently the noisiest; 4.2 V restored normal column σ at negligible dynamic-range cost.
+
+| Band | Freq (kHz) | Pulse (µs) | Duty | Band share of sweep |
+|---|---|---|---|---|
+| 1 | 50.0 | 6.00 | 30.0 % | 2.0 % |
+| 2 | 25.0 | 9.00 | 22.5 % | 4.0 % |
+| 3 | 20.0 | 13.44 | 26.9 % | 5.0 % |
+| 4 | 15.625 | 20.00 | 31.25 % | 6.4 % |
+| 5 | 10.0 | 30.00 | 30.0 % | 10.0 % |
+| 6 | 6.25 | 45.00 | 28.1 % | 15.9 % |
+| 7 | 4.0 | 67.20 | 26.9 % | 24.9 % |
+| 8 | 3.125 | 100.00 | 31.25 % | 31.9 % |
+
+Full-sweep refresh ≈ 289 ms; observed W-record stream ≈ 7.3 Hz. Band 2 runs 25 kHz, not the
+duty-rule 31.25 kHz — see §8 known-bad rate. Bands 7+8 consume ~57 % of acquisition time and
+are retained deliberately: target data (§17.6) shows ferrous targets and copper still rising
+steeply at the top of the ladder. Full delay table lives in the profile JSON
+(`src/data/profiles/`) and the lock-in note `PROFILE_cal_72_air_v2.md`.
 
 ---
 
@@ -303,8 +338,13 @@ flash raises the noise floor ~10×.
 
 ## 13. What makes this design unusual (deliberate, validated choices)
 
-- Sampling the **0.5 V – 4.5 V** band of the flyback decay rather than the usual bottom ~700 mV —
-  found to carry more discrimination information and sit well above the noise floor.
+- Sampling the **0.5 V – 4.2 V** band of the flyback decay rather than the usual bottom ~700 mV —
+  found to carry more discrimination information and sit well above the noise floor. (Top anchor
+  originally 4.8 V, stepped down to 4.2 V for clamp-rail margin — see §10.)
+- **Geometric scan geometry on both axes** — pulse widths ×1.5, sample thresholds ×0.766 —
+  so every band and every cell interrogates a distinct, evenly spaced slice of log target-τ
+  and log decay amplitude respectively (§10). Amplitude-anchored delays make the matrix
+  self-normalising across bands.
 
 ---
 
@@ -318,6 +358,15 @@ flash raises the noise floor ~10×.
    duty note (see §17) — Q1 (IRF610) is being pushed past its noted SOA; a higher-rated
    replacement FET is probably warranted.
 5. **Coil mechanical stability** — largely solved (epoxy + Perspex).
+6. **Possible TX coil-current plateau above ~67 µs.** In every calibration of the geometric
+   ladder, the 67.2 → 100 µs band-to-band clip-release increment is the smallest on the
+   ladder — consistent with coil current flattening (τ_coil = L/R never measured). Needs a
+   scope on coil current vs pulse width. Bears on whether the 100 µs band justifies its
+   ~32 % share of frame time and its thermal cost — though target data (§17.6) shows band 8
+   still carries real long-τ information.
+7. **Copper-vs-brass class separation.** Normalized-signature distance between copper pipe
+   and brass block is only ~2.7× the repeat-measurement floor (§17.6) — the hardest pair for
+   the ML phase; may need more SNR, more frames, or may not matter in the field.
 
 ---
 
@@ -328,7 +377,7 @@ flash raises the noise floor ~10×.
 | `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.23**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23) |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
-| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.14**) — real-time heatmap (bands sorted delay-descending), stats table, ML CSV logger, profile builder tab, 64-frame glitch filter, frame recording, settings persistence |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.16**) — real-time heatmap (bands sorted delay-descending), stats table, ML CSV logger, profile builder tab, 64-frame glitch filter, frame recording, settings persistence; **session-dump recorder** (v1.16): self-describing per-session CSV to `src/data/sessions/` — header embeds full profile JSON + per-column map + notes; one row per raw W frame (pre-filter, µV), flagged column |
 | `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.19**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); profile export/import; thermal monitoring; auto-nudge (parallel or sequential); activity log; settings persistence |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` |
 | `References/schematic-v604.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
@@ -450,6 +499,57 @@ in the coil/preamp persisting to 7–8 µs after TX cutoff. (3) 7088 ns: high V 
 low fw_sd (242 µV) — voltage drift ~5.6 mV/24 s from the 256-sample rolling window still
 flushing the previous step (3.28 s flush time), not physical noise. (4) Best operating window
 at 20 kHz / 20 µs: **7488–7728 ns** (320 ns clean band).
+
+### 17.5 Profile redesign & calibration series (geometric ladders)
+
+*2026-07-02/03 · fw v4.23 · delaycal v1.19 · cals 163936 → 165109 → 174257 → 180813 → 202505 → cal_72_air_v2*
+
+Pulse widths moved from even-spread guesses (6/10/20/30/40/50/75/100 µs — bunched at
+30–50 µs, gapped at 10–20) to a **geometric ×1.5 ladder** (6/9/13.44/20/30/45/67.2/100 µs);
+thresholds moved from 0.5 V linear steps to **geometric ×0.766** (top cells were
+near-duplicates). Findings from the series:
+
+- **Decay is non-exponential across the sample window** — local τ shrinks monotonically from
+  ≈ 3 µs near the top anchor to ≈ 1.2 µs near 0.5 V. Both linear- and geometric-threshold
+  cals agree on the shape (two independent ladders, same curve). Suspected clamp-release
+  proximity stretching apparent τ at the top.
+- **Thermal warm-up fingerprint:** two cals 12 min apart — light bands repeat to ≤ 8 ns
+  (one grid step); heavy bands drift monotonically with pulse width, up to −248 ns at 100 µs
+  (decays arrive earlier warm). Basis of the ≈ 5 min Mode 2 warm-up (§3). After full soak,
+  the freeze cal adjusted only 1 delay of 72 (+40 ns).
+- **31.25 kHz known-bad rep rate** — see §8. Band 2 moved to 25 kHz / 9 µs.
+- **Top-anchor sensitivity:** the highest-threshold column is consistently the noisiest
+  (clamp-release region, flattest curve, thermal drift appears there first); anchor stepped
+  4.8 → 4.5 → 4.2 V, after which the column behaves normally.
+- Recurring **67.2 → 100 µs plateau hint** — logged as open problem §14.6.
+
+### 17.6 First 7-target Mode 2 session
+
+*2026-07-02 21:24 · fw v4.23 · classviz v1.16 session dump · profile cal_20260702_202505 ·
+2487 frames @ 7.3 Hz, 341 s, 0 flagged · air floor ≈ 0.55 mV/cell (drift-corrected)*
+
+Targets at close range: spanner, copper pipe, silver-clad spoon (×2 approaches), gal steel
+pipe, brass block, small steel piece, spanner+copper together. All detected; peak SNR 43–122×
+air floor. Key findings:
+
+- **Polarity convention holds** (ferrous +, non-ferrous −) with one important exception:
+  the **small steel piece changes sign along the pulse ladder** — negative at 6–30 µs,
+  zero-crossing near 45 µs, strongly positive at 100 µs (eddy response dominates before the
+  pulse can magnetically energise it). A single-operating-point PI would classify this target
+  by whichever sign its one pulse width landed on; the ladder resolves the full crossover.
+- **Both matrix axes discriminate:** ferrous is flat along the threshold axis (perturbation
+  persists late in decay); non-ferrous concentrates early, falling to ~0.25–0.4 by the 0.5 V
+  cell. On the pulse axis the spoon saturates by ~45 µs while copper/brass keep climbing and
+  both ferrous targets are still rising steeply at 100 µs — different targets go redundant in
+  different cells, so no cell is globally redundant on this evidence.
+- **Superposition approximately holds:** spanner+copper frame ≈ 1.49·spanner + 0.50·copper,
+  corr 0.992 — the matrix is close to linear in targets (unmixing plausible). Caution: the
+  steel piece *alone* also fits a spanner+copper mixture at corr 0.978 in band-mean space;
+  the threshold axis breaks the tie (crossover target's decay-shape rises ~3× vs ~1.8× for
+  the true mix) — an argument for keeping the full 72-cell matrix.
+- **Shape-space distances** (normalized signatures): spoon repeat-approach floor 0.028;
+  spoon↔copper 0.178, spoon↔brass 0.111, copper↔brass **0.077** (hardest pair, §14.7).
+  Spanner and gal-pipe shapes are near-identical (cosine 1.00), differing in amplitude only.
 
 ## 18. Change Log Consolidation Pass.
 
