@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.16
+# PIMD Signature Visualiser (ClassViz) v1.18
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -16,6 +16,27 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.18 _save_profile_file() JSON output wasn't 3 d.p.: v1.17 fixed in-app display/
+#       editing to .3f, but json.dump() has no float-format hook (its C encoder
+#       calls float.__repr__ directly, so a float subclass with a custom __repr__
+#       is silently ignored) — floats serialised at Python's trimmed repr (6.8,
+#       9.0, 3.22) rather than padded 3 d.p. New _pad_json_floats() regex-pads
+#       every decimal-point number in the json.dumps() text to .3f post-hoc
+#       (freq_hz/averages are plain ints, no decimal point, so untouched);
+#       _save_profile_file() now writes through it.
+# v1.17 3-decimal precision for all voltage/timing fields, throughout — was 1-2 d.p.
+#       in most spots. Root cause: _populate_profile_editor() formatted delays_us/
+#       threshold_v to .2f when loading a profile into the Profile Builder table,
+#       so any profile that passed through the editor (load, or load-then-save)
+#       silently lost precision on export — confirmed against cal_72_air_v1.json
+#       (2 d.p.) vs. a delaycal-direct export (3 d.p.). Fixed there (now .3f) plus
+#       made 3 d.p. the consistent default for every other voltage/timing readout:
+#       _fmt() mV columns, _band_labels pulse_us, _cell_labels threshold_v (heatmap
+#       axis / Stats "Threshold" col / tooltip), Stats "Std" column, crossings label,
+#       heatmap mouse tooltip delay, _build_d_command() pulse_us (was bare str()),
+#       and the Δ/Z/raw scale labels. UI-control fields (rolling window seconds,
+#       std colour thresholds, manual µV range, baseline-age labels) left at their
+#       existing precision — not calibration data.
 # v1.16 "Record Frames" (v1.06) reworked into a self-describing session-dump
 #       recorder for AI-analyst consumption: renamed "Record Session", saves to
 #       data/sessions/session_YYYYMMDD_HHMMSS.csv instead of data/frames_*.csv.
@@ -104,6 +125,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, date, timedelta
@@ -131,7 +153,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.16'
+APP_VERSION = '1.18'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -179,10 +201,20 @@ def _load_profile_file(name):
         return json.load(f)
 
 
+def _pad_json_floats(text):
+    """Pad every float literal in a json.dumps() string to 3 decimal places.
+    json.dump() has no float-formatting hook (the C encoder calls float.__repr__
+    directly, ignoring float subclass overrides), so profile floats otherwise
+    serialise at whatever precision Python's repr trims to (6.8, not 6.800).
+    Integer fields (freq_hz, averages) have no decimal point and are untouched."""
+    return re.sub(r'-?\d+\.\d+', lambda m: '{0:.3f}'.format(float(m.group())), text)
+
+
 def _save_profile_file(name, profile):
     os.makedirs(PROFILES_DIR, exist_ok=True)
+    text = _pad_json_floats(json.dumps(profile, indent=2))
     with open(os.path.join(PROFILES_DIR, name + '.json'), 'w') as f:
-        json.dump(profile, f, indent=2)
+        f.write(text)
 
 
 pg.setConfigOptions(background='w', foreground='k', antialias=True)
@@ -192,8 +224,8 @@ _C = int(Qt.AlignmentFlag.AlignCenter)
 
 
 def _fmt(uv):
-    """µV → mV string with 1 d.p."""
-    return '{0:.1f}'.format(uv / 1000.0)
+    """µV → mV string with 3 d.p."""
+    return '{0:.3f}'.format(uv / 1000.0)
 
 
 def _csv_default_path():
@@ -287,7 +319,7 @@ class MainWindow(QMainWindow):
         # the rest of the file (was the module-level BANDS_META tuple).
         self._bands_meta = [(b['freq_hz'], b['pulse_us'], tuple(b['delays_us']))
                              for b in bands]
-        self._band_labels = ['{0:,}Hz / {1:.1f}µs'.format(b['freq_hz'], b['pulse_us'])
+        self._band_labels = ['{0:,}Hz / {1:.3f}µs'.format(b['freq_hz'], b['pulse_us'])
                               for b in bands]
         # Sort display rows by first delay value descending so alternating
         # pulse-width profiles (high/low interleaved) still render in delay order.
@@ -300,7 +332,7 @@ class MainWindow(QMainWindow):
         self._has_threshold_v = all(
             'threshold_v' in b and len(b['threshold_v']) == n_cells for b in bands)
         if self._has_threshold_v:
-            self._cell_labels = ['{0:.1f}V'.format(v) for v in bands[0]['threshold_v']]
+            self._cell_labels = ['{0:.3f}V'.format(v) for v in bands[0]['threshold_v']]
             self._nominal_baseline_uv = np.array(
                 [[v * 1_000_000 for v in b['threshold_v']] for b in bands], dtype=float)
         else:
@@ -759,8 +791,8 @@ class MainWindow(QMainWindow):
         self.tbl_profile_bands.blockSignals(True)
         self.tbl_profile_bands.setRowCount(len(bands))
         for r, b in enumerate(bands):
-            delays_str = ', '.join('{0:.2f}'.format(d) for d in b['delays_us'])
-            thresh_str = (', '.join('{0:.2f}'.format(v) for v in b['threshold_v'])
+            delays_str = ', '.join('{0:.3f}'.format(d) for d in b['delays_us'])
+            thresh_str = (', '.join('{0:.3f}'.format(v) for v in b['threshold_v'])
                           if b.get('threshold_v') else '')
             for col, text in enumerate(
                     [str(b['freq_hz']), str(b['pulse_us']), delays_str, thresh_str]):
@@ -884,7 +916,7 @@ class MainWindow(QMainWindow):
     def _build_d_command(self, profile):
         parts = ['D{0}'.format(profile['averages'])]
         for b in profile['bands']:
-            fields = [str(b['freq_hz']), str(b['pulse_us'])]
+            fields = [str(b['freq_hz']), '{0:.3f}'.format(b['pulse_us'])]
             fields += ['{0:.3f}'.format(d) for d in b['delays_us']]
             parts.append(','.join(fields))
         return ';'.join(parts)
@@ -1112,13 +1144,13 @@ class MainWindow(QMainWindow):
         if self._display_mode == 'raw':
             self.img.setColorMap(self.cm_seq)
             self.img.setImage(matrix.T, levels=(0.0, float(matrix.max()) * 1.05 + 1.0))
-            self.lbl_scale.setText('Scale: 0…{0:.0f} mV'.format(matrix.max() / 1000))
+            self.lbl_scale.setText('Scale: 0…{0:.3f} mV'.format(matrix.max() / 1000))
         else:
             self.img.setColorMap(self.cm_div)
             self.img.setImage(matrix.T, levels=(-lim, lim))
             unit = 'σ' if self._display_mode == 'z' else 'mV'
             val  = lim if self._display_mode == 'z' else lim / 1000
-            self.lbl_scale.setText('Scale: ±{0:.2f} {1}'.format(val, unit))
+            self.lbl_scale.setText('Scale: ±{0:.3f} {1}'.format(val, unit))
 
     def _update_3d(self, matrix):
         # Note: the band axis is coarse — interpolation between bands is
@@ -1162,7 +1194,7 @@ class MainWindow(QMainWindow):
                 self.tbl_stats.item(row, 4).setText(_fmt(means[proto_ch]))
                 std_mv = stds[proto_ch] / 1000.0
                 item5 = self.tbl_stats.item(row, 5)
-                item5.setText('{0:.2f}'.format(std_mv))
+                item5.setText('{0:.3f}'.format(std_mv))
                 lo = self.sp_std_lower.value()
                 hi = self.sp_std_upper.value()
                 if std_mv < lo:
@@ -1332,9 +1364,9 @@ class MainWindow(QMainWindow):
                 j  = int(np.floor(cross))
                 frac = cross - j
                 thresh_v = tv[j] * (1 - frac) + tv[min(j + 1, len(tv) - 1)] * frac
-                parts.append('B{0}:{1}↔{2:.2f}V'.format(b, pol, thresh_v))
+                parts.append('B{0}:{1}↔{2:.3f}V'.format(b, pol, thresh_v))
             elif cross is not None:
-                parts.append('B{0}:{1}↔cell{2:.2f}'.format(b, pol, cross))
+                parts.append('B{0}:{1}↔cell{2:.3f}'.format(b, pol, cross))
             else:
                 parts.append('B{0}:{1}'.format(b, pol))
         self.lbl_crossings.setText('Crossings:  ' + '   '.join(parts))
@@ -1473,7 +1505,7 @@ class MainWindow(QMainWindow):
             if 0 <= cx < self._n_cells and 0 <= cy < self._n_bands:
                 delay_us = self._bands_meta[self._band_display_order[cy]][2][cx]
                 self.statusBar().showMessage(
-                    'Band {0} ({1}) | Cell {2} ({3}) | delay = {4:.2f} µs'.format(
+                    'Band {0} ({1}) | Cell {2} ({3}) | delay = {4:.3f} µs'.format(
                         cy, self._display_band_labels[cy], cx, self._cell_labels[cx], delay_us))
                 return
         self._update_status()

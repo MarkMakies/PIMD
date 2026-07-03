@@ -1,3 +1,33 @@
+### src/pimd_classviz.py — v1.18 — pad saved profile JSON floats to 3 d.p.
+
+Follow-up to v1.17: that fix made the Profile Builder's *display* and *editing*
+consistently 3 d.p., but `_save_profile_file()`'s `json.dump()` still serialised
+floats at Python's trimmed `repr()` precision (`6.8`, `9.0`, `3.22`) — confirmed
+against a freshly re-exported `cal_72_air_v2.json`. `json.dump()` has no float-
+formatting hook (its C encoder calls `float.__repr__` directly, so a float
+subclass with a custom `__repr__` is silently ignored — verified empirically).
+Added `_pad_json_floats()`, a regex pass over the `json.dumps()` text that pads
+every decimal-point number to `.3f`; integer fields (`freq_hz`, `averages`) have
+no decimal point so are untouched. `_save_profile_file()` now writes through it.
+(2026-07-03)
+
+### src/pimd_classviz.py — v1.17 — 3-decimal precision for voltage/timing fields
+
+Profile export was silently losing precision: `_populate_profile_editor()` formatted
+`delays_us`/`threshold_v` to `.2f` when loading a profile into the Profile Builder
+table, so any profile that passed through the editor (loaded, or loaded-then-saved)
+got re-saved at 2 d.p. instead of the source precision. Confirmed against
+`cal_72_air_v1.json` (2 d.p., editor round-tripped) vs. a delaycal-direct export
+(3 d.p., bypassed the editor). Fixed the editor's format strings to `.3f`, and made
+3 d.p. the consistent default for every other voltage/timing readout in the app:
+`_fmt()` mV columns, `_band_labels` pulse_us, `_cell_labels` threshold_v (heatmap
+axis / Stats "Threshold" column / mouse tooltip), Stats "Std" column, the crossings
+label, the heatmap tooltip's delay readout, `_build_d_command()`'s pulse_us field
+(was a bare `str()`, now `.3f`), and the Δ/Z/raw scale labels. Left UI-control
+fields (rolling-window seconds, std colour thresholds, manual µV range,
+baseline-age labels) at existing precision since they aren't calibration data.
+(2026-07-03)
+
 ### README.md — Fixed broken build diary link
 
 Both "Build diary" links pointed to `https://makies.com.au/pimd/`, which 404s.

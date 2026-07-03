@@ -42,7 +42,7 @@ might touch one.
   use those, don't improvise. 
 
 ## Versioning & changelog (important)
-- Stage everything as commits I can review before they land; **don't commit yourself**.
+- Stage everything as commits I can review before they land; **don't push without explicit instruction.**.
 - **On every file edit:** bump that file's version number and add an entry to
   the file's header changelog.** Required, not optional.
 - **Record every change in `CHANGELOG.md`** — firmware, PC tools, hardware, or new
