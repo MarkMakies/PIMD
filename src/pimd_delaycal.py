@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.19
+# PIMD Delay Calibration v1.23
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -20,6 +20,35 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.23 sp_auto_max_iter range raised 1-20 -> 1-100 (Max iterations / Max
+#       att/cell spinbox) — 20 was too low for Sequential mode's per-channel
+#       max-attempts use, where the zigzag search (v1.20) needs more attempts
+#       to sweep out to the cap at small nudge steps.
+# v1.22 Auto Nudge (parallel mode) now locks a channel's delay permanently the
+#       first time it passes threshold. Previously _auto_evaluate_parallel()
+#       re-measured every active channel every iteration, so a passed channel
+#       whose std later drifted above threshold (noise/thermal/cross-talk
+#       while other channels were still being nudged) got re-queued and
+#       re-nudged, silently moving an already-accepted delay. New per-channel
+#       _auto_locked_flat sticks once a channel passes; locked channels are
+#       skipped from still_bad/nudging for the rest of the run — only their
+#       cell colour keeps tracking live pass/fail (green if still good, new
+#       _COL_AUTO_DRIFTED lavender if drifted bad while locked). Sequential
+#       mode untouched — it already never revisits a passed channel.
+# v1.21 _auto_nudge_channel() log lines now prefixed with _ch_label(ch) — with
+#       multiple channels nudging per iteration (parallel mode) or interleaved
+#       attempt numbers, the log was otherwise ambiguous about which channel
+#       each "nudge #k" / "cap reached" line referred to.
+# v1.20 (a) Voltage column headers (main table, both thermal tables, CSV export)
+#       now show 3 decimal places instead of 1, matching finer-grained target
+#       voltage sets. (b) Auto Nudge no longer walks cumulatively in one
+#       direction then flips once on cap; _auto_nudge_channel() now follows an
+#       expanding zigzag measured from the calibrated delay each attempt:
+#       +nudge, -nudge, +2*nudge, -2*nudge, +3*nudge, ... until the offset
+#       exceeds the cap (best-std fallback applies) or the outer loop's max
+#       iterations/attempts is reached (unchanged). Per-channel state
+#       _auto_dir_flat/_auto_dir_flipped replaced by a single attempt counter
+#       _auto_attempt_flat.
 # v1.19 Auto Nudge parallel / sequential toggle.  New 'Sequential' QCheckBox
 #       in auto_row1; unchecked (default) = parallel mode, checked = sequential
 #       (v1.08 behaviour).  Parallel mode: all bad channels nudged together
@@ -178,6 +207,8 @@ _COL_NR           = QColor(210, 210, 210)   # grey:       not reached within max
 _COL_AUTO_FLAGGED = QColor(246, 97, 81)     # red:        still bad after Auto max attempts
 _COL_AUTO_QUEUED  = QColor(249, 240, 107)   # yellow:     bad channel queued for nudging
 _COL_AUTO_WORKING = QColor(255, 175,  50)   # amber:      channel currently being soaked
+_COL_AUTO_DRIFTED = QColor(186, 156, 214)   # lavender:   locked-good channel now reading above
+                                             # threshold — frozen, not re-nudged
 
 
 class MainWindow(QMainWindow):
@@ -239,8 +270,8 @@ class MainWindow(QMainWindow):
         self._auto_cur_profile: 'dict | None' = None
         self._auto_cal_delays_flat: 'list[float]' = []  # calibrated delays µs, per channel
         self._auto_cur_delays_flat: 'list[float]' = []  # working delays µs, per channel
-        self._auto_dir_flat:        'list[int]'   = []  # -1 or +1 per channel
-        self._auto_dir_flipped:     'list[bool]'  = []  # True once direction has been flipped
+        self._auto_attempt_flat:    'list[int]'   = []  # nudge attempt count per channel (drives zigzag)
+        self._auto_locked_flat:     'list[bool]'  = []  # True once channel first passed (parallel mode only)
         self._auto_skip_flat:       'list[bool]'  = []  # True for N/R cells (excluded)
         self._auto_best_std_uV:     'list[float]' = []  # min std dev seen µV per channel
         self._auto_best_delays_flat:'list[float]' = []  # delay at best std per channel
@@ -530,7 +561,7 @@ class MainWindow(QMainWindow):
         self.lbl_max_att = QLabel('Max iterations:')
         auto_row1.addWidget(self.lbl_max_att)
         self.sp_auto_max_iter = QSpinBox()
-        self.sp_auto_max_iter.setRange(1, 20)
+        self.sp_auto_max_iter.setRange(1, 100)
         self.sp_auto_max_iter.setValue(5)
         self.sp_auto_max_iter.setFixedWidth(50)
         self.sp_auto_max_iter.setToolTip(
@@ -757,7 +788,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnCount(len(targets_v))
         self.table.setVerticalHeaderLabels(
             [self._row_label(f, p) for f, p in fp_pairs])
-        self.table.setHorizontalHeaderLabels([f'{v:.1f} V' for v in targets_v])
+        self.table.setHorizontalHeaderLabels([f'{v:.3f} V' for v in targets_v])
         for r in range(len(fp_pairs)):
             for c in range(len(targets_v)):
                 item = QTableWidgetItem('')
@@ -1161,7 +1192,7 @@ class MainWindow(QMainWindow):
             self._row_label(bands[b]['freq_hz'] / 1000, bands[b]['pulse_us'])
             for b in self._thermal_display_order
         ]
-        col_labels = [f'{v:.1f} V' for v in self._targets_v]
+        col_labels = [f'{v:.3f} V' for v in self._targets_v]
         n_rows, n_cols = len(row_labels), len(col_labels)
 
         # Minimum height so all rows are always fully visible (no scrollbar).
@@ -1290,8 +1321,8 @@ class MainWindow(QMainWindow):
             for b in range(n_bands) for c in range(n_cells)
         ]
         self._auto_cur_delays_flat  = list(self._auto_cal_delays_flat)
-        self._auto_dir_flat         = [-1] * n_ch
-        self._auto_dir_flipped      = [False] * n_ch
+        self._auto_attempt_flat     = [0] * n_ch
+        self._auto_locked_flat      = [False] * n_ch
         self._auto_best_std_uV      = [float('inf')] * n_ch
         self._auto_best_delays_flat = list(self._auto_cal_delays_flat)
 
@@ -1417,7 +1448,9 @@ class MainWindow(QMainWindow):
             self._auto_evaluate_channel()
 
     def _auto_evaluate_parallel(self):
-        """Parallel mode: evaluate all active channels, nudge all still-bad ones, loop."""
+        """Parallel mode: evaluate active unlocked channels, nudge still-bad ones, loop.
+        Channels that have already passed once are locked — their delay is never
+        touched again; only their cell colour keeps tracking live pass/fail."""
         n            = self.sp_thermal_n.value()
         recent       = list(self._thermal_buf)[-n:]
         threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
@@ -1429,6 +1462,12 @@ class MainWindow(QMainWindow):
                 continue
             std_uV = (_stdev([frame[ch] for frame in recent])
                       if len(recent) >= 2 else float('inf'))
+
+            if self._auto_locked_flat[ch]:
+                self._auto_color_cell(
+                    ch, _COL_DONE if std_uV <= threshold_uV else _COL_AUTO_DRIFTED)
+                continue
+
             if std_uV < self._auto_best_std_uV[ch]:
                 self._auto_best_std_uV[ch]     = std_uV
                 self._auto_best_delays_flat[ch] = self._auto_cur_delays_flat[ch]
@@ -1436,6 +1475,7 @@ class MainWindow(QMainWindow):
                 still_bad.append(ch)
                 self._auto_color_cell(ch, _COL_AUTO_QUEUED)
             else:
+                self._auto_locked_flat[ch] = True
                 self._auto_color_cell(ch, _COL_DONE)
 
         self._log(f'  Iter {self._auto_iter}: {len(still_bad)} channel(s) above threshold')
@@ -1579,35 +1619,27 @@ class MainWindow(QMainWindow):
         self._auto_run_soak()
 
     def _auto_nudge_channel(self, ch: int):
-        """Nudge one channel by ±nudge_ns respecting the cap from cal delay."""
+        """Nudge one channel along an expanding ±nudge_ns zigzag from the calibrated delay."""
         nudge_us = self.sp_auto_nudge_ns.value() / 1000.0
         cap_us   = self.sp_auto_cap_ns.value()   / 1000.0
         cal      = self._auto_cal_delays_flat[ch]
-        cur      = self._auto_cur_delays_flat[ch]
-        d        = self._auto_dir_flat[ch]
 
-        proposed = _snap_8ns(cur + d * nudge_us)
+        self._auto_attempt_flat[ch] += 1
+        k      = self._auto_attempt_flat[ch]
+        mult   = (k + 1) // 2
+        sign   = 1 if k % 2 else -1
+        offset = mult * nudge_us
 
-        if abs(proposed - cal) <= cap_us:
-            self._auto_cur_delays_flat[ch] = proposed
-            self._log(f'  nudging {d * self.sp_auto_nudge_ns.value():+d} ns '
-                      f'→ {proposed:.3f} µs '
-                      f'(Δ {(proposed - cal) * 1000:+.0f} ns from cal)')
-        elif not self._auto_dir_flipped[ch]:
-            self._auto_dir_flipped[ch] = True
-            new_d = -d
-            self._auto_dir_flat[ch] = new_d
-            # Reset to cal and take first step in the new direction
-            self._auto_cur_delays_flat[ch] = cal
-            proposed2 = _snap_8ns(cal + new_d * nudge_us)
-            if abs(proposed2 - cal) <= cap_us:
-                self._auto_cur_delays_flat[ch] = proposed2
-                self._log(f'  cap hit ({d:+d} side) — flipping direction; '
-                          f'reset to cal {cal:.3f} µs → {proposed2:.3f} µs')
-            else:
-                self._log(f'  cap hit both sides (nudge_ns > cap_ns) — staying at cal')
-        else:
-            self._log(f'  both directions capped — no nudge; best-std fallback applies')
+        if offset > cap_us:
+            self._log(f'  {self._ch_label(ch)}: cap reached — no further nudge; '
+                      f'best-std fallback applies')
+            return
+
+        proposed = _snap_8ns(cal + sign * offset)
+        self._auto_cur_delays_flat[ch] = proposed
+        self._log(f'  {self._ch_label(ch)} nudge #{k}: '
+                  f'{sign * mult * self.sp_auto_nudge_ns.value():+d} ns from cal '
+                  f'→ {proposed:.3f} µs (Δ {(proposed - cal) * 1000:+.0f} ns from cal)')
 
     def _auto_finish(self, all_pass: bool):
         """Update calibration table with best delays, report ΔV, export profile."""
@@ -1711,7 +1743,7 @@ class MainWindow(QMainWindow):
             return
         try:
             with open(path, 'w') as f:
-                headers = ['freq_kHz/pulse_us'] + [f'{v:.1f}V' for v in self._targets_v]
+                headers = ['freq_kHz/pulse_us'] + [f'{v:.3f}V' for v in self._targets_v]
                 f.write(','.join(headers) + '\n')
                 for r, (freq, pulse) in enumerate(self._fp_pairs):
                     row_vals = [self._row_label(freq, pulse)]
