@@ -390,19 +390,19 @@ color: rgb(237, 51, 59);</string>
                 </size>
                </property>
                <property name="minimum">
-                <number>50</number>
+                <number>625</number>
                </property>
                <property name="maximum">
-                <number>300</number>
+                <number>3750</number>
                </property>
                <property name="pageStep">
                 <number>0</number>
                </property>
                <property name="value">
-                <number>76</number>
+                <number>1250</number>
                </property>
                <property name="sliderPosition">
-                <number>76</number>
+                <number>1250</number>
                </property>
                <property name="orientation">
                 <enum>Qt::Orientation::Horizontal</enum>
@@ -484,7 +484,7 @@ color: rgb(237, 51, 59);</string>
               </widget>
              </item>
              <item row="1" column="3">
-              <widget class="QLabel" name="lPulse">
+              <widget class="QLineEdit" name="lPulse">
                <property name="sizePolicy">
                 <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
                  <horstretch>0</horstretch>
@@ -597,10 +597,10 @@ color: rgb(237, 51, 59);</string>
                 </size>
                </property>
                <property name="minimum">
-                <number>40</number>
+                <number>0</number>
                </property>
                <property name="maximum">
-                <number>400</number>
+                <number>17</number>
                </property>
                <property name="singleStep">
                 <number>1</number>
@@ -609,7 +609,7 @@ color: rgb(237, 51, 59);</string>
                 <number>0</number>
                </property>
                <property name="value">
-                <number>250</number>
+                <number>10</number>
                </property>
                <property name="orientation">
                 <enum>Qt::Orientation::Horizontal</enum>
@@ -703,16 +703,16 @@ color: rgb(237, 51, 59);</string>
                 </size>
                </property>
                <property name="minimum">
-                <number>50</number>
+                <number>625</number>
                </property>
                <property name="maximum">
-                <number>400</number>
+                <number>5000</number>
                </property>
                <property name="pageStep">
                 <number>0</number>
                </property>
                <property name="value">
-                <number>100</number>
+                <number>2500</number>
                </property>
                <property name="orientation">
                 <enum>Qt::Orientation::Horizontal</enum>
@@ -733,7 +733,7 @@ color: rgb(237, 51, 59);</string>
               </widget>
              </item>
              <item row="0" column="3">
-              <widget class="QLabel" name="lFreq">
+              <widget class="QLineEdit" name="lFreq">
                <property name="sizePolicy">
                 <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
                  <horstretch>0</horstretch>
@@ -761,13 +761,10 @@ color: rgb(237, 51, 59);</string>
                <property name="text">
                 <string>25.0 kHz</string>
                </property>
-               <property name="textFormat">
-                <enum>Qt::TextFormat::PlainText</enum>
-               </property>
               </widget>
              </item>
              <item row="2" column="3">
-              <widget class="QLabel" name="lSample">
+              <widget class="QLineEdit" name="lSample">
                <property name="sizePolicy">
                 <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
                  <horstretch>0</horstretch>
