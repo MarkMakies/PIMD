@@ -1,3 +1,123 @@
+### src/pimd_knn_baseline.py — v1.1 — fix crash when output dir doesn't exist
+
+`main()` now calls `os.makedirs(outdir, exist_ok=True)` before `fig.savefig()`.
+Previously, running the script with a non-existent `<output_dir>` (e.g.
+`python pimd_knn_baseline.py corpus.csv test`) ran the full LODO/LOTO
+classification and printed all results, then crashed with
+`FileNotFoundError` at the very last step trying to save the confusion
+matrix PNG. (2026-07-04)
+
+### src/pimd_features.py — v2 — add wide-format signatures output
+
+Added `--out-wide <path>`: one row per (session, target, distance_cm)
+plateau instead of one row per cell -- `session,target,distance_cm,
+plateau_amp_mV,splithalf_floor,quality,c00..c71`, with `c00..c71` the
+plateau's delta_mV vector. Long-format `--out` remains the canonical
+output; wide rows are built in the same pass from the exact `delta_mV`/
+`plateau_amp_mV`/`splithalf_floor`/`quality` values already computed for
+the long rows in `process_session()` (now returns `(rows, wide_rows)`) --
+never re-parsed or recomputed, so the two outputs can't drift apart for
+the same plateau. Checked whether `c00..c71` needed reordering to satisfy
+"pulse ascending / threshold descending within band": it doesn't --
+`cal_72_air_v2.json`'s 8 bands are already stored pulse_us-ascending, and
+each band's 9 cells are already stored threshold_v-descending, so the
+existing channel index (`band_index*9+cell_index`, used everywhere else
+in the file) already satisfies that ordering. New `wide_header_lines()`
+(writes `# profile: <name>` plus a column-order comment line before the
+CSV header), `open_wide_writer()` (same refuse-unless-`--append`
+semantics as the long writer), and `build_wide_row()`. Verified: wide row
+count = long row count / 72 across all 3 real sessions, and every c00..c71
+value matches its corresponding long-row delta_mV exactly (scripted
+cross-check, all 27 plateaus x 72 cells). (2026-07-03)
+
+### src/pimd_features.py — v1 — session-CSV -> training-corpus feature extractor
+
+New offline PC-side script (no GUI, no firmware touch): turns a raw ClassViz
+session-dump CSV (pimd_classviz.py v1.16+ "Record Session" output) into rows
+matching the existing hand-built PIMD_target_corpus_signatures.csv schema.
+Validates each session's embedded profile_json against cal_72_air_v2
+structurally (refusing, not crashing, on any mismatch, and continuing with
+the rest of a multi-session batch -- DESIGN §11: never mix profile
+geometries), drops glitch-filter-flagged frames, and segments the frame
+stream into air/target plateaus: from '# mark:' ground-truth lines when
+present (pimd_classviz.py v1.19+ hotkeys), else a rolling-window mean-abs-
+diff change-point fallback with generic placeholder target labels (no
+ground truth for *which* target a run is without marks, so it never guesses
+from the free-text session_notes). Builds a piecewise-linear per-channel
+baseline anchored on air segments to correct the thermal drift documented
+in DESIGN §3/§17.5, and computes per-plateau delta_mV / plateau_amp_mV /
+splithalf_floor / quality. Also emits one diagnostic PNG per session
+(band-mean vs time, drift-corrected, with segment boundaries and the
+session's free-text notes) for eyeballing a capture before trusting it.
+
+Change-point defaults were hand-tuned against the 3 real sessions currently
+in data/sessions/ (none of which have marks yet) -- the initially-spec'd
+0.5 mV transition threshold found zero transitions in one 272 s session;
+settled on 0.15 mV/1 s window/4 s min-segment after inspecting raw band-mean
+traces. The no-marks air/target classifier assumes the standard capture
+protocol (recording starts in air, before the first target) and anchors on
+the chronologically first detected run; a session-wide median-of-segment-
+medians was tried first and rejected as unreliable on real, sparsely-
+segmented captures. Verified against all 3 real sessions plus a synthetic
+marked session (marks path) and a deliberately profile-mismatched file
+(refusal path). Noted for the record: plateau_amp_mV in the existing
+PIMD_target_corpus_signatures.csv (e.g. 190.0 for steel pipe @5cm) is not
+reproducible as mean(|delta_mV|) over the 72 cells (that computes to ~16.6
+for the same row) -- this script implements the mean(|delta_mV|) definition
+as specified, so --append-ing new rows into the legacy corpus will mix two
+different plateau_amp_mV scales until that's reconciled. CLI takes one or
+more session CSVs plus --out/--append. Plain numpy + matplotlib only, no
+pandas, no csv module -- consistent with the rest of the repo. (2026-07-03)
+
+### src/pimd_knn_baseline.py — v1.0 — first classifiers for the signature corpus
+
+New offline analysis script (numpy/pandas/scikit-learn/matplotlib, no GUI):
+two classification tasks over `PIMD_target_corpus_signatures.csv` — (a)
+family classification (ferrous-rising / crossover / non-ferrous), (b)
+per-target ID (16 classes). Models compared: 1-NN with cosine distance on
+L2-normalized 72-cell shape vectors; multinomial logistic regression (L2,
+C=1) on the same features; and a 2-feature physics baseline for family
+(zero-crossing pulse width + band-8 sign). Validation is leave-one-distance-
+out (LODO) for both tasks, plus leave-one-target-out (LOTO) for family — an
+unseen-object test, never a random split (DESIGN/ML_FINDINGS convention:
+random splits overstate accuracy on this corpus size). Outputs confusion
+matrices and per-fold accuracy to `<output_dir>`. (2026-07-03)
+
+### src/pimd_pca_explore.py — v1.0 — PCA exploration of the signature corpus
+
+New offline analysis script (numpy/pandas/scikit-learn/matplotlib, no GUI):
+loads `PIMD_target_corpus_signatures.csv`, applies the audited exclusion
+policy (solder roll 260g dropped entirely — distance falloff only ~1.7x even
+after drift correction; SS shackle 62g keeps 5cm only; brass 370g drops
+15cm; SS disk 35g @15 and steel RHS 140g @15 kept but flagged low-confidence,
+late-session drift-heaviest stretch), builds L2-normalized 72-cell shape
+vectors, and runs PCA to produce: variance-explained scree plot + PC loading
+heatmaps in the 8x9 matrix layout (so components read like signatures);
+a PC1-PC2 scatter of all usable signatures coloured by family and sized by
+distance; and a check of the engineered zero-crossing pulse-width feature
+against PC1 score, to see whether blind statistics rediscover the bench-
+derived material parameter. (2026-07-03)
+
+### src/pimd_classviz.py — v1.19 — mark hotkey for session ground-truth timing
+
+While recording a session (Record Session), the only way to know which
+physical target was in front of the sensor at a given moment was to
+reverse-engineer it after the fact from the signal shape. Added a persistent
+"Mark label" text field (Stats tab) plus single-key hotkeys active during
+capture: `1`/`2`/`3` append `<label> @5`/`@10`/`@15` (cm) to the open session
+CSV as a `# mark: <iso-timestamp>, <text>` comment line; `0`/`Space` append
+literal `air` (ignores the label). Hotkeys are suppressed while any QLineEdit/
+QSpinBox/QDoubleSpinBox has focus (so normal typing is unaffected), are a
+no-op with a status-bar message if no session is recording, and a distance
+mark is skipped (with a message) if the label is empty. A small recent-marks
+readout (last 5) was added below the label field so the user can confirm a
+mark landed without opening the file. The write reuses the exact
+write()+flush() pattern already used for per-frame rows, on the same open
+file handle, so it can't stall the ~7.3 Hz frame-logging path. Purely
+additive to the CSV format — `#`-prefixed lines are already skipped by every
+existing parser; no change to colmap, profile_json, or per-frame columns.
+(2026-07-03)
+
 ### src/pimd_classviz.py — v1.18 — pad saved profile JSON floats to 3 d.p.
 
 Follow-up to v1.17: that fix made the Profile Builder's *display* and *editing*

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.18
+# PIMD Signature Visualiser (ClassViz) v1.19
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -16,6 +16,26 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.19 Session recording: '1'/'2'/'3' hotkeys mark the current Mark-label text
+#       @5/10/15 cm into the open session CSV as a '#'-prefixed comment line
+#       (# mark: <iso-ts>, <label> @<cm>); '0'/Space marks literal "air"
+#       (ignores the label field). New QLineEdit (le_mark_label) + hotkey hint
+#       + a small recent-marks QLabel (lbl_mark_log, last 5) added to the Stats
+#       tab. Hotkeys are a QApplication-wide eventFilter (installed on self in
+#       __init__) rather than a QMainWindow.keyPressEvent override — several
+#       widgets already consume 1/2/3/0/Space before they'd bubble to the top-
+#       level window (QTableWidget's default AnyKeyPressed edit trigger starts
+#       cell-editing on a digit keypress; QPushButton activates on Space) — the
+#       app-level filter runs first and can swallow the event to avoid those
+#       side effects. Hotkeys are suppressed whenever a QLineEdit/QSpinBox/
+#       QDoubleSpinBox has focus, and are a no-op (status bar message, no
+#       write) if no session is recording, or if a distance key is pressed
+#       with an empty label. New _append_mark() mirrors the existing
+#       _session_write_row()'s write()+flush() pattern exactly on the same
+#       open handle, so it can't stall the ~7.3 Hz frame-logging path (single-
+#       threaded Qt event loop, no locks, O(1) write). Purely additive to the
+#       CSV: '#'-prefixed lines are already skipped by every reader; colmap/
+#       profile_json/per-frame columns untouched.
 # v1.18 _save_profile_file() JSON output wasn't 3 d.p.: v1.17 fixed in-app display/
 #       editing to .3f, but json.dump() has no float-format hook (its C encoder
 #       calls float.__repr__ directly, so a float subclass with a custom __repr__
@@ -135,7 +155,7 @@ import numpy as np
 
 os.environ.setdefault('QT_API', 'pyqt6')
 
-from PyQt6.QtCore import QIODevice, QTimer, Qt  # noqa: E402
+from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
 from PyQt6.QtGui import QBrush, QColor  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
@@ -153,7 +173,7 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.18'
+APP_VERSION = '1.19'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -283,6 +303,8 @@ class MainWindow(QMainWindow):
         self._session_start_wall  = None   # time.time() at recording start (elapsed display)
         self._session_frame_count = 0
 
+        self._mark_log: deque = deque(maxlen=5)   # (iso_ts, text) tuples for the on-screen readout
+
         self._ch_glitch_buf: 'np.ndarray | None' = None  # shape (64, n_channels), circular
         self._ch_glitch_pos  = 0
 
@@ -292,6 +314,7 @@ class MainWindow(QMainWindow):
 
         self._setup_colormaps()
         self._build_ui()
+        QApplication.instance().installEventFilter(self)
         self._load_settings()
 
         self._redraw_timer = QTimer()
@@ -668,6 +691,21 @@ class MainWindow(QMainWindow):
 
         ctrl.addWidget(QLabel('All values in mV'))
         layout.addLayout(ctrl)
+
+        # Ground-truth mark hotkeys — logs timeline events into the open
+        # session CSV as it streams (see _on_mark_hotkey / _append_mark).
+        mark_row = QHBoxLayout()
+        mark_row.addWidget(QLabel('Mark label:'))
+        self.le_mark_label = QLineEdit()
+        self.le_mark_label.setPlaceholderText('e.g. spanner 270g')
+        mark_row.addWidget(self.le_mark_label, stretch=1)
+        mark_row.addWidget(QLabel('Hotkeys: 1/2/3=@5/10/15cm   0/Space=air'))
+        layout.addLayout(mark_row)
+
+        self.lbl_mark_log = QLabel('(no marks yet)')
+        self.lbl_mark_log.setWordWrap(True)
+        self.lbl_mark_log.setStyleSheet('font-family: monospace;')
+        layout.addWidget(self.lbl_mark_log)
 
         # Stats table: Band | Threshold | Delay µs | Latest mV | Mean mV | Std mV
         self.tbl_stats = QTableWidget(self._n_channels, 6)
@@ -1300,6 +1338,46 @@ class MainWindow(QMainWindow):
         self._session_start_wall = None
 
     # ------------------------------------------------------------------
+    # Ground-truth mark hotkeys
+    # ------------------------------------------------------------------
+    def _on_mark_hotkey(self, cm):
+        """Dispatch a mark hotkey. cm is 5/10/15 (distance mark) or None (air
+        mark, ignores the label field). No-op (status bar message only) if no
+        session is currently recording, or if a distance mark is requested
+        with an empty label."""
+        if not (self._recording and self._session_file):
+            self.statusBar().showMessage('Mark ignored — no session recording.')
+            return
+        if cm is None:
+            text = 'air'
+        else:
+            label = self.le_mark_label.text().strip()
+            if not label:
+                self.statusBar().showMessage('Mark ignored — enter a label first.')
+                return
+            text = '{0} @{1}'.format(label, cm)
+        self._append_mark(text)
+        self._update_mark_log_display()
+        self.statusBar().showMessage('Marked: {0}'.format(text), 3000)
+
+    def _append_mark(self, text):
+        """Append one '#'-prefixed ground-truth mark line to the currently-open
+        session CSV and flush immediately. Cheap, synchronous write+flush on the
+        already-open handle — same non-blocking pattern as _session_write_row().
+        Safe to call from a keyboard event handler: PyQt runs a single-threaded
+        event loop, so this only ever delays the *next* event by the cost of one
+        small write+flush, never the ~7.3 Hz frame-logging path (a separate
+        readyRead event, not re-entered by this call)."""
+        ts = datetime.fromtimestamp(time.time()).isoformat()
+        self._session_file.write('# mark: {0}, {1}\n'.format(ts, text))
+        self._session_file.flush()
+        self._mark_log.append((ts, text))
+
+    def _update_mark_log_display(self):
+        lines = ['{0}  {1}'.format(ts.split('T')[1][:12], text) for ts, text in self._mark_log]
+        self.lbl_mark_log.setText('\n'.join(lines) if lines else '(no marks yet)')
+
+    # ------------------------------------------------------------------
     # Redraw (30 Hz timer)
     # ------------------------------------------------------------------
     def _redraw(self):
@@ -1567,6 +1645,29 @@ class MainWindow(QMainWindow):
                 json.dump(s, f, indent=2)
         except OSError:
             pass
+
+    # ------------------------------------------------------------------
+    # Global key handling — mark hotkeys
+    # ------------------------------------------------------------------
+    def eventFilter(self, obj, event):
+        """App-wide filter (installed on the QApplication instance) so mark
+        hotkeys work regardless of focus, and can be swallowed before widgets
+        that already consume 1/2/3/0/Space (e.g. QTableWidget's default
+        AnyKeyPressed edit trigger, QPushButton's Space-to-click) act on them.
+        Suppressed whenever a text-entry widget has focus."""
+        if event.type() == QEvent.Type.KeyPress:
+            if isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox)):
+                return super().eventFilter(obj, event)
+            if event.isAutoRepeat():
+                return True   # swallow held-key repeats; don't spam marks
+            key = event.key()
+            if key in (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3):
+                self._on_mark_hotkey({Qt.Key.Key_1: 5, Qt.Key.Key_2: 10, Qt.Key.Key_3: 15}[key])
+                return True
+            if key in (Qt.Key.Key_0, Qt.Key.Key_Space):
+                self._on_mark_hotkey(None)
+                return True
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
     # Close

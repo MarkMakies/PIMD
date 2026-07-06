@@ -130,7 +130,7 @@ A32                            one 32-sample boxcar average (R record)
 
 This release is **Phase 2 — publish the work to date.** Active and planned work:
 
-- **Phase 3 — machine learning.** Use the 72-cell decay-space matrix for filtering, classification and (the stretch goal) ground discrimination. First milestone reached (July 2026): a locked, delay-calibrated operating profile and a 17-target labelled signature corpus recorded at three distances, with distance-invariance, cross-session repeatability and mixture linearity all verified in air. Next: targets in real soil.
+- **Phase 3 — machine learning.** Use the 72-cell decay-space matrix for filtering, classification and (the stretch goal) ground discrimination. First milestone reached (July 2026): a locked, delay-calibrated operating profile and a 17-target labelled signature corpus recorded at three distances, with distance-invariance, cross-session repeatability and mixture linearity all verified in air.
 - **Faster response.** Investigate reducing cell count and per-cell averaging for quicker frames — the corpus so far says different targets go redundant in *different* cells, so nothing is cut yet.
 - **Front-end revision** (TX switch + gate driver, as above), plus a scope measurement of TX coil current vs pulse width to settle whether the longest band is past the coil-current plateau.
 
