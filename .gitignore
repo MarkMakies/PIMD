@@ -10,6 +10,9 @@ __pycache__/
 MM-NOTES.md
 assets
 
+# ML chat-handover bundles (working docs, not repo source)
+ML/
+
 src/data/classviz_settings.json
 src/data/delaycal_settings.json
 src/data/gui_settings.json
