@@ -1,3 +1,32 @@
+### src/pimd_classviz.py — v1.31 — Analysis-tab signature captures hardened to pipeline rigor
+
+The first post-enclosure corpus test run (gui_signatures_20260713_212807.csv,
+7 captures) showed split-half SNR of only 5–7 on several targets while the
+best captures hit 10–20. The stats/baseline math is shared verbatim with
+`pimd_features.py`, so the gap was in window collection, where the GUI
+quick-capture skipped two robustness steps the session pipeline applies:
+frames were collected the instant a capture button was pressed (the pipeline
+trims `settle_s` = 2 s after every mark; the firmware's 32-deep rolling
+average ramps for ~10 s after a target change, and ramp inside a window
+inflates `splithalf_floor` directly since it compares first half vs second
+half), and the window took raw unfiltered frames (the 64-frame-median glitch
+mask was display-only; the pipeline drops flagged frames via
+`drop_flagged()`). Two additions: (1) a settledness gate — pressing a
+capture button now shows "Settling… X.XXX mV" and collection only opens once
+the mean per-channel rolling std (the Training tab's Settledness metric,
+window = the Stats tab's shared "Std dev N") drops to the new
+"Settle ≤ (mV)" spinbox threshold (default 1.0 mV, persisted as
+`sig_settle_mv`, raise to 50 to disable); (2) glitch-flagged frames are
+excluded during collection and the window keeps filling until N clean
+frames, with a status-bar warning if more than 20 % were skipped. Clicking
+the active capture button now cancels the capture (no cancel existed).
+Verified with an offscreen-Qt simulation: gate holds under 5 mV noise, opens
+at 0.3 mV, an injected 500 mV glitch frame is excluded while the window
+still reaches N clean frames, the >20 % warning fires, and cancel resets
+state. (2026-07-13)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-13

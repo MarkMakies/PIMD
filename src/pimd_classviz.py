@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.30
+# PIMD Signature Visualiser (ClassViz) v1.31
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -17,6 +17,25 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.31 Analysis-tab signature captures hardened to session-pipeline rigor.
+#       The quick-capture editor's air/target windows skipped two robustness
+#       steps pimd_features.py applies to recorded sessions, and post-enclosure
+#       test captures showed the cost (split-half SNR 5-7 on several targets):
+#       (1) NEW settledness gate -- pressing a capture button now enters a
+#       'Settling...' phase and collection only opens once the mean per-channel
+#       rolling std (same metric/window as the Training tab's Settledness and
+#       the Stats tab's "Std dev N") drops to the new "Settle <=(mV)" spinbox
+#       threshold (default 1.0 mV, persisted as sig_settle_mv). Mirrors the
+#       pipeline's settle_s mark trim: the firmware's 32-deep rolling average
+#       ramps for ~10 s after a target is placed/removed, and any ramp inside
+#       the window inflates splithalf_floor directly (first vs second half).
+#       (2) Glitch frames (the existing 64-frame-median >100 mV display mask,
+#       which captures previously ignored) are now excluded from collection --
+#       the window keeps filling until N clean frames; mirrors
+#       pimd_features.drop_flagged. Status-bar warning if >20% were skipped.
+#       Also: clicking the active capture button now cancels the capture
+#       (previously no cancel existed). Stats/baseline math unchanged --
+#       still pimd_features' own functions.
 # v1.30 Fixed a real-data investigation finding, not a code defect: a user
 #       report of the Analysis tab's 8-grid showing +-5-10mV swings in the
 #       9us/13us band panels while Band Mean vs Time showed only ~100uV
@@ -452,7 +471,7 @@ except ImportError:
 import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 
-APP_VERSION = '1.30'
+APP_VERSION = '1.31'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -657,6 +676,8 @@ class MainWindow(QMainWindow):
         self._sig_capturing    = False
         self._sig_capture_slot = None   # 'air_before' | 'target' | 'air_after'
         self._sig_capture_buf  = []     # list[(ts, raw_uV_ndarray)] while self._sig_capturing
+        self._sig_wait_settle  = False  # True between button press and settledness gate opening (v1.31)
+        self._sig_glitch_skipped = 0    # glitch frames excluded from the current window (v1.31)
         self._sig_air_before   = None   # {'t_seconds':(n,), 'frames_mV':(n,n_channels), 'n_frames':int}
         self._sig_air_after    = None   # same shape, optional
         self._sig_target       = None   # same shape
@@ -1736,6 +1757,20 @@ class MainWindow(QMainWindow):
         self.sp_sig_capture_n.setValue(self._sig_capture_n)
         row_b.addWidget(self.sp_sig_capture_n)
 
+        row_b.addWidget(QLabel('Settle ≤ (mV):'))
+        self.sp_sig_settle_mv = QDoubleSpinBox()
+        self.sp_sig_settle_mv.setRange(0.05, 50.0)
+        self.sp_sig_settle_mv.setDecimals(3)
+        self.sp_sig_settle_mv.setSingleStep(0.1)
+        self.sp_sig_settle_mv.setValue(1.0)
+        self.sp_sig_settle_mv.setToolTip(
+            'Settledness gate: after a capture button is pressed, collection only '
+            'starts once the mean per-channel rolling std dev (over the Stats tab\'s '
+            '"Std dev N" window — same metric as the Training tab\'s Settledness) is '
+            'at or below this, so target/air transitions and the firmware\'s ~10 s '
+            'rolling-average ramp can\'t enter the window. Raise to 50 to disable.')
+        row_b.addWidget(self.sp_sig_settle_mv)
+
         self.pb_sig_air_before = QPushButton(self._SIG_CAPTURE_LABELS['air_before'])
         self.pb_sig_air_before.clicked.connect(lambda: self._start_sig_capture('air_before'))
         row_b.addWidget(self.pb_sig_air_before)
@@ -2613,12 +2648,32 @@ class MainWindow(QMainWindow):
 
     def _start_sig_capture(self, slot):
         if self._sig_capturing:
+            # Clicking the active slot's button cancels its capture (v1.31);
+            # clicks on other slots are ignored while one is running.
+            if slot == self._sig_capture_slot:
+                self._cancel_sig_capture()
             return
-        self._sig_capture_n    = self.sp_sig_capture_n.value()
-        self._sig_capture_slot = slot
+        self._sig_capture_n      = self.sp_sig_capture_n.value()
+        self._sig_capture_slot   = slot
+        self._sig_capture_buf    = []
+        self._sig_capturing      = True
+        self._sig_wait_settle    = True   # settledness gate opens collection (v1.31)
+        self._sig_glitch_skipped = 0
+        btn = self._sig_capture_buttons[slot]
+        btn.setText('Settling…')
+        btn.setStyleSheet(self.MY_YELLOW)
+
+    def _cancel_sig_capture(self):
+        slot = self._sig_capture_slot
+        self._sig_capturing    = False
+        self._sig_wait_settle  = False
+        self._sig_capture_slot = None
         self._sig_capture_buf  = []
-        self._sig_capturing    = True
-        self._sig_capture_buttons[slot].setStyleSheet(self.MY_YELLOW)
+        if slot is not None:
+            btn = self._sig_capture_buttons[slot]
+            btn.setText(self._SIG_CAPTURE_LABELS[slot])
+            btn.setStyleSheet('')
+        self._update_sig_capture_gating()
 
     def _finalise_sig_capture(self):
         ts_arr  = np.array([ts for ts, _ in self._sig_capture_buf], dtype=float)
@@ -2637,6 +2692,11 @@ class MainWindow(QMainWindow):
         self._sig_capturing    = False
         self._sig_capture_slot = None
         self._sig_capture_buf  = []
+        if self._sig_glitch_skipped > 0.2 * self._sig_capture_n:
+            self.statusBar().showMessage(
+                '⚠ signature capture ({0}): {1} glitch frame(s) excluded while '
+                'filling the {2}-frame window — check for interference'.format(
+                    slot, self._sig_glitch_skipped, self._sig_capture_n))
         self._update_sig_readout()
         self._update_sig_capture_gating()
 
@@ -2709,6 +2769,7 @@ class MainWindow(QMainWindow):
         self.cb_sig_no_distance.setEnabled(has_file)
         self.sp_sig_distance.setEnabled(has_file and not self.cb_sig_no_distance.isChecked())
         self.sp_sig_capture_n.setEnabled(has_file)
+        self.sp_sig_settle_mv.setEnabled(has_file)
         self.pb_sig_air_before.setEnabled(has_file and not self._sig_capturing)
         self.pb_sig_target.setEnabled(has_file and not self._sig_capturing and self._sig_air_before is not None)
         self.pb_sig_air_after.setEnabled(has_file and not self._sig_capturing and self._sig_target is not None)
@@ -3113,12 +3174,32 @@ class MainWindow(QMainWindow):
         # Analysis tab signature capture -- independent of the baseline
         # capture above (self._capturing/_capture_buf stay Heatmap-tab-only).
         if self._sig_capturing:
-            self._sig_capture_buf.append((now, raw.copy()))
-            n = len(self._sig_capture_buf)
             btn = self._sig_capture_buttons[self._sig_capture_slot]
-            btn.setText('Capturing {0}/{1}…'.format(n, self._sig_capture_n))
-            if n >= self._sig_capture_n:
-                self._finalise_sig_capture()
+            if self._sig_wait_settle:
+                # Settledness gate (v1.31, mirrors pimd_features' settle trim):
+                # hold the window closed until the rolling std is below the
+                # threshold, so the firmware's 32-deep rolling-average ramp
+                # after a target change can't inflate splithalf_floor.
+                n_win  = self.sp_stats_window.value()
+                recent = list(self._rolling_buf)[-n_win:]
+                if len(recent) >= 2:
+                    mat = np.array([arr for _, arr in recent], dtype=float)
+                    settle_mv = float(mat.std(0).mean()) / 1000.0
+                    if settle_mv <= self.sp_sig_settle_mv.value():
+                        self._sig_wait_settle = False
+                    else:
+                        btn.setText('Settling… {0:.3f} mV'.format(settle_mv))
+            if not self._sig_wait_settle:
+                if glitch_mask.any():
+                    # mirrors pimd_features.drop_flagged: glitch frames never
+                    # enter a capture window; keep filling until N clean frames
+                    self._sig_glitch_skipped += 1
+                else:
+                    self._sig_capture_buf.append((now, raw.copy()))
+                n = len(self._sig_capture_buf)
+                btn.setText('Capturing {0}/{1}…'.format(n, self._sig_capture_n))
+                if n >= self._sig_capture_n:
+                    self._finalise_sig_capture()
 
         if self._continuous_log:
             raw_nxn = raw.reshape(self._n_bands, self._n_cells)
@@ -3731,6 +3812,7 @@ class MainWindow(QMainWindow):
             self.sp_strip_scale_manual.setValue(float(s.get('analysis_strip_scale_manual', 5.0)))
 
             self.sp_sig_capture_n.setValue(int(s.get('sig_capture_n', pimd_features.MIN_CENTRAL_FRAMES)))
+            self.sp_sig_settle_mv.setValue(float(s.get('sig_settle_mv', 1.0)))
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             self.resize(1100, 900)  # first run
 
@@ -3776,6 +3858,7 @@ class MainWindow(QMainWindow):
             'analysis_strip_scale_manual': self.sp_strip_scale_manual.value(),
 
             'sig_capture_n': self.sp_sig_capture_n.value(),
+            'sig_settle_mv': self.sp_sig_settle_mv.value(),
         }
         try:
             os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
