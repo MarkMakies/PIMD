@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 · **Firmware:** v4.23 · **PC tools:** gui v4.13 · classviz v1.16 · delaycal v1.19 · **Coil:** v4 · **Operating profile:** cal_72_air_v2 (locked 2026-07-03)
-**Last bench update:** 2026-07-03 (profile cal_72_air_v2 locked; first 7-target Mode 2 session analysed)
-**Doc rev:** 1.6 (2026-07-03) — consolidation pass: Mode 2 scan profile redesigned (geometric pulse ladder ×1.5, geometric amplitude thresholds ×0.766) and locked as cal_72_air_v2 (§10); 31.25 kHz identified as known-bad rep rate, band 2 moved to 25 kHz (§8, §17.5); decay measured non-exponential across sample window (§17.5); Mode 2 warm-up ≈ 5 min established (§3, §17.5); first 7-target session findings incl. steel-piece sign crossover and mixture superposition (§17.6); classviz v1.16 session-dump recorder (§15); coil-current-plateau open question added (§14). (Previous: 1.5 (2026-06-22) — renamed README.md → DESIGN.md; asset-path and inventory cleanup.) Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) · **Firmware:** v4.24 · **PC tools:** gui v4.13 · classviz v1.30 · delaycal v1.24 · **Coil:** v4 · **Operating profile:** cal_72_air_v3 (locked 2026-07-13)
+**Last bench update:** 2026-07-13 (shielded enclosure installed; fw v4.24 boundary-settling fix verified; cal_72_air_v3 locked)
+**Doc rev:** 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt. (Previous: 1.6 (2026-07-03) — cal_72_air_v2 locked; 31.25 kHz known-bad rate; non-exponential decay; Mode 2 warm-up; first 7-target session.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -31,6 +31,13 @@ operational: first metal-detection response 2026-06-16; CLASSIFY_EP (profile 4,
 was reworked June 2026 (§7). Remaining work is **refinement** (thermal drift, supply noise)
 and the ML/classification layer — not redesign.
 
+**Measurement epoch (2026-07-13):** the electronics were moved into a new **shielded
+enclosure**, and fw v4.24 changed Mode 2 boundary-settling timing. Together these void
+most previously measured quantitative values (noise floors, drift rates, delay tables,
+target-session numbers). §3 and §17.1–17.6 are retained as flagged history — re-measure
+before relying on any pre-2026-07-13 figure. The ML signature corpus is to be rebuilt on
+the new hardware state.
+
 ---
 
 ## 2. Operating principle
@@ -51,6 +58,12 @@ eddy currents weaken it).
 
 ## 3. Measured operating envelope — treat as ground truth
 
+> **Epoch note (2026-07-13):** every value below was measured **before** the shielded
+> enclosure and fw v4.24 (§1, §17.7). Treat as historical reference until re-measured;
+> one post-enclosure fact is already known — the settled top-of-decay reads
+> ~4.87–4.89 V on the heavy bands at short delays, so the delaycal signal-detect
+> ceiling must be set to **5.0 V** (a 4.9 V ceiling false-triggers the coarse hunt).
+
 - **Flyback** *(measured, 2026-06-16, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**,
   RX coil **−15 V to +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
 
@@ -68,7 +81,7 @@ eddy currents weaken it).
 - **Standard Operating Conditions (SoC)** *(established 2026-06-18)*: Mode 1 · 10.0 kHz /
   20.0 µs pulse / 10.0 µs sample delay / DS 256 · coil in air, no targets · 20 V bench
   supply · allow **4 min warm-up** from cold (expect ≈ 50 µV/s drop during warm-up; do not
-  take noise-floor readings before this point). Reference capture: `References/GUI-SteadyState.jpg`.
+  take noise-floor readings before this point). Reference capture: `References/GUI-steady-state-256-1024.jpg`.
 
 - **Mode 2 warm-up ≈ 5 min** *(established 2026-07-02/03)*: the profile duty is much heavier
   than Mode 1 SoC; run the profile in ClassViz until thermal drift settles before calibrating
@@ -231,6 +244,12 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   noisier than neighbouring bands, non-monotonic means). Moving the band to 25 kHz with the
   pulse unchanged restored normal behaviour (σ 0.02–0.10 mV) — the noise followed the rep
   rate, not the pulse/decay alignment. Mechanism unconfirmed; avoid 31.25 kHz in profiles.
+- **Mode 2 boundary settling is time-floored** *(fw v4.24, 2026-07-13)*: settling at each
+  band/energy boundary is `max(BOUNDARY_PRIME = 15 periods, ceil(SETTLE_FLOOR_US = 3000 µs
+  / period))`. The earlier period-only budget under-settled high-frequency bands (25 kHz:
+  600 µs, 20 kHz: 750 µs vs the ~1 ms+ the band-to-band energy-step transient needs) —
+  root cause of the first-heatmap-column noise, bench-verified fixed (§17.7). Sweep cost
+  ≈ +12 ms on the 72-cell profile (~289 → ~301 ms refresh).
 - **SPI map:** SPI0 raw (SCKB GPIO2 / SDOB GPIO0 / BUSY GPIO15); SPI1 filtered (SCKA GPIO10 /
   SDOA GPIO8 / DRL GPIO9); SEL0 = GPIO12.
 
@@ -272,21 +291,30 @@ profile, so any future ML classifier is trained per profile and the table is the
 firmware↔ML contract. **Frames from different profile geometries must never be mixed in
 one dataset.**
 
-### Operating profile — `cal_72_air_v2` (locked 2026-07-03)
+### Operating profile — `cal_72_air_v3` (locked 2026-07-13)
 
 8 bands × 9 delays = 72 cells, **averages 32** per cell (raw floor ≈ 1400 µV / √32 ≈ 250 µV),
-raw path (SDOB). Design principles, established 2026-07-02/03:
+raw path (SDOB). Calibrated post-enclosure with fw v4.24 (delaycal export
+`cal_20260713_210057`, renamed). Design principles:
 
 - **Pulse widths geometric ×≈1.5** (6 → 100 µs). Pulse width is a target-time-constant-selective
   excitation axis; constant-ratio spacing gives equal discrimination information per band and
-  removes the near-duplicate bands of the earlier even-spread guesses.
+  removes the near-duplicate bands of the earlier even-spread guesses. (Unchanged from v2.)
 - **Frequencies from the CLEAN_FREQS 125 MHz-divisor list**, chosen to hold duty near 30 %
   (22.5–31.25 %) so per-band heating stays roughly even. Duty absorbs the grid quantisation;
-  the pulse ladder is kept exact.
-- **Sample thresholds geometric ×0.766** from a 4.2 V anchor to a 0.5 V floor (amplitude-anchored
-  delays, snapped to the 8 ns PWM grid by `pimd_delaycal.py`). The anchor was moved down from
-  4.8 → 4.5 → 4.2 V: near the ~4.7 V clamp rail the curve is flattest and the top column was
-  consistently the noisiest; 4.2 V restored normal column σ at negligible dynamic-range cost.
+  the pulse ladder is kept exact. (Unchanged from v2.)
+- **Sample thresholds top-dense (reverse-geometric): 4.9 / 4.8 / 4.7 / 4.4 / 4.2 / 3.8 /
+  2.4 / 1.5 / 0.5 V** (amplitude-anchored delays, snapped to the 8 ns PWM grid by
+  `pimd_delaycal.py`). Replaces v2's ×0.766 ladder from a 4.2 V anchor: the
+  early-decay/high-voltage region carries the most discrimination information and became
+  usable once the fw v4.24 settling fix removed the first-column noise (v2's 4.2 V anchor
+  was working around what turned out to be a firmware settling artifact plus a bounded bad
+  zone, not an inherent top-of-curve problem). Targets deliberately straddle the measured
+  **~4.45–4.65 V noise keep-out zone** (§17.7; mechanism unknown, §14) — 4.7 above it,
+  4.4 below it.
+- **Supersedes `cal_72_air_v2`** (locked 2026-07-03, ×0.766 thresholds from 4.2 V — see
+  `PROFILE_cal_72_air_v2.md`). Frames are **not comparable** across the two (different
+  threshold geometry, different hardware epoch; the profile is the firmware↔ML contract).
 
 | Band | Freq (kHz) | Pulse (µs) | Duty | Band share of sweep |
 |---|---|---|---|---|
@@ -299,11 +327,11 @@ raw path (SDOB). Design principles, established 2026-07-02/03:
 | 7 | 4.0 | 67.20 | 26.9 % | 24.9 % |
 | 8 | 3.125 | 100.00 | 31.25 % | 31.9 % |
 
-Full-sweep refresh ≈ 289 ms; observed W-record stream ≈ 7.3 Hz. Band 2 runs 25 kHz, not the
-duty-rule 31.25 kHz — see §8 known-bad rate. Bands 7+8 consume ~57 % of acquisition time and
-are retained deliberately: target data (§17.6) shows ferrous targets and copper still rising
-steeply at the top of the ladder. Full delay table lives in the profile JSON
-(`src/data/profiles/`) and the lock-in note `PROFILE_cal_72_air_v2.md`.
+Full-sweep refresh ≈ 301 ms with fw v4.24's time-floored boundary settling (was ≈ 289 ms).
+Band 2 runs 25 kHz, not the duty-rule 31.25 kHz — see §8 known-bad rate. Bands 7+8 consume
+~57 % of acquisition time and are retained deliberately: target data (§17.6, historical)
+showed ferrous targets and copper still rising steeply at the top of the ladder. Full delay
+table lives in the profile JSON (`src/data/profiles/cal_72_air_v3.json`).
 
 ---
 
@@ -338,22 +366,26 @@ flash raises the noise floor ~10×.
 
 ## 13. What makes this design unusual (deliberate, validated choices)
 
-- Sampling the **0.5 V – 4.2 V** band of the flyback decay rather than the usual bottom ~700 mV —
-  found to carry more discrimination information and sit well above the noise floor. (Top anchor
-  originally 4.8 V, stepped down to 4.2 V for clamp-rail margin — see §10.)
-- **Geometric scan geometry on both axes** — pulse widths ×1.5, sample thresholds ×0.766 —
-  so every band and every cell interrogates a distinct, evenly spaced slice of log target-τ
-  and log decay amplitude respectively (§10). Amplitude-anchored delays make the matrix
-  self-normalising across bands.
+- Sampling the **0.5 V – 4.9 V** band of the flyback decay rather than the usual bottom ~700 mV —
+  found to carry more discrimination information and sit well above the noise floor. The
+  early-decay top of that range (4.7–4.9 V) is sampled densely, avoiding only the measured
+  ~4.45–4.65 V noise zone — see §10.
+- **Geometric pulse ladder (×1.5) + top-dense amplitude thresholds** — every band
+  interrogates a distinct, evenly spaced slice of log target-τ; the threshold ladder is
+  densest where the decay carries the most information (§10). Amplitude-anchored delays
+  make the matrix self-normalising across bands.
 
 ---
 
 ## 14. Open problems
 
 1. **Thermal drift.** Wider pulses heat the TX damping/gate resistors; the drive circuit
-   drifts and the sensitive RX side drifts with it.
-2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path ~50 % noisier than USB; unresolved.
+   drifts and the sensitive RX side drifts with it. *(Pre-enclosure numbers — re-measure,
+   the enclosure may have changed thermal behaviour.)*
+2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path ~50 % noisier than USB;
+   unresolved. *(Re-measure post-enclosure — shielding may have changed the picture.)*
 3. **General supply noise floor** (battery vs USB, flash penalty — partially mitigated).
+   *(Re-measure post-enclosure.)*
 4. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET
    duty note (see §17) — Q1 (IRF610) is being pushed past its noted SOA; a higher-rated
    replacement FET is probably warranted.
@@ -362,11 +394,17 @@ flash raises the noise floor ~10×.
    ladder, the 67.2 → 100 µs band-to-band clip-release increment is the smallest on the
    ladder — consistent with coil current flattening (τ_coil = L/R never measured). Needs a
    scope on coil current vs pulse width. Bears on whether the 100 µs band justifies its
-   ~32 % share of frame time and its thermal cost — though target data (§17.6) shows band 8
-   still carries real long-τ information.
-7. **Copper-vs-brass class separation.** Normalized-signature distance between copper pipe
-   and brass block is only ~2.7× the repeat-measurement floor (§17.6) — the hardest pair for
-   the ML phase; may need more SNR, more frames, or may not matter in the field.
+   ~32 % share of frame time and its thermal cost — though target data (§17.6, historical)
+   showed band 8 still carrying real long-τ information.
+7. **Threshold noise zone ~4.45–4.65 V — mechanism unknown.** A fine threshold sweep
+   (4.700 → 4.400 V, 37.5 mV steps) shows column σ elevated across roughly 4.45–4.65 V in
+   nearly every band (up to ~2.2 mV) while both ends are clean (§17.7). Values above
+   (4.7–4.9) and below (≤ 4.4) behave normally, so the zone is excluded from target lists
+   (§10) — but why that band of the decay is noisy is not understood.
+8. **Post-enclosure re-measurement backlog.** Noise floors, drift rates, the settled
+   top-of-decay level (~4.87–4.89 V observed on heavy bands — bears on the delaycal
+   signal-detect ceiling, now 5.0 V), and the §17.4 delay-zone map all predate the
+   enclosure and need redoing on the new hardware state.
 
 ---
 
@@ -374,12 +412,14 @@ flash raises the noise floor ~10×.
 
 | File | Role |
 |------|------|
-| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.23**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23) |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.24**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23); time-floored Mode 2 boundary settling, SETTLE_FLOOR_US 3000 (v4.24) |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
-| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.16**) — real-time heatmap (bands sorted delay-descending), stats table, ML CSV logger, profile builder tab, 64-frame glitch filter, frame recording, settings persistence; **session-dump recorder** (v1.16): self-describing per-session CSV to `src/data/sessions/` — header embeds full profile JSON + per-column map + notes; one row per raw W frame (pre-filter, µV), flagged column |
-| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.19**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); profile export/import; thermal monitoring; auto-nudge (parallel or sequential); activity log; settings persistence |
-| `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.30**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Training Session tab** (guided, marked capture runs); **Analysis tab** (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale); **Std Dev (rolling N) heatmap mode** (live noise monitor); live rate/burst readout; settings persistence |
+| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.24**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); 3-d.p. voltage headers; profile export/import; thermal monitoring; zigzag auto-nudge (parallel or sequential) with ceiling latch + lock-on-pass; activity log; settings persistence. **Operational note:** signal-detect ceiling must be 5.0 V post-enclosure (§3 epoch note) |
+| `src/pimd_features.py` | Session-CSV → training-corpus feature extractor (**v5**, offline CLI). Corpus pipeline tool — previous-epoch corpus findings dropped; to be re-run on post-enclosure captures |
+| `src/pimd_corpus_check.py` | Corpus-level acceptance checks (**v1.3**, offline CLI) — companion gate for `pimd_features.py` output |
+| `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` (sliders/QLineEdit fixed to match code, 2026-07-02) |
 | `References/schematic-v604.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
 | `References/scope-baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs 
 | `References/GUI-target-example.jpg` | App baseline, Mode 1 v4.07, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
@@ -434,6 +474,10 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 
 ## 17. Test log / observations (curated)
 
+> **Epoch banner (2026-07-13):** §17.1–17.6 predate the shielded enclosure and fw v4.24
+> (§17.7). They are kept as history — the methods and qualitative findings stand, but
+> every quantitative value must be re-measured before reuse.
+
 Per-entry: **date · fw/hw rev · one-line summary**, grouped by subject. Detailed changelogs
 stay in source-file headers. This log is curated — it is refreshed from `CHANGELOG.md` at each
 consolidation pass. When an observation **supersedes** an envelope value (§3), the envelope is
@@ -459,15 +503,16 @@ updated in place with a dated note and the raw observation is recorded in `CHANG
 from cold — expect ≈ 50 µV/s drop during this period. Do not take noise-floor readings
 as representative before the 4-minute mark.
 
-Reference capture: `References/GUI-SteadyState.jpg` — first half of plot at DS 256,
+Reference capture: `References/GUI-steady-state-256-1024.jpg` — first half of plot at DS 256,
 second half (after DS Factor toggle) at DS 1024. Shows the settled noise floor and slow
 thermal drift; this is the trace future comparisons should be checked against.
 
 ### 17.3 Mode 2 — profile streaming
 
-Acquisition bugs resolved in fw v4.20–v4.23 (boundary settling, cell-misattribution read/write
-ordering, IRQ critical section around BUSY+SPI). Mode 2 streaming is functionally stable.
-Active development is now in the tooling layer (`pimd_classviz.py`, `pimd_delaycal.py`).
+Acquisition bugs resolved in fw v4.20–v4.24 (boundary settling — made time-floored in
+v4.24, §8/§17.7; cell-misattribution read/write ordering; IRQ critical section around
+BUSY+SPI). Mode 2 streaming is functionally stable. Active development is now in the
+tooling layer (`pimd_classviz.py`, `pimd_delaycal.py`).
 
 ### 17.4 Delay calibration sweep
 
@@ -548,8 +593,40 @@ air floor. Key findings:
   the threshold axis breaks the tie (crossover target's decay-shape rises ~3× vs ~1.8× for
   the true mix) — an argument for keeping the full 72-cell matrix.
 - **Shape-space distances** (normalized signatures): spoon repeat-approach floor 0.028;
-  spoon↔copper 0.178, spoon↔brass 0.111, copper↔brass **0.077** (hardest pair, §14.7).
+  spoon↔copper 0.178, spoon↔brass 0.111, copper↔brass **0.077** (hardest pair).
   Spanner and gal-pipe shapes are near-identical (cosine 1.00), differing in amplitude only.
+
+### 17.7 Enclosure, settling fix & threshold-zone mapping — epoch reset
+
+*2026-07-13 · fw v4.24 · delaycal v1.24 · classviz v1.30 · new shielded enclosure*
+
+- **Shielded enclosure installed.** The electronics now live in a new shielded enclosure.
+  Combined with the fw v4.24 acquisition-timing change, this **voids most previous
+  quantitative findings** — noise floors, drift rates, the §17.4 delay-zone map, and all
+  previous-epoch target/corpus data (dropped from this document; the ML corpus will be
+  rebuilt). §17.1–17.6 are retained as flagged history.
+- **First-column noise root-caused and fixed.** The first cell of each band was noisy
+  regardless of calibrated voltages, wandering on a seconds timescale. Cause: boundary
+  settling was 15 PWM *periods* (period-scaled), giving 25/20 kHz bands only 600/750 µs
+  against the ~1 ms+ the band-to-band energy-step transient needs; band 1's first cell
+  escaped by accident because the ms-scale W-record print at loop index 0 donated extra
+  settling every sweep. The ±1-period jitter in effective settle count became telegraph
+  noise, smeared into seconds-scale wander by the 32-deep (~9.2 s) rolling average.
+  fw v4.24 floors settling at SETTLE_FLOOR_US = 3 ms per boundary (§8) — bench-verified:
+  first-column σ normalised, wander gone. Sweep refresh ≈ 289 → ~301 ms.
+- **Threshold noise zone mapped: ~4.45–4.65 V.** Fine sweep 4.700 → 4.400 V in 37.5 mV
+  steps, all 8 bands: endpoints clean (mostly ≤ 0.5 mV σ), interior 4.625–4.513 V columns
+  elevated in nearly every band (up to 2.24 mV at 30 µs / 4.588 V). 4.7/4.8/4.9 V and
+  ≤ 4.4 V both perform well — v2's "top column noisiest" story is reinterpreted: its
+  4.5 V anchor sat inside this zone, and the rest was the settling artifact. The
+  early-decay region is informative and now sampled densely (top-dense ladder, §10).
+  Mechanism unknown (§14.7).
+- **Post-enclosure top-of-decay ≈ 4.87–4.89 V** on heavy bands at short delays — below a
+  4.9 V delaycal signal-detect ceiling, which made the coarse hunt false-trigger on its
+  first step and fill start-delay values into the table. **Operational fix: ceiling =
+  5.0 V** (no code change; §3 epoch note, §15 delaycal row).
+- **cal_72_air_v3 locked** (§10): same band plan as v2, thresholds moved to the top-dense
+  ladder 4.9/4.8/4.7/4.4/4.2/3.8/2.4/1.5/0.5 V straddling the keep-out zone.
 
 ## 18. Change Log Consolidation Pass.
 

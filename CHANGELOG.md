@@ -1,3 +1,7 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-07-13
+
 ### Bench observations — 2026-07-13 — fw v4.24 verified; noisy threshold zone is ~4.45–4.65 V, not the whole top of the range
 
 fw v4.24's time-floored boundary settling is confirmed on hardware: the
@@ -58,6 +62,309 @@ consumed by the up-to-320 µs band-8 MCLK wait inside read_raw_sample) gets
 refresh). No wire-format, PWM-slice, or profile changes. (2026-07-13)
 
 ---
+
+### src/pimd_delaycal.py — v1.24 — Auto Nudge: down-only search past the signal-detect ceiling
+
+Auto Nudge's zigzag search (v1.20) could keep alternating +offset/-offset
+attempts even after a nudge pushed a channel's monitored voltage up to the
+signal-detect ceiling (sp_signal_v, default 4.9 V — the same threshold used
+by the coarse hunt, v1.15, to mean "no real signal present"). Once mean_v on
+a channel reaches that ceiling, further +offset nudges just walk deeper into
+no-signal territory, so it's a wasted (and potentially misleading) attempt.
+New `_auto_check_ceiling(ch, mean_v)` latches a per-channel
+`_auto_ceiling_flat` flag the first time this happens, and `_auto_nudge_channel()`
+now checks that flag: once set, it drops the alternating sign and forces all
+subsequent nudges for that channel to `-1` (down), with the magnitude
+(`_auto_down_mult_flat`) continuing to grow by one nudge-step each attempt
+from wherever the zigzag left off — no repeats, no jumps. Wired into both
+evaluators (`_auto_evaluate_channel` for Sequential mode,
+`_auto_evaluate_parallel` for Parallel mode). (2026-07-13)
+
+---
+
+### src/pimd_classviz.py — v1.30 — Fix: noisy reference cell contaminating whole-band normalize
+
+User reported the Analysis tab's 8-grid (Per Pulse Width Cell Profiles)
+showing ±5-10mV swings concentrated in the 9µs/13µs band panels, while Band
+Mean vs Time showed only ~100µV of oscillation over the same period —
+suspected as a bug. Investigation (code tracing, then 3 live screenshots
+taken ~1 minute apart) found the data pipeline, reshape, and band/cell
+ordering all correct; the swings traced to one genuinely noisy channel —
+band=9µs, cell=0 (shortest delay / highest threshold) — independently
+confirmed as the single highest-std-dev cell in the entire 8×9 grid via the
+v1.28 Std Dev heatmap mode. That same cell is the literal subtraction
+reference for `_normalize_group()`'s "Auto (− first element)" mode, shared
+by the strip/chart2/8-grid/9-grid charts — so that one cell's frame-to-frame
+jitter was being imposed at full strength onto every other point in its
+group, producing the "whole curve translates as a block" pattern the user
+correctly identified as diagnostic. Not a software defect — normalization
+was doing exactly what it was built to do, against a genuinely noisy
+reference — but worth hardening: `_normalize_group()`'s Auto mode now
+subtracts the group's own mean instead of its first element, diluting one
+outlier's contribution by ~1/group-size (verified: a 3.0mV reference-cell
+jump between two frames now only moves its bandmates by ~0.33mV, down from
+the full 3.0mV before) while still auto-zeroing each curve for at-a-glance
+comparison. One shared `@staticmethod` fixes all four live-data consumers
+plus the signature template-overlay path (same helper) in a single edit;
+renamed the four "Auto (− first sample/point/cell/band)" checkbox labels to
+"Auto (− group mean)" to match. No settings-persistence keys changed.
+
+### src/pimd_classviz.py — v1.29 — Analysis heatmap colorbar legend + interactive range
+
+Added a horizontal `pg.ColorBarItem` legend below the Analysis tab heatmap's
+x-axis (via `setImageItem(insert_in=analysis_plot)`), answering "match value
+with colour" — and, since the user asked for something that also lets them
+set a threshold, made it double as an interactive range control: dragging
+its handles sets the image's levels directly. This slots into the existing
+Auto/Manual scale convention already used throughout the Analysis tab — the
+Auto branch still recomputes and drives both the image and the bar every
+redraw tick as before, but the Manual branch now leaves levels alone
+(`autoLevels=False`) so a drag, or a typed value in the pre-existing
+manual-range spinbox, survives across ticks instead of being stomped ~30x/
+sec; a new `sigLevelsChanged` handler mirrors a drag back into the spinbox
+and `_analysis_hm_manual_range_uv` so both stay consistent and the chosen
+range persists across a settings save. Along the way, worked around a
+pyqtgraph 0.14 quirk: `ColorBarItem.setImageItem()` calls the image's
+`setLevels()` before it has any data, which pyqtgraph defers
+(`ImageItem._defferedLevels`) and replays at the end of the *next*
+`setImage()` call — silently clobbering the first real frame's computed
+levels back to the colorbar's construction-time placeholder. A throwaway
+zero-filled `setImage()` immediately after linking flushes that deferred
+replay before any real data arrives, so the first live frame renders with
+correct levels instead of a one-tick flash of the wrong scale.
+
+### src/pimd_classviz.py — v1.28 — Heatmap Std Dev display mode + live throughput readout
+
+Two additions. (1) A "Std Dev (rolling N)" display mode, added alongside the
+existing Δ deviation/Z normalised/RAW abs modes on both the main Heatmap tab
+and the Analysis tab's decoupled heatmap variant — shows each cell's
+raw-signal std dev over the last N samples as a live noise/jitter monitor,
+independent of any baseline capture. N is the Stats tab's existing "Std dev
+N" spinbox (`sp_stats_window`), now documented as shared via tooltip rather
+than duplicating a second N control; a new `_compute_rolling_stddev_nxn()`
+reuses `_update_stats_table`'s exact rolling-window computation so the
+heatmap and stats-table std dev always agree for the same N. Rendered with
+the same sequential colormap and 0…max autoscale convention as RAW mode.
+(2) A top-bar "Rate: X.X Hz (Y cells/s)" readout, visible on every tab
+regardless of which is active, recomputed once/sec from an exact
+frames-received-in-the-last-second delta (not a smoothed average, so a
+stall reads as 0 Hz immediately instead of decaying into view) — added to
+answer whether Mode 2 streaming is actually running at its ~100 Hz nominal
+rate or has stalled somewhere. `read_from_serial()` now also counts how
+many complete lines it drains in a single `readyRead` callback; a burst
+of more than 3 (the GUI briefly falling behind the incoming stream between
+events, with lines queuing up in Qt's internal serial buffer) appends a
+"⚠ burst×N" warning to the readout instead of that backlog going unnoticed.
+
+### src/pimd_classviz.py — v1.27 — Analysis tab: left-column grouping + 3-row right side
+
+Cosmetic-only regrouping of the Analysis tab, no data/logic changes. The
+Controls and Signatures boxes used to span the full tab width above
+everything else; they now stack with the Heatmap group in one resizable
+left column sharing the heatmap's width (reusing the existing `main_split`
+`QSplitter`, previously the heatmap was its sole left-pane widget). That
+frees the right side to start at the top of the tab and reorganizes its 4
+stacked chart rows into 3: row 1 is a new nested horizontal `QSplitter`
+holding "Band Mean vs Time" and "Pulse Width Mean" side by side (previously
+2 separate stacked rows), rows 2/3 stay the unchanged 8-grid/9-grid.
+Several rows in the narrower Signatures box (files, capture-inputs,
+readout-save, session) and the two row-1 chart control rows (strip,
+chart2 — now roughly half their old width) were wider than the columns
+they'd land in; Qt's per-row minimum-content-width would otherwise refuse
+to let the splitter shrink that far, so each of those rows was split onto
+two stacked sub-rows to make the width reduction real instead of blocked.
+
+### src/pimd_classviz.py — v1.26 — Analysis tab: settings persistence + in-GUI signature editor
+
+Two additions. (1) All ~20 existing per-group Auto/Manual normalize+scale
+controls (plus Avg N frames and the new signature capture-N) now persist to
+`classviz_settings.json` and reload on launch, matching the convention
+already used by `pimd_classify.py`/`pimd_delaycal.py` and this file's own
+Heatmap-tab controls — the Analysis tab was the one place in the app that
+still reset to defaults every restart. (2) An in-GUI signature file editor,
+as a faster interactive alternative to the existing Record Session →
+`pimd_features.py` CLI pipeline: "New file…"/"Open for editing…" make a
+corpus CSV the active editable target (the existing read-only "Load
+signatures…" stays browse-only — a loaded reference corpus and an active
+editable file now coexist in one list, both overlay-able, since comparing a
+new capture against an already-loaded reference was the point); "Capture Air
+(before)"/"Capture Target"/"Capture Air (after)" capture a live N-frame
+window into each of 3 slots (air-after optional — with only air-before, the
+baseline flat-extrapolates, the same single-anchor fallback
+`pimd_features.py` itself already has); "Save Signature" reuses
+`pimd_features.Plateau`/`central_frames`/`compute_plateau_stats`/
+`quality_flags`/`build_rows` verbatim to compute a real
+`plateau_amp_mV`/`splithalf_floor`/`quality` from that live window, linearly
+interpolating between the air anchors by timestamp like the CLI's own
+thermal-drift correction — over a live 1-2 point window instead of a whole
+recorded session's air visits, a real rigor trade-off flagged to the user
+rather than presented as equivalent. "Delete Selected" only allows deleting
+from the active editable file, by literal on-disk
+`(session,target,distance_cm)` string match (not
+`pimd_corpus_check.load_long()`'s `dist_key()`, which lossily casts distance
+to `int`). Repeat target+distance saves in the same file auto-suffix
+`(rpt)`/`(rpt3)` matching `pimd_features.segment_from_marks()`'s convention.
+New files default into a new `data/corpora/` dir; GUI-captured signatures get
+a `gui_YYYYMMDD_HHMMSS` session-id stamp so they're distinguishable from the
+CLI pipeline's `session_...` stamp in any future audit. The signature list
+now shows amp/SNR/quality per row (previously read from the file and
+silently discarded) and shrank to a compact scrollable list to make room for
+the new controls. Also added a peer alternate path — Session:
+Start/Pause/Stop/Mark — recording a full raw session CSV byte-identical to
+the Training Session tab's own output, for later conversion through
+`pimd_features.py` exactly as today, driven from the Analysis tab's live
+charts instead of the separate guided-list workflow; reuses
+`_session_start`/`_session_write_row`/`_session_stop`/`_append_mark`/
+`self._recording`/`self._training_paused` verbatim, so only one of the three
+recording entry points (Stats tab, Training Session tab, Analysis tab) can
+be active at a time. (2026-07-12)
+
+### src/pimd_classviz.py — v1.25 — Analysis tab: relayout, single averaged strip, chart-2 controls
+
+More bench feedback on the Analysis tab: (1) "Band Mean vs Time" moved above
+"Pulse Width Mean" in the right-hand column and collapsed from two strips
+(highest/lowest pulse width) to one showing the whole matrix's average
+delta_mV vs time, with its own Auto/Manual normalize + Auto/Manual scale
+controls and a Reset time button, matching the other chart groups — its
+corpus overlay is now one reference line (the template's overall average)
+instead of two per-band lines. (2) "Pulse Width Mean" (chart 2) gained the
+same Auto/Manual normalize+scale controls as the two grids — previously
+always auto-normalized with no manual override. (3) The 5 chart areas
+(heatmap + the 4 in the right column) now fill all remaining vertical space
+under the Controls box, no separate bottom section. (4) Renames: "Per-Band
+Cell Profiles" → "Per Pulse Width Cell Profiles", "Per-Cell Band Profiles" →
+"Sample Delay Band Profiles", "Band Mean vs Pulse Width" → "Pulse Width
+Mean". (5) 8-grid's first panel no longer shows an x-axis title; 8-grid/
+9-grid's first panel and chart 2 no longer show a y-axis label ("norm.") —
+ticks still render, just without the title text repeated across 3 adjacent
+charts. (6) Fixed 3 leftover "Auto (÷ first ...)" checkbox labels still
+describing v1.23's divide/ratio convention after v1.24 switched the actual
+math to subtract/offset — now "Auto (− first ...)". (7) Tightened layout
+margins/spacing throughout the tab to reduce whitespace given the added
+chart area. (2026-07-12)
+
+### src/pimd_classviz.py — v1.24 — Analysis tab: per-group controls, bordered chart areas, Y-lock fix
+
+Bench feedback on the new v1.23 Analysis tab, six changes: (1) the single
+global "Normalize to first point" checkbox is replaced with independent
+Auto/Manual normalize + Auto/Manual scale controls for each of the
+heatmap/8-grid/9-grid chart groups. Per a follow-up clarification, "normalize
+to first point" means an **offset** (first value → 0, rest referenced to it),
+not the ratio/divide-by-first-point convention used elsewhere in this repo —
+Auto subtracts each curve's own first point, Manual subtracts one shared,
+user-entered reference value instead so the comparison scale doesn't drift
+as the live first point moves. The heatmap's own Normalize control decouples
+it from the main Heatmap tab's Δ/Z/raw display mode instead of always
+mirroring it. (2) Every chart area is now a titled, bordered `QGroupBox`
+with its controls inside that same box. (3) The two bottom strips' Reset
+buttons are merged into one. (4) 8-grid's x-axis now shows each cell's
+delay_us averaged across all bands (1 d.p.) instead of threshold_v; 9-grid's
+per-panel titles show that same cell's delay_us *range* across bands
+(matching the heatmap's threshold sub-label format) instead of threshold_v —
+the two grids now surface different identifying dimensions instead of both
+duplicating volts. (5) 8-grid/9-grid Y axes are locked to the first panel in
+that row: tried pyqtgraph's `setYLink` first, but `ViewBox.linkedViewChanged()`
+aligns ranges by on-screen pixel geometry rather than copying identical
+numeric bounds — a scripted check showed genuinely different ranges across
+same-size side-by-side panels — so replaced it with an explicit
+`_lock_group_yaxis()` that copies panel 0's resulting range (auto-fit or
+manual ±) onto every sibling panel every redraw tick; verified to match
+exactly (both modes) in an offscreen-Qt re-test. (6) Fixed "Load signatures…"
+opening a completely blank window — the native GTK/portal file dialog
+doesn't render in this environment; added
+`options=QFileDialog.Option.DontUseNativeDialog` to use Qt's own dialog
+widget instead. (2026-07-12)
+
+### src/pimd_classviz.py — v1.23 — new Analysis tab: real-time comparison charts + corpus overlay
+
+New fourth tab, laid out to fill an ultrawide display with many small
+pyqtgraph charts fed from the same live acquisition state the Heatmap tab
+already maintains (no new serial/acquisition code): a heatmap variant
+(y-axis renamed 'Pulse Width', integer µs, frequency dropped; x-axis stays
+'Threshold' in volts at 2 d.p., with each column's delay_us range across all
+8 bands added as a second tick-label line, since delay_us -- unlike
+threshold_v -- isn't constant per column across bands, confirmed against
+cal_72_air_v2.json); a normalized band-mean-vs-pulse-width curve; two
+small-multiple grids (one panel per band showing its 9-cell profile, one
+panel per cell showing its 8-band profile, each normalized to its first
+point) decomposing the heatmap along each axis; two independently-resettable
+band-mean-vs-time strips (highest/lowest pulse width); and a corpus-signature
+overlay (Load signatures… button, reuses `pimd_corpus_check.load_corpus()`,
+checkable per-target list, one colour per template) drawn on every chart
+except the heatmap, skipped with a status-bar note rather than crashing if a
+template's channel count doesn't match the live profile (DESIGN §11 — never
+mix profile geometries). New `self._pulse_sort_order`/`_pulse_us_sorted`
+(added to `_set_profile_dims()`) order all of these charts by pulse_us
+ascending rather than assuming raw profile/channel order is already
+pulse-ascending — the live default CLASSIFY_EP profile's band order is
+actually pulse-*descending* (40→5µs), so that assumption would have silently
+mis-ordered every one of these charts under the profile ClassViz connects
+with by default. `_update_heatmap()` now also feeds a second heatmap image
+(`self.analysis_img`) whenever it exists, from the exact same matrix/levels/
+colormap already computed for the main Heatmap tab, so the two heatmaps
+can't drift apart. New `_style_compact()` helper (small tick font, minimal
+padding, optional small title) applied to all ~20 new plots, and axes hidden
+on all but the leftmost panel of each small-multiple row, so the many panels
+fit one screen. Verified end-to-end with a scripted offscreen-Qt run:
+injected synthetic frames, switched to the `cal_72_air_v2` profile, captured
+a baseline, confirmed chart 2 / both grids / both strips populate correctly
+and the reset buttons work independently, then loaded the real
+`PIMD_target_corpus_signatures_v2.csv` (44 signatures) and confirmed overlay
+curves/lines draw on check and clear on uncheck. (2026-07-12)
+
+### src/pimd_classify.py — v1.2 — configurable strip charts, per-delay normalized mode
+
+The 4 lower strip charts are now independently configurable instead of
+fixed to amp/continuum/cosine/baseline-band-8: each gets a mode combo
+(module-level `STRIP_MODES`) and a band combo (shown only when the mode
+needs one). The previous fixed content (amp, continuum, top-1 cosine,
+baseline band-8) is preserved as the default selection for slots 1-4
+respectively, generalized so any band can be picked, not just the last one.
+Two new modes: "Band mean (mV)" (a chosen band's mean signal delta over
+time -- the same quantity as one point on the existing snapshot band-mean
+chart, now trackable over time) and "Per-delay normalized (9 cells)" (that
+band's 9 individual cell readings, each divided by its own first sample so
+all 9 curves start at 1.0 and separate as the session progresses -- shows
+which delay cell drifts/responds most/least). Per-delay reads raw
+(pre-baseline) per-cell values, not delta: delta's first sample is always
+exactly 0 by construction (`BaselineTracker.bootstrap()` sets the baseline
+to that very first frame), which would make "normalize to first entry"
+degenerate -- discovered and fixed by scripted verification before
+shipping (first sample would print 0.0 instead of 1.0 for every cell).
+Slot mode/band selections persist to `classify_settings.json`
+(`strip_modes`/`strip_bands`, -1 == last band). Verified end-to-end via a
+scripted offscreen-Qt replay of `session_20260707_143723.csv`: all 6 modes
+render correct data, per-delay-normalized curves all start at 1.0, and
+switching a slot back to a single-curve mode correctly clears its other 8
+curves. (2026-07-11)
+
+### src/pimd_classify.py — v1.1 — heatmap range/axes, band-chart ticks, event log fix
+
+Four fixes/additions from bench feedback on the Classify GUI: (1) added a
+±mV range spinbox + Autoscale checkbox for the signature heatmap, mirroring
+the existing band-mean chart's range control (persisted to
+`classify_settings.json` as `heatmap_range_mV`/`heatmap_autoscale`,
+defaulting to autoscale on so behaviour is unchanged unless the operator
+turns it off). (2) Heatmap axes now show real values/labels instead of bare
+pixel indices — bottom axis "Threshold" ticked with each cell's `threshold_v`
+(4.2V…0.5V for cal_72_air_v2), left axis "Band" ticked with each band's
+`freq_hz`/`pulse_us`, reusing the exact convention `pimd_classviz.py`'s
+`_rebuild_heatmap_axes()` already established. (3) Band-mean chart's
+log-scale x-axis now ticks only the profile's actual pulse widths (e.g.
+6.0, 9.0, 13.44… µs) instead of generic log-decade ticks. (4) Fixed the
+Event Log tab only ever populating the first row correctly, with every
+event after it landing with blank cells in later columns — root cause was
+`QTableWidget.setSortingEnabled(True)` re-sorting the table mid-way through
+a new row's per-column `setItem()` calls (triggered once any column sort
+was active, e.g. after the operator clicks a header), so later `setItem()`
+calls landed on whichever row the resort moved into that row index instead
+of the row being built. Reproduced in isolation (sort by column 1, append
+rows one at a time -> later columns land on an already-populated row,
+leaving the new row blank) and confirmed the fix (disable sorting for the
+duration of each row's insert+populate, re-enable after) eliminates it.
+Verified end-to-end via a scripted offscreen-Qt replay of
+`session_20260707_143723.csv`: all 6 events now populate every column
+correctly. (2026-07-11)
 
 ### src/pimd_knn_baseline.py — v1.1 — fix crash when output dir doesn't exist
 
@@ -398,7 +705,394 @@ frame — previously computed and discarded, now surfaced instead of the
 frame being dropped). Button text and status bar show frame count + elapsed
 time while recording. (2026-07-02)
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+### src/pimd_classviz.py — v1.20 — replace Profile Builder tab with top-bar Load & Run
+
+Removed the editable Profile Builder tab (`_build_profile_tab` and its band-table
+editor/validation/save machinery — `_populate_profile_editor`, `_read_profile_from_editor`,
+`_validate_profile_editor`, `_on_add_band_row`/`_on_remove_band_row`,
+`_on_save_profile_file[_as]`/`_save_current_editor_as`, plus module-level
+`_save_profile_file`/`_pad_json_floats`, now dead since `pimd_delaycal.py` already owns
+profile authoring/saving independently). In its place, the top bar (above the tabs) now
+has a "Saved profile:" `QComboBox` (populated from `data/profiles/*.json` via the existing
+`_list_profile_files`/`_load_profile_file`) and a single "Load && Run" button
+(`_on_load_run_profile`) that loads the selected file, sends it as a dynamic RAM-only
+profile (`E`/D-command/`Q<DYNAMIC_PROFILE_INDEX>`/`G`), and calls `_apply_profile` —
+collapsing the old two-step Load-then-Send&Run flow into one action, since there's no
+longer an in-app editing step in between. `_build_d_command` is unchanged and reused as-is.
+Editing a profile's bands/delays/thresholds is now delaycal-only. (2026-07-07)
+
+### src/pimd_classviz.py — v1.21 — Training Session tab for guided corpus capture
+
+Added a "Training Session" tab (index 2) to replace the ad hoc Stats-tab mark hotkeys
+(`1`/`2`/`3`/`0`/Space, hardcoded to 5/10/15cm) with a proper guided-capture workflow for
+building an ML signature corpus. A 5-column table (Index/Target/Distance(cm)/Time-at-
+Target/Settledness; Index and the two live columns are read-only, Target/Distance are
+double-click-editable) lets the operator build an ordered list of targets/distances (default
+single row: `air`/`0`). Start/Pause/Stop buttons plus a Space-bar step-advance drive the
+capture: Start opens a session (reusing `_toggle_record_frames`/`_session_start` verbatim,
+same as the existing Record Session button) and immediately writes the first row's
+`# mark: <iso-ts>, <text>` line (reusing `_append_mark` verbatim); each Space press writes
+the next row's mark and advances, so every row's mark lands at the *start* of its own dwell
+window (`pimd_features.py`'s `segment_from_marks` needs this — a mark written on *leaving* a
+target would silently lose that target's own dwell data). Mark text is the literal `air`
+(no `@` suffix — exact-match requirement of the downstream parser's `is_air` check) when
+Target is "air", else `<target> @<distance>`. Pressing Space on the last row auto-finalizes
+and saves the session (the explicit "ensure session is saved" requirement) by toggling the
+same `pb_record` checkbox the Stats tab's Record Session button uses. Pause freezes the
+Time-at-Target column and gates `process_packet`'s frame-row write (`and not
+self._training_paused`) so a pause doesn't attribute movement-artifact frames to the current
+target's plateau, while Settledness (rolling per-channel std over a tunable frame window,
+same statistic `_update_stats_table` already uses, aggregated to one mV number) keeps
+updating live so the operator can watch the signal restabilize before resuming. Validation
+(green ✓/red ✗ label) requires every row have a non-empty target and numeric distance, and
+at least one row's target be exactly "air" (case-insensitive) — a hard requirement of
+`pimd_features.py`, which skips any session with zero air marks entirely.
+
+Target lists are independently saveable/loadable as reusable templates
+(`data/training_lists/*.json`, mirrors the existing Saved-profile pattern:
+`_list_training_list_files`/`_load_training_list_file`/`_save_training_list_file`) — Save
+does not require an "air" row (a template is just a shape; the air-row rule is about a
+session being valid for the extractor, checked at Start).
+
+`_session_stop()` now centrally resets the Training tab's UI state (`_reset_training_ui`)
+whenever a training session was active, regardless of which of its three call sites
+triggered the stop (the Stats-tab toggle, `_apply_profile`'s force-stop on a profile change,
+`start_stop`'s force-stop on serial disconnect) — a single source of truth instead of
+duplicating the reset at each site, so a profile switch or disconnect mid-training-session
+can't leave the tab stuck showing "started" with a closed file underneath it.
+
+Also: merged the top bar's separate "Saved profile" row into the same row as
+Port/Connect/Start (one row instead of two), and removed the Stats tab's manual mark UI
+(`le_mark_label`, `lbl_mark_log`, `_on_mark_hotkey`, `_update_mark_log_display`, `_mark_log`
+deque) now that the Training Session tab's Space-bar workflow replaces it — `eventFilter`'s
+Space dispatch is repurposed to `_on_training_space()` (the `1`/`2`/`3`/`0` dispatch is
+removed outright; new `QAbstractItemView` import for the table's `DoubleClicked`-only edit
+trigger, chosen specifically so a table-focused Space keypress can never enter cell-edit
+mode). (2026-07-07)
+
+### src/pimd_features.py — v3 — fix parser dropping every marked session (0 rows)
+
+`parse_session_file()`'s single pass flipped `header_done = True` on the first non-`#`
+line (the CSV data-header row) and never checked for a leading `#` again afterward. But
+`# mark: ...` lines are written live as the operator advances targets mid-recording
+(`pimd_classviz.py`'s hotkey feature since v1.19, and its Training Session tab since
+v1.21), so in any real session they land interspersed among data rows, not batched before
+the first one. Every mark after the first data row was therefore comma-split as if it were
+a data row and crashed on `int(' air')` / `int(' copper pipe @5')`, causing the whole
+session to be `[SKIP]`ped with 0 rows written and no hard error — surfaced when a user ran
+the tool against the first real Training-Session-tab-recorded session
+(`session_20260707_125642.csv`) and got a header-only output file. Fixed by recognizing
+and parsing `#`-prefixed mark lines in the post-header data-row branch too (new shared
+`_parse_mark_content()` helper used by both the pre- and post-header branches, so they
+can't drift apart). Verified against that session (13 marks, 9 non-air plateaus × 72
+channels = 648 rows, correct target/distance breakdown) and against all pre-existing
+no-marks sessions (no regression). This bug predates the file's v1 and had never been
+exercised against a genuinely marked session before now. (2026-07-07)
+
+### src/pimd_corpus_check.py — v1.0 — corpus-level acceptance checks
+
+Brought over from the separate `pca-explore-fix` worktree/branch (commits `0038810`,
+`e4ed27a`, both 2026-07-04), where it was originally authored — not a new change, just
+merging it onto `main`. New script (Stage 1 of `ML/PIMD_v2_acceptance_checklist.md`). Runs
+six checks against one or two corpus CSVs (long format like
+`assets/PIMD_target_corpus_signatures.csv`, or the wide `c00..c71` format, auto-detected):
+shape distance-invariance (cosine 5v10/5v15 per capture, plus a per-corpus pass count),
+split-half SNR per signature, canary-session consistency (`CANARY-START`/`CANARY-END`
+target rows), repeat consistency (targets marked `(rpt)` or `REPEAT`, matched to their base
+capture by name — falls back to a first-word + shared-weight-token match since real corpus
+naming isn't always a clean suffix strip, e.g. "brass block 370g (rpt)" vs "brass 370g"),
+distance falloff (log-log power fit over 5/10/15 cm plus an explicit solder 5cm/15cm
+contamination ratio), and cross-campaign 5cm shape repeatability (only when two corpora are
+given). Everything prints as one flat table (check, metric, value, pass band, PASS/FAIL/SKIP);
+exits nonzero on any FAIL so it can gate a capture day. Re-verified on `main` against
+`assets/PIMD_target_corpus_signatures.csv`: 128 checks, 109 PASS/18 FAIL/1 SKIP, reproducing
+the same figures as the original run (e.g. solder's 1.21x 5→15cm amplitude ratio) — no path
+or behavior differences between the two branches. Plain numpy/pandas only. (2026-07-07)
+
+### src/requirements.txt — add pandas, scikit-learn, matplotlib
+
+Also brought over from the same worktree/branch (commit `0038810`, 2026-07-04).
+`pimd_pca_explore.py`, `pimd_knn_baseline.py`, and now `pimd_corpus_check.py` import
+`pandas`/`sklearn`/`matplotlib`, but `src/requirements.txt` never listed them on `main` —
+`pip install -r src/requirements.txt` in a clean venv would leave all three scripts failing
+on the first import. (2026-07-07)
+
+### src/pimd_features.py — v4 — auto-suffix repeat visits within a session
+
+A guided Training Session run can legitimately revisit the same target/distance more than
+once in one session (e.g. running a saved target list twice to check repeatability), but
+`segment_from_marks()` gave every plateau's target label only `(session, target,
+distance_cm)` as its identity in the output corpus. A second visit to, say, "copper pipe"
+@5cm therefore had the exact same identity as the first, and any groupby-style corpus tool
+would silently merge the two into one 144-cell group instead of two distinct 72-cell
+captures. Surfaced by `pimd_corpus_check.py`'s `load_corpus()` correctly refusing a real
+two-visit session (`session_20260707_125642.csv`: "copper pipe" visited twice, "steel
+spanner" once) with "mixed cell counts across rows [72, 144] — refusing to mix profile
+geometries (DESIGN §11)" — that guard was doing its job; the underlying data was genuinely
+ambiguous, not a false positive. Fixed: repeat visits within a session are now auto-suffixed
+`(rpt)` for the 2nd visit, `(rpt3)`/`(rpt4)`/... beyond that — `(rpt)` for the 2nd visit
+matches the pre-existing hand-corpus naming convention `pimd_corpus_check.py`'s repeat-
+consistency check already looks for, so the common two-visit case needs no other tool
+changes. Verified: re-running against that session now gives three distinct 72-row groups
+(`copper pipe` / `copper pipe (rpt)` / `steel spanner`) and `pimd_corpus_check.py`'s
+repeat-consistency check correctly compares the repeat against its base capture at all 3
+distances instead of crashing. (2026-07-07)
+
+### src/pimd_corpus_check.py — v1.1 — recognize numbered repeat suffixes
+
+Companion to the `pimd_features.py` v4 fix above: widened `REPEAT_MARK_RE` from `\(rpt\)`
+to `\(rpt\d*\)` so `(rpt3)`, `(rpt4)`, etc. (3rd+ same-session repeat visits) are also
+recognized by the repeat-consistency check, not just a bare `(rpt)` for the 2nd visit.
+(2026-07-07)
+
+### src/pimd_corpus_check.py — v1.2 — remove solder-specific falloff sub-check
+
+Removed the solder-specific 5cm/15cm amplitude-ratio sub-check from check 5
+(distance falloff): it always printed a row — PASS/FAIL when a "solder"-named
+target was present, else an uninformative "n/a (no solder target)" SKIP on
+every other corpus — which read as clutter on any corpus not built around
+that specific canary. The general per-target falloff fit (n exponent, worst
+fit/measured ratio) is unaffected and still runs for every target regardless
+of name, solder included — verified against `assets/PIMD_target_corpus_signatures.csv`
+(128 → 127 checks, 18 → 17 FAIL, exactly the one removed row; "solder roll
+260g"'s own falloff-fit rows unchanged). Removed `SOLDER_FALLOFF_MIN` along
+with it. (2026-07-07)
+
+### src/pimd_classviz.py — v1.22 — clear stale columns + auto-derive session notes
+
+Two Training Session tab fixes. First: pressing Start no longer leaves the previous run's
+Time-at-Target/Settledness values sitting in rows the new run hasn't reached yet — new
+`_clear_training_live_columns()` resets every row's Time and Settledness cells to `—`
+before the run begins (`_reset_training_ui()` on stop/finalize cleared the button/table
+*enablement* state but never touched these cell values, so a re-run of the same saved list
+showed stale numbers until the operator physically stepped past each row again). Second:
+Start no longer pops up the interactive "Session notes" `QInputDialog` — there's nothing to
+type that isn't already in the table, so notes are now auto-derived from the run list itself
+(new `_build_training_notes()`: "Training Session run list:" followed by one "N. target
+@distancecm" line per row) and passed straight through a new optional `notes` parameter on
+`_session_start()` (still prompts interactively when called with `notes=None`, unchanged for
+the plain Stats-tab "Record Session" button, which has no run list to derive anything from).
+Since `_session_start()` is now called directly rather than triggered indirectly via
+`pb_record.setChecked(True)`, the checkbox's checked state is synced afterward through
+`blockSignals` so a later click still reads as "stop" rather than double-firing
+`_session_start()`. Verified headlessly: `QInputDialog.getMultiLineText` is never invoked
+during a Training start, the auto-derived notes lines land correctly in the session CSV's
+`# session_notes:` header, and a row not yet reached in a fresh run shows `—`/`—` rather than
+a previous run's leftover values. (2026-07-07)
+
+### src/pimd_features.py — v5 — plateau_amp_mV restored to v1 L2-norm convention
+
+`plateau_amp_mV` was emitting `mean(|delta_mV|)` per cell while the v1 hand-built corpus
+and the canary-strength unit definition (1 unit ≡ copper pipe 120g @10cm ≡ 45 mV L2) use
+the L2 norm of the 72-cell drift-corrected delta vector — the same column name, two
+different quantities, ~9x apart (measured: copper pipe 120g @5cm read 4.96 here vs. 113.7
+(L2) in the v1 corpus, a ~23x apparent gap — only ~9x of which was this bug; the remaining
+~2.3–3x is a separate, already-known, out-of-scope bench-geometry difference between the
+v1/v2 setups). This corrupted any cross-campaign amplitude comparison and the canary-unit
+definition. Restored the L2 convention; `splithalf_floor` changed to match (L2 norm of the
+split-half-median difference vector, still halved) so floor/amp stays a meaningful,
+consistent fraction for the noisy-quality gate. The old `mean(|delta_mV|)` quantity is
+still useful, so it's kept — appended as a new `amp_mean_abs_mV` column at the end of both
+the long and wide row schemas (existing readers that select columns by name are
+unaffected). Documented in a comment block above `compute_plateau_stats()` and in
+`wide_header_lines()`'s `# columns:` comment.
+
+Checked `pimd_corpus_check.py` for absolute-mV thresholds assuming the old convention: none
+exist — every amplitude-adjacent check is ratio- or cosine-based, so no threshold values
+needed changing; no code edit made there. Verified against `session_20260707_134922.csv`
+(regenerated corpus, before/after this fix): all 29 `pimd_corpus_check.py` verdicts
+(PASS/FAIL/SKIP) are identical before vs. after. Flagging honestly: not all the underlying
+ratio *values* are identical — SNR (amp/splithalf), the falloff n-exponent, and repeat
+amp-ratios shifted somewhat (e.g. copper pipe @5cm SNR: 67.0 → 34.5, still comfortably
+above the 10.0 gate), because L2 norm and mean-abs aren't exactly proportional between two
+*different* vectors (amp's delta_mV vs splithalf's half-difference vector, or the same
+target's vector at a different distance) — only cosine-similarity checks and same-vector
+ratios are exactly convention-invariant; these particular ratios are empirically
+verdict-stable on this dataset, not mathematically guaranteed to stay so on all future data.
+
+One row, before → after (`session_20260707_134922, copper pipe, 5cm`):
+```
+before: ...,delta_mV=-7.105,plateau_amp_mV=4.957, splithalf_floor=0.074,quality=ok,amp_mean_abs_mV=4.957
+after:  ...,delta_mV=-7.105,plateau_amp_mV=49.503,splithalf_floor=1.436,quality=ok,amp_mean_abs_mV=4.957
+```
+(2026-07-07)
+
+### campaign — C2 — rig change declared
+
+The bench rig changed since the v1 campaign (builder-confirmed, 2026-07-07). Per the
+never-mix-geometries principle (DESIGN §10), captures made on the new rig start a new
+campaign: campaign 2 (rig 2). Measured consequences, from `session_20260707_134922` and
+`session_20260707_143723`: absolute amplitudes ~2.3× below v1 at nominal distances, falloff
+exponents 1.0–1.15 vs v1's 1.3–1.6, uniformly across all targets; and extended targets
+(spanner, cast iron trivet, galvanized pipe) show a real, repeatable @5cm shape change
+(cos(5,15) 0.936–0.969) while cos(10,15) stays high, absent from v1 at the same nominal
+distances (compact copper unaffected, cos(5,15) 0.990). Consequence: v1-derived absolute
+constants (F1's 12/17 statistic, F9's falloff exponents, the 45 mV canary-unit constant,
+acceptance-checklist row 1.6) are rig-1 facts, not predictions for rig 2 — retired as such,
+detailed in `ML/V2/ML_FINDINGS.md` F11. The v1 corpus itself is untouched and remains valid
+for rig 1. The physical question of *what* changed on the rig is declared, not diagnosed —
+out of scope here. (2026-07-07)
+
+### src/pimd_corpus_check.py — v1.3 — campaign 2 support: canary pairing, cross-session repeat, near-field AMBER, --baseline gating
+
+Four changes, all driven by the campaign 2 (rig change) declaration above. **(A)** Fixed
+`check_canary()`: it matched target names by bare exact-match against `{"CANARY-START",
+"CANARY-END"}`, so real canary rows named `"copper pipe CANARY-START"`/`"copper pipe
+CANARY-END"` (`train-s1.csv`) were invisible to it ("0 pairs found") even though the SNR
+check already proved both were captured. Now matches by suffix (new `strip_canary_suffix()`
+helper, replaces `CANARY_LABELS`) so any `"<base> CANARY-START"`/`"<base> CANARY-END"` pairs
+correctly, and adds a `drift status` row per pair reporting protocol v2's drift-flag
+criterion (either the shape-cos or amp-ratio check failing ⇒ session drift-flagged, 15cm
+rows downgraded — `pimd_features.py`'s quality column handles the actual downgrade, this
+just reports). Canary rows are now also excluded from `check_shape_invariance()` and
+`check_falloff()` (5cm-only; would otherwise pollute per-target checks). **(B)** New
+`check_repeat_cross_session()`: the same target+distance captured in two different sessions
+(e.g. a capture plan revisiting "copper pipe" in session s1 and again in s4) now gets its
+own shape-cos/amp-ratio repeat-consistency rows labelled with both session IDs — additional
+to, and independent of, the existing within-session `(rpt)` handling (unchanged). **(C)**
+`check_shape_invariance()` adds a `cos(10v15)` row per target. Extended objects genuinely
+change shape at 5cm on this rig while agreeing at 10/15cm — physics, not capture error — so
+`cos(5,15) < 0.97` but `cos(10,15) >= 0.97` now verdicts `AMBER (near-field @5, extended
+target?)` instead of `FAIL`; both low is still `FAIL`. The `cos(5,15)` roll-up is now
+report-only; a new `cos(10,15)` roll-up is the real per-corpus gate. AMBER is tracked
+alongside PASS/FAIL/SKIP in the summary line and never contributes to the exit code.
+**(D)** Cross-campaign comparison is now gated behind an explicit `--baseline <corpus_csv>`
+argument (replaces the old ambiguous positional 2nd-corpus-file convention — only the
+primary corpus gets the full acceptance suite). No baseline (default): one SKIP row,
+"cross-campaign checks skipped (campaign 2; no rig-1 baseline applicable)". With one:
+results are labelled "(informational, cross-rig)" and excluded from the exit-code gate — a
+different rig/campaign is a reference point, not a same-rig acceptance criterion. Checked
+for absolute-mV thresholds elsewhere in this file assuming the old `plateau_amp_mV`
+mean-abs convention (per `pimd_features.py` v5): none exist, every amplitude-adjacent check
+here is already ratio- or cosine-based.
+
+Verified against `train-s1.csv` (`session_20260707_143723`): canary shape-cos=0.9983/amp
+ratio=0.952 now report real values (previously invisible/SKIPped); spanner/trivet/galvanized
+`cos(5,15)` FAILs correctly flip to AMBER (their `cos(10,15)` = 0.9887/0.9863/0.9963, all
+≥ 0.97); copper pipe/SNR/falloff rows are byte-for-byte identical to the pre-this-change run
+(diffed directly against a saved copy of the prior file version); `--baseline
+PIMD_target_corpus_signatures_v1.csv` runs without error (0 common 5cm target names — v1
+uses weight-suffixed names like "copper pipe 120g", a naming-convention mismatch between
+corpora, not a code defect; fixing that fuzzy-matching is out of scope here). (2026-07-07)
+
+### ML/V2/ML_FINDINGS.md — v1.1 — F11: rig change declared, v1 constants retired
+
+Added F11 (see the "campaign — C2" entry above for the full context): the v2 capture rig
+differs from v1's, uniformly across all targets in amplitude, falloff exponent, and a
+repeatable extended-target near-field shape change at 5cm. Retires v1's absolute-constant
+predictions (F1's 12/17 statistic, F9's exponents, the 45 mV canary-unit constant,
+acceptance-checklist row 1.6) as rig-1 facts, not rig-2 predictions — v1's corpus and
+shape/ratio findings are untouched and remain valid for rig 1. Canary strength unit
+redefined on rig 2: 1 unit ≡ copper pipe @10cm = 26.123 mV (`plateau_amp_mV`, L2 convention,
+`train-s1.csv`). (2026-07-07)
+
+### src/pimd_v2_findings.py — v1.0 — replaces pimd_knn_baseline.py / pimd_pca_explore.py
+
+`pimd_v2_findings.py` is the reproduction script for `ML_Findings_v2.md` — every number in
+findings F12-F21 is printed by this script from the campaign-2 corpus alone, closing the
+"open gaps" pattern flagged in `ML_FINDINGS.md` v1.0 (open gap 3: "v2 comparison run").
+Removed `src/pimd_knn_baseline.py` (v1.1, LODO/LOTO 1-NN and logistic-regression baseline
+classifiers) and `src/pimd_pca_explore.py` (v1.0, PCA scree/loading/PC1-PC2 exploration) —
+both were v1-corpus-specific one-off analysis scripts superseded by this single script's
+campaign-2 reproduction of the same PCA/classification-adjacent findings plus the new F12-F21
+material; keeping the old scripts around next to a v1-only corpus they were written against
+would be dead weight. Neither file was imported by anything else in the repo (verified: no
+other reference across `*.py`/`*.md` outside their own headers and their own historical
+`CHANGELOG.md` entries above, which are left untouched as history). (2026-07-07)
+
+### src/pimd_classify.py — v1.0 — new PyQt6 live/replay Mode 2 signature classifier
+
+New tool, fourth in the gui/classviz/delaycal/classify family: classifies Mode 2 frames from
+either a live serial port or a recorded ClassViz session CSV through one shared, Qt-free
+pipeline (`Engine.process_frame`), so replay and live are provably the same code path — a
+`--headless <session.csv>` CLI mode runs the identical `Engine` with zero PyQt6/pyqtgraph
+import at runtime, for CI/no-hardware testing. Implements the two-stage architecture from
+`ML_Findings_v2.md`'s "Consequences for pimd_classify" section: Stage A is a causal EMA air
+baseline (F2) feeding an amplitude-hysteresis + min-duration event state machine; Stage B1 is
+`pimd_v2_findings.py`'s continuum rule (F13/F16, reused verbatim — not reimplemented) reporting
+family + the ladder-clamped continuum value; Stage B2 is 1-NN cosine against the corpus usable
+set (SNR≥10 gate, F12), reporting margin in repeat-floor units (0.0062, F15) with pile-level
+fallback below 2× floor and open-set "unknown object" reject above 8× floor (K, F15/F17).
+Canary rows are folded into their base target name in the identity pool (design decision,
+flagged for review — canaries are the same physical object and F20 shows high repeatability,
+so folding adds real samples rather than discarding them). Reuses rather than reimplements:
+`pimd_features.py`'s session parser (marks-anywhere-safe, the v3 fix), profile-geometry guard
+(DESIGN §11), and wide-format signature writer (feeds "Dump signatures" straight back into
+`pimd_corpus_check.py`); `pimd_corpus_check.py`'s corpus loader, cosine primitive, and
+canary-suffix stripper; `pimd_v2_findings.py`'s band-mean/crossing/continuum functions.
+
+Verification: `--headless` replay of all four 2026-07-07 sessions gives 6/6/5/5 (all-events)
+family-correctness against `pimd_v2_findings.FAM3` (verification-only, never consulted by the
+live classifier itself, which stays a physics rule with no fixed target list) — a perfect
+score. Event counts (6, 6, 6, 4) match each session's real object-visit groups; the amplitude
+hysteresis correctly merges a single visit's 5/10/15cm distance changes into one event (the
+target is never fully removed between distances) rather than splitting per mark, which is the
+physically correct behaviour for a threshold detector, not a segmentation bug. Tuned
+`enter_amp_mV`/`exit_amp_mV`/`min_duration_s`/`exit_debounce_s` empirically against these four
+sessions (no spec-given seed values existed for these, unlike the floor/K/canary/SNR-gate
+constants) — found and fixed a baseline-staleness interaction during tuning: the EMA baseline
+freezes while non-air, so thermal drift accumulated during a long detection run must not
+exceed the exit threshold or the detector can never register a genuine return to air; the
+final defaults (enter=6.0, exit=4.0 mV, min_duration=0.5s, exit_debounce=0.3s) clear this
+session set's measured air-noise floor (~1.2-2mV) and drift-during-typical-dwell margin.
+Confirmed via a LODO-style sweep across the whole corpus that with only 26-34 usable rows
+across ~10 objects, individual-row 1-NN margins are frequently thin project-wide (top-1 label
+is correct roughly half the time per row-level LODO, matching the ballpark of F17's own
+pooled 58%; comfortable 2×-floor margins are rare) — the "identified" bucket firing rarely in
+favour of the deliberately conservative "pile-level" fallback is the open-set safety margin
+working as designed against a still-small corpus, not a classifier bug; documented rather than
+loosened, since forcing more "identified" verdicts would risk overconfident misclassification.
+Confirmed `--speed` (a headless test aid that sleeps between `process_frame()` calls without
+touching the timestamps fed to the pipeline) produces byte-identical event logs, proving
+replay speed cannot change a decision. Confirmed "Dump signatures" output round-trips cleanly
+through `pimd_corpus_check.sniff_format`/`load_wide`. Confirmed a hand-edited mismatched
+profile is cleanly refused (exit code 2, no traceback) in headless mode. GUI smoke-tested
+under `QT_QPA_PLATFORM=offscreen`: full session load + frame-by-frame replay + all three
+exports + Settings dialog + seek-driven engine rebuild, all exception-free; caught and fixed a
+real crash found this way (`_redraw()`'s "current frame" heatmap branch read a placeholder
+zero-vector expression that blew up with a reshape error before the engine had processed its
+first frame — now tracks the actual last-computed per-frame delta and guards the no-frame-yet
+case). Live-serial and interactive visual correctness were not (and cannot be) exercised here
+and still need a human bench test — the code is structured so the session-replay path already
+exercises the entire pipeline above the frame-source adapter. (2026-07-11)
+
+Live-hardware bench test surfaced two real bugs the offscreen smoke test couldn't reach.
+(1) `_on_start_live_clicked` sent a bare `Q<n>`/`G` against a placeholder profile index instead
+of loading cal_72_air_v2 onto the board first -- cal_72_air_v2 is not one of the board's
+compiled static profiles (those are the 45-channel CLASSIFY_EP family), so a bare `Q<n>` either
+selected the wrong, already-active (lighter-duty) profile or nothing at all. Measured effect:
+~50mA supply draw instead of cal_72_air_v2's expected ~200mA, and every incoming `W` frame
+silently dropped because its profile index never matched the placeholder. Fixed by adding
+`build_d_command()`/`DYNAMIC_PROFILE_INDEX=5` (ported verbatim from `pimd_classviz.py`'s
+`_build_d_command`/`_on_load_run_profile`) and a new `LiveFrameSource.load_and_start(profile)`
+that sends the same `E` / `D<cmd>` / `Q5` / `G` sequence ClassViz's "Load and Run" uses --
+pushing the profile as a RAM-only dynamic profile (no flash writes, DESIGN §11) rather than
+guessing at a pre-existing static index. (2) The Start button never reflected running state
+(stayed yellow/"Start" regardless) and firmware `V`/`L` responses were parsed and then silently
+discarded (`line_received` had no connected slot) -- made it checkable with proper
+Running/green ↔ Start/yellow toggling and wired `line_received` to surface raw board responses
+on the status bar, since there was previously no live feedback at all that the board was
+talking back. (2026-07-11)
+
+The D-command fix alone did not resolve a live bench report of unchanged (low) supply current
+and no data reaching the GUI, and no exception was raised, so the fault sits somewhere between
+"bytes never leave the PC" and "bytes arrive but never make it to a rendered frame" with no
+visibility into which. Added counter-based diagnostics rather than guessing further:
+`LiveFrameSource` now counts every raw line received, every `W`-prefixed line seen, and splits
+non-matches by cause (wrong profile index / wrong channel count / parse error); `send()` now
+checks its `QSerialPort.write()` return value against the encoded length and reports short
+writes; a new `command_sent` signal echoes each transmitted command to the status bar; and
+`_redraw()` shows the running `rx N lines, M W-frames (...)` counter summary in the status bar
+whenever Start is checked, independent of whether any frame has been fed to the pipeline yet
+(the previous code path only updated the footer after a frame reached the engine, so a fully
+silent link looked identical to a working one that just hadn't rendered yet). This turns "no
+data" into one of: rx 0 lines (nothing coming back at all -- port/wiring/firmware-not-running),
+rx N lines but 0 W-frames (board responding but not streaming, or a different frame type),
+W-frames arriving but all wrong-idx (profile index still mismatched), or W-frames matched but
+still nothing on screen (a GUI-side rendering bug, now isolated from the link itself). Not yet
+confirmed against hardware -- next bench attempt should report which bucket the counters land
+in. (2026-07-11)
+
 
 ### src/pimd_classviz.py — v1.15 — Stats: Std colour bands + row-height +/−
 
