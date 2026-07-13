@@ -1,21 +1,296 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.19
+# PIMD Signature Visualiser (ClassViz) v1.30
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Connects to the board, sends Q4/G to start Mode 2 streaming with the default
 # CLASSIFY_EP profile, and displays a heatmap of signed cell deviations from a
-# captured air baseline. Includes a labelled-data logger for ML training data
-# capture, and a Profile Builder tab to edit/save/load band/pulse/delay profiles
-# and send them to the board as a RAM-only "dynamic" profile (firmware D command)
-# without reflashing — the heatmap/stats table/single-cell selectors resize to
-# match whatever profile (static or dynamic) is active.
+# captured air baseline. Includes a Training Session tab for guided, marked
+# signature-corpus capture, and a top-bar saved-profile selector to load/send
+# a band/pulse/delay profile to the board as a RAM-only "dynamic" profile
+# (firmware D command) without reflashing — the heatmap/stats table resize to
+# match whatever profile (static or dynamic) is active. Profile authoring/saving
+# lives in pimd_delaycal.py; ClassViz only loads and runs.
 #
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.30 Fixed a real-data investigation finding, not a code defect: a user
+#       report of the Analysis tab's 8-grid showing +-5-10mV swings in the
+#       9us/13us band panels while Band Mean vs Time showed only ~100uV
+#       traced (via 3 live screenshots, cross-checked against the v1.28 Std
+#       Dev heatmap mode) to one genuinely noisy channel -- band=9us,
+#       cell=0 (shortest delay/highest threshold) -- being both the single
+#       highest-std-dev cell in the whole 8x9 grid AND the literal
+#       subtraction reference for the strip/chart2/8-grid/9-grid's shared
+#       "Auto (- first element)" normalize mode (_normalize_group()), so
+#       that one cell's frame-to-frame jitter was being imposed at full
+#       strength onto every other point in its group. _normalize_group()'s
+#       Auto mode now subtracts the group's own mean instead of its first
+#       element -- dilutes one outlier's contribution by ~1/group-size
+#       (verified: a 3.0mV reference-cell jump now only moves its
+#       bandmates by ~0.33mV, vs the full 3.0mV before) while still
+#       auto-zeroing each curve for at-a-glance comparison. One shared
+#       staticmethod fixes all four consumers (plus signature template
+#       overlays, which route through the same helper) at once; the four
+#       "Auto (- first sample/point/cell/band)" checkbox labels are renamed
+#       to "Auto (- group mean)" to match. No settings-persistence keys
+#       changed -- checked/unchecked still means Auto/Manual, only what
+#       Auto computes changed.
+# v1.29 Analysis tab heatmap gets a horizontal pg.ColorBarItem legend, docked
+#       below its x-axis via setImageItem(insert_in=analysis_plot). Doubles
+#       as an interactive range control: dragging its handles sets the
+#       image's levels directly, matching the existing Auto/Manual scale
+#       convention -- _update_analysis_heatmap's Auto branch still drives
+#       both the image and the bar every tick as before, but the Manual
+#       branch now leaves levels untouched (autoLevels=False) so a drag (or
+#       a typed value in the existing manual-range spinbox) survives across
+#       redraw ticks instead of being overwritten 30x/sec; new
+#       sigLevelsChanged handler mirrors a drag back into the spinbox/stored
+#       range so both stay consistent and the range persists across a
+#       settings save. Worked around a pyqtgraph 0.14 quirk along the way:
+#       ColorBarItem.setImageItem() calls the image's setLevels() before it
+#       has any data, which pyqtgraph defers and replays at the end of the
+#       *next* setImage() call -- clobbering the first real frame's levels
+#       back to the colorbar's construction-time placeholder. A throwaway
+#       zero-filled setImage() right after linking flushes that deferred
+#       replay before any real data arrives.
+# v1.28 Two additions. (1) A "Std Dev (rolling N)" display mode on both the
+#       main Heatmap tab and the Analysis tab's heatmap variant -- shows each
+#       cell's raw-signal std dev over the last N samples (N = the Stats
+#       tab's existing "Std dev N" spinbox, now shared/tooltipped across all
+#       three consumers) as a live noise/jitter monitor, independent of any
+#       baseline capture; reuses _update_stats_table's exact rolling-window
+#       computation via new _compute_rolling_stddev_nxn(), rendered with the
+#       same sequential colormap/0..max scaling as RAW mode. (2) A top-bar
+#       "Rate: X.X Hz (Y cells/s)" readout, visible on every tab, recomputed
+#       once/sec from an exact frames-in-the-last-second delta (not a
+#       smoothed average, so a stall shows as 0 Hz immediately) -- answers
+#       whether Mode 2 streaming is running at its ~100 Hz nominal rate or
+#       stalled. read_from_serial() also now counts lines drained per single
+#       readyRead callback; a burst >3 (GUI falling behind the incoming
+#       stream between events, lines queuing in Qt's serial buffer) appends
+#       a "⚠ burst×N" warning to the readout instead of failing silently.
+# v1.27 Analysis tab layout regrouping, cosmetic only -- no data/logic
+#       changes. Controls and Signatures boxes, which used to span the full
+#       tab width above everything else, now stack with the Heatmap group
+#       in one resizable left column sharing the heatmap's width, via the
+#       existing main_split QSplitter (previously the heatmap was the sole
+#       left-pane widget). This frees the right side to reach the top of
+#       the tab and reorganizes its 4 stacked chart rows into 3: row 1 is a
+#       new nested horizontal QSplitter holding Band Mean vs Time and Pulse
+#       Width Mean side by side (was 2 separate stacked rows), rows 2/3 stay
+#       the unchanged 8-grid/9-grid. Several Signatures-box rows and the
+#       strip/chart2 control rows were too wide to fit the narrower ~560px
+#       column (or halved ~700px row-1 width) without Qt's per-row minimum-
+#       content-width refusing to shrink the splitter -- those rows (sig
+#       files/capture-inputs/readout-save/session, strip ctrl, chart2 ctrl)
+#       were each split onto two stacked sub-rows so the width reduction is
+#       real rather than blocked.
+# v1.26 Two additions to the Analysis tab: (1) all ~20 existing per-group
+#       Auto/Manual normalize+scale controls (plus Avg N frames and the new
+#       signature capture-N below) now persist to classviz_settings.json and
+#       reload on launch, same convention already used by pimd_classify.py/
+#       pimd_delaycal.py and this file's own Heatmap-tab controls -- this tab
+#       was the one place in the app that reset to defaults every restart.
+#       (2) An in-GUI signature file editor, as a faster interactive
+#       alternative to the existing Record Session -> pimd_features.py CLI
+#       pipeline: New file.../Open for editing... make a corpus CSV the
+#       active editable target (loading via the existing read-only "Load
+#       signatures..." stays browse-only -- both a loaded reference corpus
+#       and an active editable file now coexist in one list, all overlay-
+#       able, confirmed with the user since comparing a new capture against
+#       an already-loaded reference was the whole point); Capture Air
+#       (before)/Capture Target/Capture Air (after) capture a live N-frame
+#       window into each of 3 slots (air-after is optional -- with only
+#       air-before, the baseline flat-extrapolates, the same single-anchor
+#       fallback pimd_features.py itself already has); Save Signature reuses
+#       pimd_features.Plateau/central_frames/compute_plateau_stats/
+#       quality_flags/build_rows verbatim (no reimplemented math) to compute
+#       a real plateau_amp_mV/splithalf_floor/quality from that live window,
+#       linearly interpolating between the air anchors by timestamp exactly
+#       like the CLI's own thermal-drift correction, just over a live 1-2
+#       point window instead of a whole recorded session's air visits --
+#       flagged to the user as a genuine rigor trade-off, not a silent
+#       equivalent. Delete Selected only allows deleting from the active
+#       editable file (never a loaded reference corpus), by literal on-disk
+#       (session,target,distance_cm) string match -- pimd_corpus_check.
+#       load_long()'s dist_key() casts distance to int, which is lossy for
+#       non-integer distances and unsafe as a delete key, so a small local
+#       scanner (_scan_editable_signature_file) is used for the editable path
+#       instead. Repeat target+distance saves in the same file auto-suffix
+#       '(rpt)'/'(rpt3)' exactly like pimd_features.segment_from_marks()'s
+#       convention. New files default into a new data/corpora/ dir (sibling
+#       to data/sessions/) so GUI-built files don't mix on disk with either
+#       raw session dumps or campaign corpora; GUI-captured signatures get a
+#       'gui_YYYYMMDD_HHMMSS' session-id stamp (vs the CLI pipeline's
+#       'session_...') so they're visibly distinguishable in any future
+#       corpus audit. The signature list's per-row label now shows
+#       amp/SNR/quality (previously read from the corpus file and silently
+#       discarded) and shrank from a wrapped left-to-right tag flow to a
+#       compact scrollable list, freeing room for the new capture/save/
+#       session-recording controls. Also added a peer alternate path --
+#       Session: Start/Pause/Stop/Mark -- that records a full raw session
+#       CSV byte-identical to the Training Session tab's own output, for
+#       later conversion through pimd_features.py exactly as today, but
+#       driven from the Analysis tab's live charts instead of a separate
+#       guided-list workflow; reuses _session_start/_session_write_row/
+#       _session_stop/_append_mark/self._recording/self._training_paused
+#       verbatim -- same single-active-recording guard as the Training
+#       Session tab, so only one of the three entry points (Stats tab,
+#       Training Session tab, Analysis tab) can be recording at a time.
+# v1.25 More Analysis tab bench feedback: (1) "Band Mean vs Time" moved above
+#       "Pulse Width Mean" in the right-hand column, and collapsed from two
+#       strips (highest/lowest pulse width) to one -- the whole matrix's
+#       average delta_mV vs time -- with its own Auto/Manual normalize
+#       (offset to first sample or a manual ref) and Auto/Manual scale
+#       controls plus a Reset time button, matching the other chart groups;
+#       corpus overlay for it is now one reference line (the template's
+#       overall average) instead of two per-band lines. (2) Chart 2 gained
+#       the same Auto/Manual normalize+scale controls as the two grids
+#       (previously always auto-normalized with no manual override).
+#       (3) The 5 chart areas (heatmap + the 4 in the right column) now fill
+#       all remaining vertical space under the Controls box -- no separate
+#       bottom section. (4) Renames: "Per-Band Cell Profiles" -> "Per Pulse
+#       Width Cell Profiles", "Per-Cell Band Profiles" -> "Sample Delay Band
+#       Profiles", "Band Mean vs Pulse Width" -> "Pulse Width Mean". (5) 8-
+#       grid's first panel no longer shows an x-axis title; 8-grid/9-grid's
+#       first panel and chart 2 no longer show a y-axis label ("norm.") --
+#       ticks still render, just without the redundant title text repeated
+#       across 3 adjacent charts. (6) Fixed 3 leftover "Auto (÷ first ...)"
+#       checkbox labels still describing v1.23's divide/ratio convention
+#       after v1.24 switched the actual math to subtract/offset -- now
+#       "Auto (− first ...)". (7) Tightened layout margins/spacing throughout
+#       the tab (group boxes, control rows, splitter handles) to reduce
+#       whitespace given the added chart area.
+# v1.24 Analysis tab refinements from bench feedback on v1.23: (1) each of the
+#       heatmap/8-grid/9-grid chart groups now has its own Auto/Manual
+#       normalize and Auto/Manual scale controls, replacing the single global
+#       "Normalize to first point" checkbox -- Auto normalize subtracts each
+#       curve's own first point (0 at the start, per the operator's
+#       definition -- an offset, not the v1.23 ratio/divide), Manual
+#       subtracts one shared user-entered reference instead so the
+#       comparison scale doesn't drift as the live first point moves; the
+#       heatmap's own Normalize control decouples it from the main Heatmap
+#       tab's display mode (Δ/Z/raw) instead of always mirroring it. (2)
+#       Every chart area is now a titled, bordered QGroupBox with its
+#       controls inside that same box -- Controls / Heatmap / Band Mean vs
+#       Pulse Width / 8-grid / 9-grid / Band Mean vs Time. (3) The two bottom
+#       strips' Reset buttons are merged into one (both share one operator
+#       action anyway). (4) 8-grid's x-axis now shows each cell's delay_us
+#       averaged across all bands (1 d.p.) instead of threshold_v -- grid9's
+#       per-panel titles show that same cell's delay_us *range* across bands
+#       (matching the heatmap's threshold sub-label format) instead of
+#       threshold_v, so the two grids surface different identifying
+#       dimensions rather than duplicating volts on both. (5) 8-grid/9-grid Y
+#       axes are "locked to the first chart in that series": panel 0 sets the
+#       range (auto-fit or manual ±) and every sibling panel is given that
+#       exact numeric range every redraw tick. Tried pyqtgraph's setYLink
+#       first -- confirmed via ViewBox.linkedViewChanged() that it aligns
+#       ranges by on-screen pixel geometry, not identical numeric bounds,
+#       and a scripted check showed genuinely different ranges across
+#       same-size side-by-side panels; replaced with an explicit
+#       _lock_group_yaxis() that copies panel 0's resulting range onto every
+#       other panel directly, verified to match exactly (both auto and
+#       manual) in an offscreen-Qt re-test. (6) Fixed "Load signatures…"
+#       opening a completely blank window: QFileDialog.getOpenFileName's
+#       native (GTK/portal) dialog doesn't render in this environment --
+#       added options=QFileDialog.Option.DontUseNativeDialog to use Qt's own
+#       dialog widget instead, the standard fix for this class of bug.
+# v1.23 New "Analysis" tab (index 3), laid out to fill an ultrawide display with
+#       many small real-time comparison charts fed from the same live acquisition
+#       state the Heatmap tab already maintains (no new serial/acquisition code):
+#       a heatmap variant (renamed 'Pulse Width' y-axis, integer µs; 'Threshold'
+#       x-axis stays volts, 2 d.p., with each column's delay_us range across all
+#       bands shown as a second tick-label line -- delay_us varies by both band
+#       AND cell so it can't be a single per-column axis value the way threshold_v
+#       can, confirmed against cal_72_air_v2.json); a normalized band-mean-vs-
+#       pulse-width curve; two small-multiple grids (one panel per band showing
+#       its per-cell profile, one panel per cell showing its per-band profile,
+#       both normalized to their first point) decomposing the heatmap along each
+#       axis; two independently-resettable band-mean-vs-time strips (highest and
+#       lowest pulse width); and a corpus-signature overlay (Load signatures…,
+#       reuses pimd_corpus_check.load_corpus(), checkable list, one colour per
+#       template) drawn on every chart except the heatmap. All bands/cells are
+#       ordered by pulse_us ascending for these charts (new self._pulse_sort_order/
+#       _pulse_us_sorted in _set_profile_dims) rather than assuming raw profile
+#       order is pulse-ascending -- the live default CLASSIFY_EP profile's band
+#       order is actually pulse-*descending* (40→5µs), so that assumption would
+#       have silently mis-ordered every one of these charts under the profile
+#       ClassViz actually connects with by default. Overlay templates are only
+#       drawn when their channel count matches the live profile's (DESIGN §11 —
+#       never mix profile geometries); mismatches are skipped with a status-bar
+#       note rather than crashing. New helper _style_compact() (small tick font,
+#       zero padding, optional small title) applied to all ~20 new plots so axes
+#       are reused/hidden wherever panels share a scale, per the "maximize plot
+#       area" request. _update_heatmap() now also feeds the second heatmap image
+#       (self.analysis_img) whenever it exists, from the exact same matrix/levels/
+#       colormap already computed for the main Heatmap tab -- no duplicated
+#       baseline/display-mode logic between the two tabs.
+# v1.22 Training Session Start button: (1) clears every row's Time-at-Target
+#       and Settledness cells back to '—' before beginning, so re-running the
+#       same list no longer leaves stale elapsed-time/settledness values
+#       visible on rows not yet reached this run (new
+#       _clear_training_live_columns()); (2) no longer pops up the
+#       interactive "Session notes" dialog -- notes are now auto-derived from
+#       the run list itself (new _build_training_notes(), "Training Session
+#       run list:" + one "N. target @distancecm" line per row) via
+#       _session_start()'s new optional `notes` parameter (None still prompts
+#       interactively, unchanged for the plain Stats-tab Record Session
+#       button, which has no run list to derive from). Syncs pb_record's
+#       checked state via blockSignals rather than the checkbox-toggled
+#       signal, since _session_start() is now called directly (with notes)
+#       instead of being triggered indirectly through setChecked(True).
+# v1.21 New "Training Session" tab (index 2): a 5-column target-list table
+#       (Index/Target/Distance(cm)/Time-at-Target/Settledness, DoubleClick-only
+#       editing) drives a guided-capture workflow for building an ML signature
+#       corpus — Start/Pause/Stop plus a Space-bar step-advance that writes the
+#       same '# mark: <iso-ts>, <text>' lines the old Stats-tab hotkeys did
+#       (reusing _append_mark verbatim), timed so each row's mark lands at the
+#       *start* of its own dwell window (required by pimd_features.py's
+#       segment_from_marks — a mark deferred to "on leaving" would silently
+#       lose that row's own dwell data). Mark text is literal 'air' (no '@'
+#       suffix, exact-match requirement) for a Target of "air", else
+#       '<target> @<distance>'. Reuses _toggle_record_frames/_session_start/
+#       _session_stop unmodified; _session_stop() now centrally resets
+#       Training UI state whenever a training session is active, regardless
+#       of which of its 3 call sites triggered the stop (Stats-tab toggle,
+#       _apply_profile force-stop, start_stop force-stop) — single source of
+#       truth instead of duplicating the reset per call site. Live Settledness
+#       (rolling per-channel std over a tunable frame window, mirrors
+#       _update_stats_table's statistic) updates every redraw tick regardless
+#       of visible tab or pause state; Time-at-Target freezes while paused and
+#       once a row is left behind (never touched again after advancing).
+#       process_packet's frame-write gate now also excludes _training_paused
+#       frames from the session CSV, so a pause doesn't contaminate the
+#       current target's plateau with movement-artifact frames (no-op for
+#       ordinary Record Session use, since _training_paused is Training-tab-
+#       only state). Target lists are independently saveable/loadable as
+#       reusable templates (data/training_lists/*.json, mirrors the
+#       Saved-profile pattern: _list_training_list_files/
+#       _load_training_list_file/_save_training_list_file) — Save does not
+#       require an "air" row (a template is just a shape); Start does.
+#       Top bar: merged the separate "Saved profile" row into the same row as
+#       Port/Connect/Start (one row instead of two). Stats tab: removed the
+#       manual '1/2/3/0'-hotkey mark UI (le_mark_label, lbl_mark_log,
+#       _on_mark_hotkey, _update_mark_log_display, _mark_log deque) — the
+#       Training Session tab's Space-bar workflow replaces it entirely;
+#       eventFilter's Space dispatch repurposed to _on_training_space()
+#       (1/2/3/0 dispatch removed outright, new QAbstractItemView import).
+# v1.20 Removed the editable Profile Builder tab (band-table editor, validation,
+#       in-app save) — pimd_delaycal.py already owns profile authoring/saving.
+#       Top bar (above the tabs) now has a "Saved profile:" combo box + single
+#       "Load && Run" button (_on_load_run_profile) that loads the selected
+#       data/profiles/*.json, sends it as a dynamic profile (E/D-command/
+#       Q<DYNAMIC_PROFILE_INDEX>/G), and applies it — one click instead of the
+#       old Load-then-Send&Run two-step. Dead code removed: _build_profile_tab,
+#       _populate_profile_editor, _read_profile_from_editor,
+#       _validate_profile_editor, _on_add_band_row/_on_remove_band_row,
+#       _on_save_profile_file[_as]/_save_current_editor_as, module-level
+#       _save_profile_file/_pad_json_floats (and now-unused `re` import).
+#       _build_d_command kept as-is and reused.
 # v1.19 Session recording: '1'/'2'/'3' hotkeys mark the current Mark-label text
 #       @5/10/15 cm into the open session CSV as a '#'-prefixed comment line
 #       (# mark: <iso-ts>, <label> @<cm>); '0'/Space marks literal "air"
@@ -144,8 +419,8 @@
 # pyright: reportAttributeAccessIssue=false
 
 import json
+import math
 import os
-import re
 import sys
 import time
 from datetime import datetime, date, timedelta
@@ -156,12 +431,13 @@ import numpy as np
 os.environ.setdefault('QT_API', 'pyqt6')
 
 from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
-from PyQt6.QtGui import QBrush, QColor  # noqa: E402
+from PyQt6.QtGui import QBrush, QColor, QFont  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QSpinBox, QStackedWidget, QTabWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+    QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPushButton, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -173,7 +449,10 @@ try:
 except ImportError:
     _GL_AVAILABLE = False
 
-APP_VERSION = '1.19'
+import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
+import pimd_features       # noqa: E402 — Analysis tab signature capture/save
+
+APP_VERSION = '1.30'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -184,8 +463,10 @@ CAPTURE_FRAMES_DEFAULT = 64
 ROLLING_SECS_DEFAULT   = 3.0
 DEFAULT_PORT = '/dev/ttyACM0'
 
-PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
-SESSIONS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
+PROFILES_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
+SESSIONS_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
+TRAINING_LISTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'training_lists')
+CORPORA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'corpora')
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
 
@@ -221,20 +502,25 @@ def _load_profile_file(name):
         return json.load(f)
 
 
-def _pad_json_floats(text):
-    """Pad every float literal in a json.dumps() string to 3 decimal places.
-    json.dump() has no float-formatting hook (the C encoder calls float.__repr__
-    directly, ignoring float subclass overrides), so profile floats otherwise
-    serialise at whatever precision Python's repr trims to (6.8, not 6.800).
-    Integer fields (freq_hz, averages) have no decimal point and are untouched."""
-    return re.sub(r'-?\d+\.\d+', lambda m: '{0:.3f}'.format(float(m.group())), text)
+def _list_training_list_files():
+    if not os.path.isdir(TRAINING_LISTS_DIR):
+        return []
+    return sorted(f[:-5] for f in os.listdir(TRAINING_LISTS_DIR) if f.endswith('.json'))
 
 
-def _save_profile_file(name, profile):
-    os.makedirs(PROFILES_DIR, exist_ok=True)
-    text = _pad_json_floats(json.dumps(profile, indent=2))
-    with open(os.path.join(PROFILES_DIR, name + '.json'), 'w') as f:
-        f.write(text)
+def _load_training_list_file(name):
+    with open(os.path.join(TRAINING_LISTS_DIR, name + '.json')) as f:
+        return json.load(f)
+
+
+def _save_training_list_file(name, rows):
+    """rows: list of {'target': str, 'distance_cm': float}. Index is never
+    persisted (always derived/renumbered on load); Time/Settledness are live
+    per-run data, never part of the saved template."""
+    os.makedirs(TRAINING_LISTS_DIR, exist_ok=True)
+    data = {'name': name, 'rows': rows}
+    with open(os.path.join(TRAINING_LISTS_DIR, name + '.json'), 'w') as f:
+        json.dump(data, f, indent=2)
 
 
 pg.setConfigOptions(background='w', foreground='k', antialias=True)
@@ -271,7 +557,7 @@ class MainWindow(QMainWindow):
 
         # Profile dimensions (n_bands, n_cells, labels, etc) — instance state so
         # the heatmap/stats table/single-cell selectors can resize at runtime
-        # when a dynamic profile is sent from the Profile Builder tab.
+        # when a saved profile is loaded from the top-bar selector.
         self._set_profile_dims(_default_profile(), DEFAULT_PROFILE_IDX)
 
         # Data state — sweep
@@ -297,20 +583,89 @@ class MainWindow(QMainWindow):
         self._csv_rows           = 0
         self._frame_count        = 0
 
+        # Throughput monitor — recomputed once/sec by _rate_timer (see below),
+        # so the displayed Hz is an exact "frames received in the last second"
+        # count, not a smoothed estimate.
+        self._fps_hz                = 0.0
+        self._fps_last_calc_wall    = time.time()
+        self._fps_last_frame_count  = 0
+        # Max number of complete lines drained in a single read_from_serial()
+        # call since the last rate tick -- consistently >1 means the GUI is
+        # falling behind the incoming serial stream and lines are backing up
+        # in Qt's serial buffer between readyRead events.
+        self._serial_max_batch      = 0
+
         self._recording           = False
         self._session_file        = None   # open file handle while a session is being recorded
         self._session_path        = None
         self._session_start_wall  = None   # time.time() at recording start (elapsed display)
         self._session_frame_count = 0
 
-        self._mark_log: deque = deque(maxlen=5)   # (iso_ts, text) tuples for the on-screen readout
-
         self._ch_glitch_buf: 'np.ndarray | None' = None  # shape (64, n_channels), circular
         self._ch_glitch_pos  = 0
+
+        # Data state — Training Session tab
+        self._training_current_row: 'int | None' = None   # None when no training session active
+        self._training_paused: bool = False
+        self._training_row_start_wall: 'float | None' = None
+        self._training_pause_started: 'float | None' = None
 
         # Data state — stats
         self._freeze_stats = False
         self._stats_row_height = 22
+
+        # Data state — Analysis tab
+        self._analysis_avg_n    = 1
+        self._analysis_templates = {}   # (session,target,distance) -> {shape,color,label}
+
+        self._analysis_strip_reset_ts = 0.0
+        self._analysis_strip_norm_auto = True
+        self._analysis_strip_manual_ref = 0.0
+        self._analysis_strip_scale_auto = True
+        self._analysis_strip_manual_halfrange = 5.0
+
+        # Analysis tab — per-group Auto/Manual normalize+scale (heatmap/8-grid/9-grid)
+        self._analysis_hm_norm_auto      = True
+        self._analysis_hm_display_mode   = 'delta'   # used only when norm is Manual (decoupled)
+        self._analysis_hm_scale_auto     = True
+        self._analysis_hm_manual_range_uv = 200_000.0
+
+        self._analysis_c2_norm_auto  = True
+        self._analysis_c2_manual_ref = 0.0
+        self._analysis_c2_scale_auto = True
+        self._analysis_c2_manual_halfrange = 5.0
+
+        self._analysis_g8_norm_auto  = True
+        self._analysis_g8_manual_ref = 0.0
+        self._analysis_g8_scale_auto = True
+        self._analysis_g8_manual_halfrange = 5.0
+
+        self._analysis_g9_norm_auto  = True
+        self._analysis_g9_manual_ref = 0.0
+        self._analysis_g9_scale_auto = True
+        self._analysis_g9_manual_halfrange = 5.0
+
+        # Analysis tab — signature file editing (New/Open-for-editing/Save/Delete)
+        self._editable_sig_path       = None   # str|None -- the currently open-for-editing file
+        self._editable_sig_session_id = None   # 'gui_YYYYMMDD_HHMMSS', assigned fresh on New/Open
+        self._editable_visit_counts   = {}     # (target_lower, distance_str) -> visit count, for (rpt) suffixing
+
+        # Analysis tab — signature capture (air-before / target / air-after).
+        # A second, independent capture channel from _capturing/_capture_buf
+        # (which stay hard-wired to the Heatmap tab's "Capture baseline").
+        self._sig_capture_n    = pimd_features.MIN_CENTRAL_FRAMES
+        self._sig_capturing    = False
+        self._sig_capture_slot = None   # 'air_before' | 'target' | 'air_after'
+        self._sig_capture_buf  = []     # list[(ts, raw_uV_ndarray)] while self._sig_capturing
+        self._sig_air_before   = None   # {'t_seconds':(n,), 'frames_mV':(n,n_channels), 'n_frames':int}
+        self._sig_air_after    = None   # same shape, optional
+        self._sig_target       = None   # same shape
+        self._sig_last_stats   = None   # cached dict from _compute_sig_stats(), for the live readout
+
+        # Analysis tab — session recording (alternate path, reuses the
+        # Training Session tab's own _session_start/_session_stop/_append_mark
+        # machinery and self._recording/_training_paused flags verbatim).
+        self._analysis_session_recording = False
 
         self._setup_colormaps()
         self._build_ui()
@@ -321,6 +676,11 @@ class MainWindow(QMainWindow):
         self._redraw_timer.setInterval(REDRAW_MS)
         self._redraw_timer.timeout.connect(self._redraw)
         self._redraw_timer.start()
+
+        self._rate_timer = QTimer()
+        self._rate_timer.setInterval(1000)
+        self._rate_timer.timeout.connect(self._update_rate)
+        self._rate_timer.start()
 
     # ------------------------------------------------------------------
     # Profile dimensions
@@ -361,13 +721,30 @@ class MainWindow(QMainWindow):
         else:
             self._cell_labels = ['d{0}'.format(j) for j in range(n_cells)]
             self._nominal_baseline_uv = np.zeros((n_bands, n_cells))
+        # Analysis tab: bands sorted pulse_us ascending. Raw protocol/profile
+        # band order is NOT reliably pulse-ascending -- the live default
+        # CLASSIFY_EP profile is actually pulse-*descending* (40->5us) -- so
+        # every Analysis chart that plots "vs pulse width" must reindex by
+        # this instead of assuming index order.
+        self._pulse_sort_order = sorted(range(n_bands), key=lambda i: bands[i]['pulse_us'])
+        self._pulse_us_sorted  = [bands[i]['pulse_us'] for i in self._pulse_sort_order]
+        # Per-cell delay_us range across all bands, for the Analysis heatmap's
+        # threshold-axis sub-label (threshold_v is constant per cell across
+        # bands; delay_us is not, so it can only be shown as a range there).
+        self._cell_delay_range_us = [
+            (min(b['delays_us'][j] for b in bands), max(b['delays_us'][j] for b in bands))
+            for j in range(n_cells)
+        ]
+        self._cell_delay_avg_us = [
+            float(np.mean([b['delays_us'][j] for b in bands])) for j in range(n_cells)
+        ]
 
     def _apply_profile(self, profile, profile_idx):
         """Switch the active profile at runtime: updates dimensions, clears any
         old-shape buffered data, and resizes the heatmap/3D surface/stats table/
         single-cell selectors to match. Called once for the default profile (via
         _set_profile_dims directly, before _build_ui) and again whenever a
-        dynamic profile is sent from the Profile Builder tab."""
+        saved profile is loaded and run from the top-bar selector."""
         self._set_profile_dims(profile, profile_idx)
 
         # Old-shape data must not survive a dimension change.
@@ -385,6 +762,16 @@ class MainWindow(QMainWindow):
         self._rebuild_heatmap_axes()
         self._rebuild_3d_surface()
         self._rebuild_stats_table()
+        if hasattr(self, 'analysis_plot'):
+            self._rebuild_analysis_heatmap_axes()
+            self._rebuild_analysis_chart2_ticks()
+            self._rebuild_analysis_grid8()
+            self._rebuild_analysis_grid9()
+            self._apply_g8_scale()
+            self._apply_g9_scale()
+            self._analysis_strip_reset_ts = 0.0
+            self._reset_sig_capture_state()   # old raw arrays would mismatch the new n_channels
+            self._refresh_analysis_overlays()
         self.header_label.setText('Profile {0} — {1} ({2} bands × {3} cells)'.format(
             profile_idx, profile.get('name', '?'), self._n_bands, self._n_cells))
 
@@ -434,17 +821,35 @@ class MainWindow(QMainWindow):
         self.pb_start.clicked.connect(self.start_stop)
         row1.addWidget(self.pb_start)
 
+        # Saved-profile selector — replaces the old Profile Builder tab; picks a
+        # profile JSON from data/profiles/ and sends it straight to the board.
+        row1.addWidget(QLabel('Saved profile:'))
+        self.cb_profile_file = QComboBox()
+        self._refresh_profile_file_list()
+        self.cb_profile_file.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        row1.addWidget(self.cb_profile_file)
+        self.pb_load_run_profile = QPushButton('Load && Run')
+        self.pb_load_run_profile.setStyleSheet(self.MY_YELLOW)
+        self.pb_load_run_profile.clicked.connect(self._on_load_run_profile)
+        row1.addWidget(self.pb_load_run_profile)
+
         self.header_label = QLabel('Profile {0} — {1} ({2} bands × {3} cells)'.format(
             self._active_profile_idx, self._profile.get('name', '?'),
             self._n_bands, self._n_cells))
         row1.addWidget(self.header_label, stretch=1)
+
+        # Throughput readout — visible on every tab, updated once/sec by
+        # _rate_timer/_update_rate. Answers "is data flowing at full speed".
+        self.lbl_rate = QLabel('Rate: — (idle)')
+        row1.addWidget(self.lbl_rate)
         layout.addLayout(row1)
 
         # Tab widget
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
         self.tabs.addTab(self._build_stats_tab(),   'Stats')
-        self.tabs.addTab(self._build_profile_tab(), 'Profile Builder')
+        self.tabs.addTab(self._build_training_session_tab(), 'Training Session')
+        self.tabs.addTab(self._build_analysis_tab(), 'Analysis')
         layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
@@ -461,7 +866,8 @@ class MainWindow(QMainWindow):
         row2 = QHBoxLayout()
         row2.addWidget(QLabel('Display:'))
         self.cb_display = QComboBox()
-        self.cb_display.addItems(['Δ deviation [default]', 'Z normalised', 'RAW abs µV'])
+        self.cb_display.addItems(['Δ deviation [default]', 'Z normalised', 'RAW abs µV',
+                                   'Std Dev (rolling N, see Stats tab)'])
         self.cb_display.setCurrentIndex(0)
         self.cb_display.currentIndexChanged.connect(self._on_display_changed)
         row2.addWidget(self.cb_display)
@@ -641,11 +1047,15 @@ class MainWindow(QMainWindow):
         self.pb_freeze_stats.toggled.connect(self._on_freeze_stats_toggled)
         ctrl.addWidget(self.pb_freeze_stats)
 
-        ctrl.addWidget(QLabel('Std dev N:'))
+        lbl_std_n = QLabel('Std dev N:')
+        lbl_std_n.setToolTip('Rolling sample window, shared with the Heatmap tab\'s '
+                              '"Std Dev" display mode and the Analysis tab heatmap.')
+        ctrl.addWidget(lbl_std_n)
         self.sp_stats_window = QSpinBox()
         self.sp_stats_window.setRange(2, 2000)
         self.sp_stats_window.setSingleStep(10)
         self.sp_stats_window.setValue(50)
+        self.sp_stats_window.setToolTip(lbl_std_n.toolTip())
         ctrl.addWidget(self.sp_stats_window)
 
         pb_save_stats = QPushButton('Save table CSV…')
@@ -692,21 +1102,6 @@ class MainWindow(QMainWindow):
         ctrl.addWidget(QLabel('All values in mV'))
         layout.addLayout(ctrl)
 
-        # Ground-truth mark hotkeys — logs timeline events into the open
-        # session CSV as it streams (see _on_mark_hotkey / _append_mark).
-        mark_row = QHBoxLayout()
-        mark_row.addWidget(QLabel('Mark label:'))
-        self.le_mark_label = QLineEdit()
-        self.le_mark_label.setPlaceholderText('e.g. spanner 270g')
-        mark_row.addWidget(self.le_mark_label, stretch=1)
-        mark_row.addWidget(QLabel('Hotkeys: 1/2/3=@5/10/15cm   0/Space=air'))
-        layout.addLayout(mark_row)
-
-        self.lbl_mark_log = QLabel('(no marks yet)')
-        self.lbl_mark_log.setWordWrap(True)
-        self.lbl_mark_log.setStyleSheet('font-family: monospace;')
-        layout.addWidget(self.lbl_mark_log)
-
         # Stats table: Band | Threshold | Delay µs | Latest mV | Mean mV | Std mV
         self.tbl_stats = QTableWidget(self._n_channels, 6)
         self.tbl_stats.setHorizontalHeaderLabels(
@@ -738,218 +1133,13 @@ class MainWindow(QMainWindow):
                     self.tbl_stats.setItem(row, col, item)
 
     # ------------------------------------------------------------------
-    # Tab 2 — Profile Builder
+    # Saved-profile selector (top bar) — load a profile JSON from disk and
+    # send it straight to the board as a dynamic (RAM-only) profile.
     # ------------------------------------------------------------------
-    def _build_profile_tab(self):
-        w      = QWidget()
-        layout = QVBoxLayout(w)
-
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel('Saved profile:'))
-        self.cb_profile_file = QComboBox()
-        self._refresh_profile_file_list()
-        row1.addWidget(self.cb_profile_file, stretch=1)
-        pb_load = QPushButton('Load')
-        pb_load.clicked.connect(self._on_load_profile_file)
-        row1.addWidget(pb_load)
-        pb_save = QPushButton('Save')
-        pb_save.clicked.connect(self._on_save_profile_file)
-        row1.addWidget(pb_save)
-        pb_save_as = QPushButton('Save As…')
-        pb_save_as.clicked.connect(self._on_save_profile_file_as)
-        row1.addWidget(pb_save_as)
-        layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel('Name:'))
-        self.le_profile_name = QLineEdit()
-        row2.addWidget(self.le_profile_name, stretch=1)
-        row2.addWidget(QLabel('Averages:'))
-        self.sp_profile_avg = QSpinBox()
-        self.sp_profile_avg.setRange(1, 256)
-        self.sp_profile_avg.setValue(32)
-        row2.addWidget(self.sp_profile_avg)
-        layout.addLayout(row2)
-
-        self.tbl_profile_bands = QTableWidget(0, 4)
-        self.tbl_profile_bands.setHorizontalHeaderLabels(
-            ['Freq (Hz)', 'Pulse (µs)', 'Delays (µs, comma-sep)',
-             'Threshold V (optional, comma-sep)'])
-        self.tbl_profile_bands.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.tbl_profile_bands, stretch=1)
-
-        row3 = QHBoxLayout()
-        pb_add_band = QPushButton('Add Band')
-        pb_add_band.clicked.connect(self._on_add_band_row)
-        row3.addWidget(pb_add_band)
-        pb_remove_band = QPushButton('Remove Band')
-        pb_remove_band.clicked.connect(self._on_remove_band_row)
-        row3.addWidget(pb_remove_band)
-        row3.addStretch(1)
-        layout.addLayout(row3)
-
-        self.lbl_profile_validation = QLabel('')
-        layout.addWidget(self.lbl_profile_validation)
-
-        row_cmd = QHBoxLayout()
-        row_cmd.addWidget(QLabel('Command:'))
-        self.le_profile_command = QLineEdit()
-        self.le_profile_command.setReadOnly(True)
-        row_cmd.addWidget(self.le_profile_command, stretch=1)
-        layout.addLayout(row_cmd)
-
-        row4 = QHBoxLayout()
-        self.pb_send_run = QPushButton('Send && Run')
-        self.pb_send_run.setStyleSheet(self.MY_YELLOW)
-        self.pb_send_run.clicked.connect(self._on_send_run_profile)
-        row4.addWidget(self.pb_send_run)
-        row4.addStretch(1)
-        layout.addLayout(row4)
-
-        # Any edit re-validates and refreshes the command preview.
-        self.tbl_profile_bands.itemChanged.connect(self._on_profile_table_changed)
-        self.le_profile_name.textChanged.connect(self._on_profile_table_changed)
-        self.sp_profile_avg.valueChanged.connect(self._on_profile_table_changed)
-
-        # Seed the editor with the currently active profile (CLASSIFY_EP baseline
-        # on first launch).
-        self._populate_profile_editor(self._profile)
-        return w
-
     def _refresh_profile_file_list(self):
         self.cb_profile_file.clear()
         for name in _list_profile_files():
             self.cb_profile_file.addItem(name)
-
-    def _populate_profile_editor(self, profile):
-        self.le_profile_name.setText(profile.get('name', ''))
-        self.sp_profile_avg.setValue(profile.get('averages', 32))
-        bands = sorted(profile['bands'], key=lambda b: b['delays_us'][0])
-        self.tbl_profile_bands.blockSignals(True)
-        self.tbl_profile_bands.setRowCount(len(bands))
-        for r, b in enumerate(bands):
-            delays_str = ', '.join('{0:.3f}'.format(d) for d in b['delays_us'])
-            thresh_str = (', '.join('{0:.3f}'.format(v) for v in b['threshold_v'])
-                          if b.get('threshold_v') else '')
-            for col, text in enumerate(
-                    [str(b['freq_hz']), str(b['pulse_us']), delays_str, thresh_str]):
-                self.tbl_profile_bands.setItem(r, col, QTableWidgetItem(text))
-        self.tbl_profile_bands.blockSignals(False)
-        self._validate_profile_editor()
-
-    def _on_load_profile_file(self):
-        name = self.cb_profile_file.currentText()
-        if not name:
-            return
-        try:
-            profile = _load_profile_file(name)
-        except Exception as e:
-            self.statusBar().showMessage('Load failed: {0}'.format(e))
-            return
-        self._populate_profile_editor(profile)
-        self.statusBar().showMessage('Loaded profile: {0}'.format(name))
-
-    def _on_save_profile_file(self):
-        name = self.le_profile_name.text().strip()
-        if not name:
-            self.statusBar().showMessage('Enter a profile name before saving')
-            return
-        self._save_current_editor_as(name)
-
-    def _on_save_profile_file_as(self):
-        name, ok = QInputDialog.getText(self, 'Save Profile As', 'Profile name:')
-        if not ok or not name.strip():
-            return
-        self.le_profile_name.setText(name.strip())
-        self._save_current_editor_as(name.strip())
-
-    def _save_current_editor_as(self, name):
-        profile = self._validate_profile_editor()
-        if profile is None:
-            self.statusBar().showMessage('Cannot save: profile has validation errors')
-            return
-        profile['name'] = name
-        _save_profile_file(name, profile)
-        self._refresh_profile_file_list()
-        idx = self.cb_profile_file.findText(name)
-        if idx >= 0:
-            self.cb_profile_file.setCurrentIndex(idx)
-        self.statusBar().showMessage('Saved profile: {0}'.format(name))
-
-    def _on_add_band_row(self):
-        r = self.tbl_profile_bands.rowCount()
-        self.tbl_profile_bands.insertRow(r)
-        for col, text in enumerate(['10000', '10.0', '', '']):
-            self.tbl_profile_bands.setItem(r, col, QTableWidgetItem(text))
-
-    def _on_remove_band_row(self):
-        r = self.tbl_profile_bands.currentRow()
-        if r >= 0:
-            self.tbl_profile_bands.removeRow(r)
-        self._validate_profile_editor()
-
-    def _on_profile_table_changed(self, *_args):
-        self._validate_profile_editor()
-
-    def _read_profile_from_editor(self):
-        """Parse the band table into a profile dict. Returns (profile, error_str)."""
-        rows = self.tbl_profile_bands.rowCount()
-        if rows == 0:
-            return None, 'no bands defined'
-        bands = []
-        n_delays = None
-        for r in range(rows):
-            freq_item   = self.tbl_profile_bands.item(r, 0)
-            pulse_item  = self.tbl_profile_bands.item(r, 1)
-            delays_item = self.tbl_profile_bands.item(r, 2)
-            thresh_item = self.tbl_profile_bands.item(r, 3)
-            try:
-                freq_hz   = int(float(freq_item.text()))
-                pulse_us  = float(pulse_item.text())
-                delays_us = [float(x) for x in delays_item.text().split(',') if x.strip()]
-            except (ValueError, AttributeError):
-                return None, 'band {0}: invalid freq/pulse/delays'.format(r)
-            if not delays_us:
-                return None, 'band {0}: no delays'.format(r)
-            if n_delays is None:
-                n_delays = len(delays_us)
-            elif len(delays_us) != n_delays:
-                return None, ('band {0} has {1} delays, expected {2} '
-                              '(rectangular only)').format(r, len(delays_us), n_delays)
-            band = {'freq_hz': freq_hz, 'pulse_us': pulse_us, 'delays_us': delays_us}
-            thresh_text = thresh_item.text().strip() if thresh_item else ''
-            if thresh_text:
-                try:
-                    thresh_v = [float(x) for x in thresh_text.split(',') if x.strip()]
-                except ValueError:
-                    return None, 'band {0}: invalid threshold list'.format(r)
-                if len(thresh_v) != n_delays:
-                    return None, 'band {0}: threshold count must match delay count'.format(r)
-                band['threshold_v'] = thresh_v
-            bands.append(band)
-        profile = {
-            'name': self.le_profile_name.text().strip() or 'DYNAMIC',
-            'averages': self.sp_profile_avg.value(),
-            'bands': bands,
-        }
-        return profile, None
-
-    def _validate_profile_editor(self):
-        profile, error = self._read_profile_from_editor()
-        if error:
-            self.lbl_profile_validation.setText('✗ {0}'.format(error))
-            self.lbl_profile_validation.setStyleSheet('color: red;')
-            self.le_profile_command.setText('')
-            self.pb_send_run.setEnabled(False)
-            return None
-        n_bands = len(profile['bands'])
-        n_cells = len(profile['bands'][0]['delays_us'])
-        self.lbl_profile_validation.setText('✓ {0} bands × {1} cells'.format(n_bands, n_cells))
-        self.lbl_profile_validation.setStyleSheet('color: green;')
-        self.le_profile_command.setText(self._build_d_command(profile))
-        self.pb_send_run.setEnabled(True)
-        return profile
 
     def _build_d_command(self, profile):
         parts = ['D{0}'.format(profile['averages'])]
@@ -959,9 +1149,15 @@ class MainWindow(QMainWindow):
             parts.append(','.join(fields))
         return ';'.join(parts)
 
-    def _on_send_run_profile(self):
-        profile = self._validate_profile_editor()
-        if profile is None:
+    def _on_load_run_profile(self):
+        name = self.cb_profile_file.currentText()
+        if not name:
+            self.statusBar().showMessage('No saved profile selected')
+            return
+        try:
+            profile = _load_profile_file(name)
+        except Exception as e:
+            self.statusBar().showMessage('Load failed: {0}'.format(e))
             return
         if not self.serial.isOpen():
             self.statusBar().showMessage('Not connected')
@@ -974,8 +1170,1807 @@ class MainWindow(QMainWindow):
         self._apply_profile(profile, DYNAMIC_PROFILE_INDEX)
         self.pb_start.setText('Running')
         self.pb_start.setStyleSheet(self.MY_GREEN)
-        self.statusBar().showMessage('Dynamic profile sent and running: {0}'.format(
-            profile['name']))
+        self.statusBar().showMessage('Loaded and running profile: {0}'.format(
+            profile.get('name', name)))
+
+    # ------------------------------------------------------------------
+    # Tab 2 — Training Session
+    # ------------------------------------------------------------------
+    def _build_training_session_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # Control row
+        ctrl = QHBoxLayout()
+        self.pb_training_start = QPushButton('Start')
+        self.pb_training_start.setStyleSheet(self.MY_GREEN)
+        self.pb_training_start.clicked.connect(self._on_training_start)
+        ctrl.addWidget(self.pb_training_start)
+
+        self.pb_training_pause = QPushButton('Pause')
+        self.pb_training_pause.setCheckable(True)
+        self.pb_training_pause.setEnabled(False)
+        self.pb_training_pause.toggled.connect(self._on_training_pause_toggled)
+        ctrl.addWidget(self.pb_training_pause)
+
+        self.pb_training_stop = QPushButton('Stop')
+        self.pb_training_stop.setStyleSheet(self.MY_RED)
+        self.pb_training_stop.setEnabled(False)
+        self.pb_training_stop.clicked.connect(self._on_training_stop)
+        ctrl.addWidget(self.pb_training_stop)
+
+        ctrl.addStretch(1)
+
+        ctrl.addWidget(QLabel('Settle window (frames):'))
+        self.sp_training_settle = QSpinBox()
+        self.sp_training_settle.setRange(2, 2000)
+        self.sp_training_settle.setSingleStep(10)
+        self.sp_training_settle.setValue(50)
+        ctrl.addWidget(self.sp_training_settle)
+
+        self.lbl_training_status = QLabel('Not recording')
+        ctrl.addWidget(self.lbl_training_status)
+        layout.addLayout(ctrl)
+
+        hint = QLabel('Press Space to advance to the next target and mark it.')
+        hint.setStyleSheet('color: gray;')
+        layout.addWidget(hint)
+
+        # Table: Index | Target | Distance (cm) | Time at Target (s) | Settledness (mV)
+        self.tbl_training = QTableWidget(0, 5)
+        self.tbl_training.setHorizontalHeaderLabels(
+            ['Index', 'Target', 'Distance (cm)', 'Time at Target (s)', 'Settledness (mV)'])
+        self.tbl_training.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tbl_training.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.tbl_training.itemChanged.connect(self._on_training_table_changed)
+        self._insert_default_training_row()
+        layout.addWidget(self.tbl_training, stretch=1)
+
+        # Add/Remove row + validation
+        row_btns = QHBoxLayout()
+        self.pb_training_add_row = QPushButton('Add Row')
+        self.pb_training_add_row.clicked.connect(self._on_training_add_row)
+        row_btns.addWidget(self.pb_training_add_row)
+        self.pb_training_remove_row = QPushButton('Remove Row')
+        self.pb_training_remove_row.clicked.connect(self._on_training_remove_row)
+        row_btns.addWidget(self.pb_training_remove_row)
+        row_btns.addStretch(1)
+        layout.addLayout(row_btns)
+
+        self.lbl_training_validation = QLabel('')
+        layout.addWidget(self.lbl_training_validation)
+
+        # Saved target-list template — mirrors the top-bar Saved-profile pattern
+        row_list = QHBoxLayout()
+        row_list.addWidget(QLabel('Saved list:'))
+        self.cb_training_list = QComboBox()
+        self._refresh_training_list_file_list()
+        row_list.addWidget(self.cb_training_list, stretch=1)
+        self.pb_training_load_list = QPushButton('Load List')
+        self.pb_training_load_list.clicked.connect(self._on_training_load_list)
+        row_list.addWidget(self.pb_training_load_list)
+        self.pb_training_save_list = QPushButton('Save List…')
+        self.pb_training_save_list.clicked.connect(self._on_training_save_list)
+        row_list.addWidget(self.pb_training_save_list)
+        layout.addLayout(row_list)
+
+        self._validate_training_table()
+        return w
+
+    # -- row construction / editability -----------------------------------
+
+    def _make_training_item(self, text, editable):
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(_C)
+        if not editable:
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        return item
+
+    def _populate_training_row(self, row, target, distance_cm):
+        self.tbl_training.setItem(row, 0, self._make_training_item('', editable=False))
+        self.tbl_training.setItem(row, 1, self._make_training_item(str(target), editable=True))
+        try:
+            dist_text = '{0:g}'.format(float(distance_cm))
+        except (TypeError, ValueError):
+            dist_text = str(distance_cm)
+        self.tbl_training.setItem(row, 2, self._make_training_item(dist_text, editable=True))
+        self.tbl_training.setItem(row, 3, self._make_training_item('—', editable=False))
+        self.tbl_training.setItem(row, 4, self._make_training_item('—', editable=False))
+
+    def _insert_default_training_row(self):
+        self.tbl_training.blockSignals(True)
+        r = self.tbl_training.rowCount()
+        self.tbl_training.insertRow(r)
+        self._populate_training_row(r, 'air', 0)
+        self._renumber_training_rows()
+        self.tbl_training.blockSignals(False)
+
+    def _renumber_training_rows(self):
+        for r in range(self.tbl_training.rowCount()):
+            self.tbl_training.item(r, 0).setText(str(r + 1))
+
+    # -- add/remove rows ----------------------------------------------------
+
+    def _on_training_add_row(self):
+        self.tbl_training.blockSignals(True)
+        r = self.tbl_training.rowCount()
+        self.tbl_training.insertRow(r)
+        self._populate_training_row(r, '', 0)
+        self._renumber_training_rows()
+        self.tbl_training.blockSignals(False)
+        self._validate_training_table()
+
+    def _on_training_remove_row(self):
+        r = self.tbl_training.currentRow()
+        if r >= 0:
+            self.tbl_training.blockSignals(True)
+            self.tbl_training.removeRow(r)
+            self._renumber_training_rows()
+            self.tbl_training.blockSignals(False)
+        self._validate_training_table()
+
+    def _on_training_table_changed(self, item):
+        self._validate_training_table()
+
+    # -- validation -----------------------------------------------------
+
+    def _validate_training_table(self):
+        rows = self.tbl_training.rowCount()
+        has_air = False
+        error = None
+        if rows == 0:
+            error = 'no target rows defined'
+        else:
+            for r in range(rows):
+                target = self.tbl_training.item(r, 1).text().strip()
+                dist_text = self.tbl_training.item(r, 2).text().strip()
+                if not target:
+                    error = 'row {0}: empty target'.format(r + 1)
+                    break
+                try:
+                    float(dist_text)
+                except ValueError:
+                    error = 'row {0}: distance is not a number'.format(r + 1)
+                    break
+                if target.lower() == 'air':
+                    has_air = True
+            if error is None and not has_air:
+                error = 'no row has Target = "air" (required by pimd_features.py)'
+
+        valid = error is None
+        if valid:
+            self.lbl_training_validation.setText('✓ {0} targets'.format(rows))
+            self.lbl_training_validation.setStyleSheet('color: green;')
+        else:
+            self.lbl_training_validation.setText('✗ {0}'.format(error))
+            self.lbl_training_validation.setStyleSheet('color: red;')
+
+        if self._training_current_row is None:   # never re-enable Start mid-session
+            self.pb_training_start.setEnabled(valid)
+        return valid
+
+    # -- mark-text rule (mirrors the deleted _on_mark_hotkey branches) ------
+
+    def _training_row_mark_text(self, row):
+        target = self.tbl_training.item(row, 1).text().strip()
+        if target.lower() == 'air':
+            return 'air'   # no @ suffix — required exact match for pimd_features.py
+        distance = self.tbl_training.item(row, 2).text().strip()
+        return '{0} @{1}'.format(target, distance)
+
+    # -- Start / Pause / Stop / Space ---------------------------------------
+
+    def _on_training_start(self):
+        if not self._validate_training_table():
+            self.statusBar().showMessage('Training list invalid — fix the table before starting.')
+            return
+        if not self.serial.isOpen() or self.pb_start.text() != 'Running':
+            self.statusBar().showMessage(
+                'Connect and start streaming before beginning a training session.')
+            return
+        if self._recording:
+            self.statusBar().showMessage('A session is already recording — stop it first.')
+            return
+
+        self._clear_training_live_columns()
+
+        # Reuses _session_start()'s file-open/header machinery verbatim, but
+        # passes notes derived from the run list instead of popping up the
+        # interactive notes prompt (there's nothing to ask the operator that
+        # isn't already in the table). Syncs pb_record's checked state without
+        # re-entering _toggle_record_frames -> _session_start() a second time.
+        self._session_start(notes=self._build_training_notes())
+        self.pb_record.blockSignals(True)
+        self.pb_record.setChecked(True)
+        self.pb_record.blockSignals(False)
+
+        self._training_current_row = 0
+        self._training_paused = False
+        self._training_row_start_wall = time.time()
+        self._append_mark(self._training_row_mark_text(0))
+        self.tbl_training.selectRow(0)
+        self._set_training_active_ui(True)
+        self._update_training_status_label()
+
+    def _clear_training_live_columns(self):
+        """Reset Time-at-Target and Settledness back to '—' for every row --
+        otherwise a re-run of the same list would start showing the previous
+        run's stale elapsed-time/settledness values on rows not yet reached."""
+        for r in range(self.tbl_training.rowCount()):
+            self.tbl_training.item(r, 3).setText('—')
+            self.tbl_training.item(r, 4).setText('—')
+
+    def _build_training_notes(self):
+        """Session notes auto-derived from the run list, replacing the
+        interactive notes prompt: nothing the operator would type isn't
+        already captured by the table itself."""
+        lines = ['Training Session run list:']
+        for r in range(self.tbl_training.rowCount()):
+            idx = self.tbl_training.item(r, 0).text()
+            target = self.tbl_training.item(r, 1).text()
+            distance = self.tbl_training.item(r, 2).text()
+            lines.append('{0}. {1} @{2}cm'.format(idx, target, distance))
+        return '\n'.join(lines)
+
+    def _on_training_pause_toggled(self, checked):
+        if checked:
+            self._training_paused = True
+            self._training_pause_started = time.time()
+            self.pb_training_pause.setText('Resume')
+            self.pb_training_pause.setStyleSheet(self.MY_YELLOW)
+        else:
+            self._training_paused = False
+            if self._training_pause_started is not None:
+                self._training_row_start_wall += (time.time() - self._training_pause_started)
+            self._training_pause_started = None
+            self.pb_training_pause.setText('Pause')
+            self.pb_training_pause.setStyleSheet('')
+        self._update_training_status_label()
+
+    def _on_training_stop(self):
+        if self._training_current_row is None:
+            return
+        self.pb_record.setChecked(False)   # -> _session_stop() -> centralized reset
+
+    def _on_training_space(self):
+        if self._training_current_row is None:
+            return
+        if self._training_paused:
+            self.statusBar().showMessage('Paused — resume before marking next target')
+            return
+
+        last = self.tbl_training.rowCount() - 1
+        if self._training_current_row >= last:
+            n_targets = self.tbl_training.rowCount()
+            path = self._session_path
+            self.pb_record.setChecked(False)   # -> _session_stop() -> centralized reset
+            self.statusBar().showMessage(
+                'Training session complete: {0} targets recorded → {1}'.format(n_targets, path))
+        else:
+            self._training_current_row += 1
+            self._training_row_start_wall = time.time()
+            self._append_mark(self._training_row_mark_text(self._training_current_row))
+            self.tbl_training.selectRow(self._training_current_row)
+            self._update_training_status_label()
+
+    # -- UI enablement / reset -----------------------------------------
+
+    def _set_training_active_ui(self, active):
+        self.pb_training_start.setEnabled(not active and self._validate_training_table())
+        self.pb_training_pause.setEnabled(active)
+        self.pb_training_stop.setEnabled(active)
+        self.pb_training_add_row.setEnabled(not active)
+        self.pb_training_remove_row.setEnabled(not active)
+        self.pb_training_load_list.setEnabled(not active)
+        self.pb_training_save_list.setEnabled(not active)
+        self.tbl_training.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers if active
+            else QAbstractItemView.EditTrigger.DoubleClicked)
+        if not active:
+            self.pb_training_pause.blockSignals(True)
+            self.pb_training_pause.setChecked(False)
+            self.pb_training_pause.setText('Pause')
+            self.pb_training_pause.setStyleSheet('')
+            self.pb_training_pause.blockSignals(False)
+
+    def _update_training_status_label(self):
+        if self._training_current_row is None:
+            self.lbl_training_status.setText('Not recording')
+        else:
+            n = self.tbl_training.rowCount()
+            state = ' (paused)' if self._training_paused else ''
+            self.lbl_training_status.setText('Recording — target {0}/{1}{2}'.format(
+                self._training_current_row + 1, n, state))
+
+    def _reset_training_ui(self):
+        """Called from _session_stop() whenever a Training Session was active
+        when the underlying recording got closed out — from any of its
+        trigger points, not just our own Stop button."""
+        self._training_current_row = None
+        self._training_paused = False
+        self._training_pause_started = None
+        self._training_row_start_wall = None
+        self._set_training_active_ui(False)
+        self._update_training_status_label()
+
+    # -- live update (called from _redraw()) -----------------------------
+
+    def _update_training_live(self):
+        row = self._training_current_row
+        n = self.sp_training_settle.value()
+        recent = list(self._rolling_buf)[-n:]
+        if len(recent) >= 2:
+            mat = np.array([arr for _, arr in recent], dtype=float)
+            stds = mat.std(0)
+            settle_text = '{0:.3f}'.format(stds.mean() / 1000.0)
+        else:
+            settle_text = '—'
+        self.tbl_training.item(row, 4).setText(settle_text)
+
+        if not self._training_paused:
+            elapsed = time.time() - self._training_row_start_wall
+            self.tbl_training.item(row, 3).setText('{0:.1f}'.format(elapsed))
+
+    # -- saved target-list template ---------------------------------------
+
+    def _refresh_training_list_file_list(self):
+        self.cb_training_list.clear()
+        for name in _list_training_list_files():
+            self.cb_training_list.addItem(name)
+
+    def _on_training_load_list(self):
+        name = self.cb_training_list.currentText()
+        if not name:
+            self.statusBar().showMessage('No saved target list selected')
+            return
+        try:
+            data = _load_training_list_file(name)
+        except Exception as e:
+            self.statusBar().showMessage('Load failed: {0}'.format(e))
+            return
+        rows = data.get('rows', [])
+        self.tbl_training.blockSignals(True)
+        self.tbl_training.setRowCount(0)
+        for r_data in rows:
+            r = self.tbl_training.rowCount()
+            self.tbl_training.insertRow(r)
+            self._populate_training_row(r, r_data.get('target', ''), r_data.get('distance_cm', 0))
+        if self.tbl_training.rowCount() == 0:
+            self.tbl_training.insertRow(0)
+            self._populate_training_row(0, 'air', 0)
+        self._renumber_training_rows()
+        self.tbl_training.blockSignals(False)
+        self._validate_training_table()
+        self.statusBar().showMessage('Loaded target list: {0} ({1} rows)'.format(
+            name, self.tbl_training.rowCount()))
+
+    def _on_training_save_list(self):
+        name, ok = QInputDialog.getText(self, 'Save Target List', 'List name:')
+        if not ok or not name.strip():
+            return
+        rows = []
+        for r in range(self.tbl_training.rowCount()):
+            target = self.tbl_training.item(r, 1).text().strip()
+            dist_text = self.tbl_training.item(r, 2).text().strip()
+            try:
+                distance_cm = float(dist_text)
+            except ValueError:
+                self.statusBar().showMessage(
+                    'Cannot save: row {0} has a non-numeric distance'.format(r + 1))
+                return
+            rows.append({'target': target, 'distance_cm': distance_cm})
+        _save_training_list_file(name.strip(), rows)
+        self._refresh_training_list_file_list()
+        idx = self.cb_training_list.findText(name.strip())
+        if idx >= 0:
+            self.cb_training_list.setCurrentIndex(idx)
+        self.statusBar().showMessage('Saved target list: {0}'.format(name.strip()))
+
+    # ------------------------------------------------------------------
+    # Tab 3 — Analysis
+    # ------------------------------------------------------------------
+    ANALYSIS_TAB_INDEX = 3
+
+    def _style_compact(self, plot, title=None):
+        """Small tick font + a little padding + optional small title --
+        applied to every Analysis-tab plot so ~20 small panels can share
+        one screen without their chrome eating the plot area."""
+        font = QFont()
+        font.setPointSize(7)
+        plot.getAxis('bottom').setStyle(tickFont=font)
+        plot.getAxis('left').setStyle(tickFont=font)
+        plot.setDefaultPadding(0.02)
+        if title:
+            plot.setTitle(title, size='7pt')
+
+    def _build_analysis_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Left column: Controls + Signatures + Heatmap, stacked, sharing one
+        # width -- Signatures/Controls used to span the full tab width above
+        # everything else; now they're grouped with the heatmap so the right
+        # side (charts) can reach the top of the tab.
+        left_col = QWidget()
+        left_v = QVBoxLayout(left_col)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.setSpacing(4)
+
+        top_box = QGroupBox('Controls')
+        top_v = QVBoxLayout(top_box)
+        top_v.setContentsMargins(4, 4, 4, 4)
+        top_v.setSpacing(2)
+        top_v.addLayout(self._build_analysis_ctrl_row_a())
+        left_v.addWidget(top_box)
+        left_v.addWidget(self._build_analysis_signatures_group())
+        left_v.addWidget(self._build_analysis_heatmap_group(), stretch=1)
+
+        # Right column: row1 (strips | chart2 side by side) + 8-grid + 9-grid.
+        row1_split = QSplitter(Qt.Orientation.Horizontal)
+        row1_split.setHandleWidth(4)
+        row1_split.addWidget(self._build_analysis_strips_group())
+        row1_split.addWidget(self._build_analysis_chart2_group())
+        row1_split.setSizes([700, 700])
+
+        right_split = QSplitter(Qt.Orientation.Vertical)
+        right_split.setHandleWidth(4)
+        right_split.addWidget(row1_split)
+        right_split.addWidget(self._build_analysis_grid8_group())
+        right_split.addWidget(self._build_analysis_grid9_group())
+        right_split.setSizes([220, 260, 260])
+
+        main_split = QSplitter(Qt.Orientation.Horizontal)
+        main_split.setHandleWidth(4)
+        main_split.addWidget(left_col)
+        main_split.addWidget(right_split)
+        main_split.setSizes([560, 1440])
+        layout.addWidget(main_split, stretch=1)
+
+        return w
+
+    def _build_analysis_ctrl_row_a(self):
+        ctrl_a = QHBoxLayout()
+        ctrl_a.addWidget(QLabel('Avg N frames:'))
+        self.sp_analysis_avg_n = QSpinBox()
+        self.sp_analysis_avg_n.setRange(1, 200)
+        self.sp_analysis_avg_n.setValue(self._analysis_avg_n)
+        self.sp_analysis_avg_n.valueChanged.connect(self._on_analysis_avg_n_changed)
+        ctrl_a.addWidget(self.sp_analysis_avg_n)
+
+        self.pb_analysis_capture = QPushButton('Capture baseline')
+        self.pb_analysis_capture.clicked.connect(self._start_capture)
+        ctrl_a.addWidget(self.pb_analysis_capture)
+
+        self.pb_analysis_clear = QPushButton('Clear baseline')
+        self.pb_analysis_clear.clicked.connect(self.clear_baseline)
+        ctrl_a.addWidget(self.pb_analysis_clear)
+
+        self.lbl_analysis_baseline_info = QLabel('No baseline')
+        ctrl_a.addWidget(self.lbl_analysis_baseline_info)
+        ctrl_a.addStretch(1)
+        return ctrl_a
+
+    def _build_analysis_signatures_group(self):
+        box = QGroupBox('Signatures')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+        self._build_sig_row1_files(v)
+        v.addWidget(self.lw_analysis_templates)
+        self._build_sig_row2_capture_inputs(v)
+        self._build_sig_row3_readout_save(v)
+        self._build_sig_row4_session(v)
+        self._sig_capture_buttons = {
+            'air_before': self.pb_sig_air_before,
+            'target':     self.pb_sig_target,
+            'air_after':  self.pb_sig_air_after,
+        }
+        self._update_sig_mode_label()
+        self._update_sig_capture_gating()
+        self._update_sig_session_status_label()
+        return box
+
+    def _build_sig_row1_files(self, v):
+        row_a = QHBoxLayout()
+        pb_load_sigs = QPushButton('Load signatures…')
+        pb_load_sigs.clicked.connect(self._on_load_signatures_clicked)
+        row_a.addWidget(pb_load_sigs)
+
+        pb_new = QPushButton('New file…')
+        pb_new.clicked.connect(self._on_sig_new_file_clicked)
+        row_a.addWidget(pb_new)
+        row_a.addStretch(1)
+        v.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        pb_open = QPushButton('Open for editing…')
+        pb_open.clicked.connect(self._on_sig_open_for_edit_clicked)
+        row_b.addWidget(pb_open)
+
+        pb_clear_sigs = QPushButton('Clear signatures')
+        pb_clear_sigs.clicked.connect(self._on_clear_signatures_clicked)
+        row_b.addWidget(pb_clear_sigs)
+
+        self.lbl_sig_mode = QLabel('Mode: read-only')
+        row_b.addWidget(self.lbl_sig_mode, stretch=1)
+        v.addLayout(row_b)
+
+        # Shrunk from the original wrapped left-to-right "tag" flow --
+        # labels now carry amp/SNR/quality text, so a normal scrollable
+        # top-to-bottom list stays compact and legible, freeing room below
+        # for the capture/save/session controls.
+        self.lw_analysis_templates = QListWidget()
+        self.lw_analysis_templates.setFlow(QListWidget.Flow.TopToBottom)
+        self.lw_analysis_templates.setMaximumHeight(46)
+        self.lw_analysis_templates.itemChanged.connect(self._on_analysis_template_item_changed)
+        self.lw_analysis_templates.currentItemChanged.connect(lambda *_: self._update_sig_capture_gating())
+
+    def _build_sig_row2_capture_inputs(self, v):
+        row_a = QHBoxLayout()
+        row_a.addWidget(QLabel('Target:'))
+        self.le_sig_target = QLineEdit()
+        self.le_sig_target.setPlaceholderText('e.g. copper pipe, or air')
+        self.le_sig_target.setMaximumWidth(160)
+        self.le_sig_target.textChanged.connect(self._update_sig_capture_gating)
+        row_a.addWidget(self.le_sig_target)
+
+        row_a.addWidget(QLabel('Distance (cm):'))
+        self.sp_sig_distance = QDoubleSpinBox()
+        self.sp_sig_distance.setRange(0.0, 500.0)
+        self.sp_sig_distance.setDecimals(1)
+        self.sp_sig_distance.setValue(5.0)
+        row_a.addWidget(self.sp_sig_distance)
+
+        self.cb_sig_no_distance = QCheckBox('no distance (air)')
+        self.cb_sig_no_distance.toggled.connect(self._update_sig_capture_gating)
+        row_a.addWidget(self.cb_sig_no_distance)
+        row_a.addStretch(1)
+        v.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        row_b.addWidget(QLabel('Frames:'))
+        self.sp_sig_capture_n = QSpinBox()
+        self.sp_sig_capture_n.setRange(10, 2000)
+        self.sp_sig_capture_n.setValue(self._sig_capture_n)
+        row_b.addWidget(self.sp_sig_capture_n)
+
+        self.pb_sig_air_before = QPushButton(self._SIG_CAPTURE_LABELS['air_before'])
+        self.pb_sig_air_before.clicked.connect(lambda: self._start_sig_capture('air_before'))
+        row_b.addWidget(self.pb_sig_air_before)
+
+        self.pb_sig_target = QPushButton(self._SIG_CAPTURE_LABELS['target'])
+        self.pb_sig_target.clicked.connect(lambda: self._start_sig_capture('target'))
+        row_b.addWidget(self.pb_sig_target)
+
+        self.pb_sig_air_after = QPushButton(self._SIG_CAPTURE_LABELS['air_after'])
+        self.pb_sig_air_after.clicked.connect(lambda: self._start_sig_capture('air_after'))
+        row_b.addWidget(self.pb_sig_air_after)
+        row_b.addStretch(1)
+        v.addLayout(row_b)
+
+    def _build_sig_row3_readout_save(self, v):
+        row_a = QHBoxLayout()
+        self.lbl_sig_readout = QLabel('Amp: —  Mean|Δ|: —  Splithalf: —  SNR: —  Quality: —')
+        self.lbl_sig_readout.setWordWrap(True)
+        row_a.addWidget(self.lbl_sig_readout, stretch=1)
+        v.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        self.pb_sig_save = QPushButton('Save Signature')
+        self.pb_sig_save.clicked.connect(self._on_sig_save_clicked)
+        row_b.addWidget(self.pb_sig_save)
+
+        self.pb_sig_delete = QPushButton('Delete Selected')
+        self.pb_sig_delete.clicked.connect(self._on_sig_delete_clicked)
+        row_b.addWidget(self.pb_sig_delete)
+        row_b.addStretch(1)
+        v.addLayout(row_b)
+
+    def _build_sig_row4_session(self, v):
+        row_a = QHBoxLayout()
+        lbl_session = QLabel('Session (alternate path — full recording for pimd_features.py):')
+        lbl_session.setWordWrap(True)
+        row_a.addWidget(lbl_session, stretch=1)
+        v.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        self.pb_sig_session_start = QPushButton('Start')
+        self.pb_sig_session_start.clicked.connect(self._on_sig_session_start)
+        row_b.addWidget(self.pb_sig_session_start)
+
+        self.pb_sig_session_pause = QPushButton('Pause')
+        self.pb_sig_session_pause.setCheckable(True)
+        self.pb_sig_session_pause.setEnabled(False)
+        self.pb_sig_session_pause.toggled.connect(self._on_sig_session_pause_toggled)
+        row_b.addWidget(self.pb_sig_session_pause)
+
+        self.pb_sig_session_stop = QPushButton('Stop')
+        self.pb_sig_session_stop.setEnabled(False)
+        self.pb_sig_session_stop.clicked.connect(self._on_sig_session_stop)
+        row_b.addWidget(self.pb_sig_session_stop)
+
+        self.pb_sig_session_mark = QPushButton('Mark')
+        self.pb_sig_session_mark.setEnabled(False)
+        self.pb_sig_session_mark.clicked.connect(self._on_sig_session_mark)
+        row_b.addWidget(self.pb_sig_session_mark)
+
+        self.lbl_sig_session_status = QLabel('Not recording')
+        row_b.addWidget(self.lbl_sig_session_status)
+        row_b.addStretch(1)
+        v.addLayout(row_b)
+
+    # -- Chart 1: Analysis heatmap variant (renamed/reformatted axes) -------
+
+    def _build_analysis_heatmap_group(self):
+        box = QGroupBox('Heatmap — Pulse Width × Threshold')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel('Normalize:'))
+        self.cb_hm_norm = QComboBox()
+        self.cb_hm_norm.addItems(['Auto (sync Heatmap tab)', 'Δ deviation', 'Z normalised', 'RAW abs',
+                                   'Std Dev (rolling N)'])
+        self.cb_hm_norm.currentIndexChanged.connect(self._on_hm_norm_changed)
+        ctrl.addWidget(self.cb_hm_norm)
+
+        ctrl.addWidget(QLabel('Scale:'))
+        self.cb_hm_scale_auto = QCheckBox('Auto ±')
+        self.cb_hm_scale_auto.setChecked(True)
+        self.cb_hm_scale_auto.toggled.connect(self._on_hm_scale_auto_toggled)
+        ctrl.addWidget(self.cb_hm_scale_auto)
+        self.sp_hm_scale_manual = QDoubleSpinBox()
+        self.sp_hm_scale_manual.setRange(100, 5_000_000)
+        self.sp_hm_scale_manual.setSingleStep(10_000)
+        self.sp_hm_scale_manual.setDecimals(0)
+        self.sp_hm_scale_manual.setValue(self._analysis_hm_manual_range_uv)
+        self.sp_hm_scale_manual.setEnabled(False)
+        self.sp_hm_scale_manual.valueChanged.connect(self._on_hm_scale_manual_changed)
+        ctrl.addWidget(self.sp_hm_scale_manual)
+        ctrl.addWidget(QLabel('µV'))
+        ctrl.addStretch(1)
+        v.addLayout(ctrl)
+
+        v.addWidget(self._build_analysis_heatmap_widget())
+        return box
+
+    def _build_analysis_heatmap_widget(self):
+        self.analysis_gw = pg.GraphicsLayoutWidget()
+        self.analysis_plot = self.analysis_gw.addPlot()
+        self.analysis_plot.invertY(True)
+        self._style_compact(self.analysis_plot)
+
+        self.analysis_img = pg.ImageItem()
+        self.analysis_img.setColorMap(self.cm_div)
+        self.analysis_plot.addItem(self.analysis_img)
+
+        # Colorbar/legend, docked below the heatmap's x-axis via insert_in --
+        # doubles as an interactive range control: dragging its handles sets
+        # the image's levels directly (see _update_analysis_heatmap's Manual-
+        # scale branch, which leaves the bar in control instead of overriding
+        # it every redraw tick). Also gives the mV/σ <-> colour legend asked
+        # for, without a second widget.
+        self.analysis_colorbar = pg.ColorBarItem(
+            values=(-self._analysis_hm_manual_range_uv, self._analysis_hm_manual_range_uv),
+            colorMap=self.cm_div, orientation='horizontal', label='value (µV, σ for Z mode)')
+        cbar_font = QFont()
+        cbar_font.setPointSize(7)
+        self.analysis_colorbar.axis.setStyle(tickFont=cbar_font)
+        self.analysis_colorbar.setImageItem(self.analysis_img, insert_in=self.analysis_plot)
+        self.analysis_colorbar.sigLevelsChanged.connect(self._on_analysis_colorbar_levels_changed)
+        # setImageItem() above calls img.setLevels() while the image still
+        # has no data -- pyqtgraph defers that (ImageItem._defferedLevels)
+        # and replays it at the end of the *next* setImage() call, which
+        # would otherwise clobber the first real levels _update_analysis_
+        # heatmap computes. A throwaway zero image flushes that replay now.
+        self.analysis_img.setImage(np.zeros((self._n_bands, self._n_cells)))
+
+        self._rebuild_analysis_heatmap_axes()
+        return self.analysis_gw
+
+    def _analysis_hm_mode(self):
+        return self._display_mode if self._analysis_hm_norm_auto else self._analysis_hm_display_mode
+
+    def _on_hm_norm_changed(self, idx):
+        self._analysis_hm_norm_auto = (idx == 0)
+        if idx > 0:
+            self._analysis_hm_display_mode = ('delta', 'z', 'raw', 'stddev')[idx - 1]
+
+    def _on_hm_scale_auto_toggled(self, checked):
+        self._analysis_hm_scale_auto = checked
+        self.sp_hm_scale_manual.setEnabled(not checked)
+
+    def _on_hm_scale_manual_changed(self, val):
+        self._analysis_hm_manual_range_uv = val
+        if not self._analysis_hm_scale_auto:
+            lo = 0.0 if self._analysis_hm_mode() in ('raw', 'stddev') else -val
+            self.analysis_colorbar.setLevels((lo, val))
+
+    def _on_analysis_colorbar_levels_changed(self, _bar):
+        """Fires only on an actual drag of the colorbar's handles (setLevels()
+        calls made by our own redraw code don't emit this) -- mirror the
+        dragged range back into the manual-range spinbox/state so they stay
+        consistent and the range survives a settings save. Ignored in Auto
+        mode: the next redraw tick snaps the bar back to the auto-computed
+        range anyway, so a drag there wouldn't stick."""
+        if self._analysis_hm_scale_auto:
+            return
+        lo, hi = self.analysis_colorbar.levels()
+        val = hi if self._analysis_hm_mode() in ('raw', 'stddev') else max(abs(lo), abs(hi))
+        self._analysis_hm_manual_range_uv = val
+        self.sp_hm_scale_manual.blockSignals(True)
+        self.sp_hm_scale_manual.setValue(val)
+        self.sp_hm_scale_manual.blockSignals(False)
+
+    def _rebuild_analysis_heatmap_axes(self):
+        """Same data/row-order as the Heatmap tab's chart -- only the label
+        text/format differs (Pulse Width y-axis, integer µs, no frequency;
+        Threshold x-axis stays volts/2dp with each column's delay_us range
+        across all bands as a second label line, since delay_us -- unlike
+        threshold_v -- isn't constant per column across bands)."""
+        ax_b = self.analysis_plot.getAxis('bottom')
+        labels = []
+        for j in range(self._n_cells):
+            lo, hi = self._cell_delay_range_us[j]
+            if self._has_threshold_v:
+                thr = self._profile['bands'][0]['threshold_v'][j]
+                labels.append('{0:.2f}V\n({1:.2f}-{2:.2f})'.format(thr, lo, hi))
+            else:
+                labels.append('c{0}\n({1:.2f}-{2:.2f})'.format(j, lo, hi))
+        ax_b.setTicks([[(j + 0.5, labels[j]) for j in range(self._n_cells)]])
+        ax_b.setLabel('Threshold' if self._has_threshold_v else 'Cell', **{'font-size': '7pt'})
+
+        ax_l = self.analysis_plot.getAxis('left')
+        pw_labels = ['{0:.0f}µs'.format(self._bands_meta[self._band_display_order[d]][1])
+                     for d in range(self._n_bands)]
+        ax_l.setTicks([[(d + 0.5, pw_labels[d]) for d in range(self._n_bands)]])
+        ax_l.setLabel('Pulse Width', **{'font-size': '7pt'})
+
+        self.analysis_plot.setXRange(0, self._n_cells, padding=0)
+        self.analysis_plot.setYRange(0, self._n_bands, padding=0)
+
+    # -- Chart 2: normalized band-mean vs pulse width -----------------------
+
+    def _build_analysis_chart2_group(self):
+        box = QGroupBox('Pulse Width Mean (normalized)')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+        self._build_analysis_c2_ctrl_row(v)
+        v.addWidget(self._build_analysis_chart2())
+        return box
+
+    def _build_analysis_c2_ctrl_row(self, v):
+        row_a = QHBoxLayout()
+        row_a.addWidget(QLabel('Normalize:'))
+        self.cb_c2_norm_auto = QCheckBox('Auto (− group mean)')
+        self.cb_c2_norm_auto.setChecked(True)
+        self.cb_c2_norm_auto.toggled.connect(self._on_c2_norm_auto_toggled)
+        row_a.addWidget(self.cb_c2_norm_auto)
+        row_a.addWidget(QLabel('Manual ref (mV):'))
+        self.sp_c2_norm_manual = QDoubleSpinBox()
+        self.sp_c2_norm_manual.setRange(-100_000, 100_000)
+        self.sp_c2_norm_manual.setDecimals(3)
+        self.sp_c2_norm_manual.setValue(self._analysis_c2_manual_ref)
+        self.sp_c2_norm_manual.setEnabled(False)
+        self.sp_c2_norm_manual.valueChanged.connect(self._on_c2_norm_manual_changed)
+        row_a.addWidget(self.sp_c2_norm_manual)
+        row_a.addStretch(1)
+        v.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        row_b.addWidget(QLabel('Scale:'))
+        self.cb_c2_scale_auto = QCheckBox('Auto')
+        self.cb_c2_scale_auto.setChecked(True)
+        self.cb_c2_scale_auto.toggled.connect(self._on_c2_scale_auto_toggled)
+        row_b.addWidget(self.cb_c2_scale_auto)
+        row_b.addWidget(QLabel('± range:'))
+        self.sp_c2_scale_manual = QDoubleSpinBox()
+        self.sp_c2_scale_manual.setRange(0.01, 1000)
+        self.sp_c2_scale_manual.setDecimals(3)
+        self.sp_c2_scale_manual.setValue(self._analysis_c2_manual_halfrange)
+        self.sp_c2_scale_manual.setEnabled(False)
+        self.sp_c2_scale_manual.valueChanged.connect(self._on_c2_scale_manual_changed)
+        row_b.addWidget(self.sp_c2_scale_manual)
+        row_b.addStretch(1)
+        v.addLayout(row_b)
+
+    def _build_analysis_chart2(self):
+        self.analysis_c2_glw = pg.GraphicsLayoutWidget()
+        self.analysis_c2_plot = self.analysis_c2_glw.addPlot()
+        self.analysis_c2_plot.setLogMode(x=True, y=False)
+        self._style_compact(self.analysis_c2_plot)
+        self.analysis_c2_plot.setLabel('bottom', 'pulse width (µs)', **{'font-size': '7pt'})
+        self.analysis_c2_refline = self.analysis_c2_plot.addLine(
+            y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
+        self.analysis_c2_curve = self.analysis_c2_plot.plot(
+            [], [], pen=pg.mkPen('b', width=2), symbol='o', symbolSize=5)
+        self.analysis_c2_template_curves = {}
+        self._rebuild_analysis_chart2_ticks()
+        return self.analysis_c2_glw
+
+    def _on_c2_norm_auto_toggled(self, checked):
+        self._analysis_c2_norm_auto = checked
+        self.sp_c2_norm_manual.setEnabled(not checked)
+        self._refresh_analysis_overlays()
+
+    def _on_c2_norm_manual_changed(self, val):
+        self._analysis_c2_manual_ref = val
+        self._refresh_analysis_overlays()
+
+    def _on_c2_scale_auto_toggled(self, checked):
+        self._analysis_c2_scale_auto = checked
+        self.sp_c2_scale_manual.setEnabled(not checked)
+        self._apply_c2_scale()
+
+    def _on_c2_scale_manual_changed(self, val):
+        self._analysis_c2_manual_halfrange = val
+        self._apply_c2_scale()
+
+    def _apply_c2_scale(self):
+        if self._analysis_c2_scale_auto:
+            self.analysis_c2_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+        else:
+            self.analysis_c2_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
+            half = self._analysis_c2_manual_halfrange
+            self.analysis_c2_plot.setYRange(-half, half, padding=0)
+
+    def _rebuild_analysis_chart2_ticks(self):
+        ticks = [(math.log10(p), '{0:.3g}'.format(p)) for p in self._pulse_us_sorted]
+        self.analysis_c2_plot.getAxis('bottom').setTicks([ticks, []])
+        # Explicit range: an InfiniteLine (the y=1 refline) doesn't
+        # contribute to auto-range, so before any curve data arrives the
+        # view would otherwise default to an arbitrary, mostly-empty span.
+        lo, hi = math.log10(min(self._pulse_us_sorted)), math.log10(max(self._pulse_us_sorted))
+        self.analysis_c2_plot.setXRange(lo, hi, padding=0.1)
+
+    # -- 8-grid: one panel per band -- that band's own per-cell profile -----
+
+    def _build_analysis_grid8_group(self):
+        box = QGroupBox('Per Pulse Width Cell Profiles (8-grid)')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+        v.addLayout(self._build_analysis_g8_ctrl_row())
+        v.addWidget(self._build_analysis_grid8())
+        return box
+
+    def _build_analysis_g8_ctrl_row(self):
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel('Normalize:'))
+        self.cb_g8_norm_auto = QCheckBox('Auto (− group mean)')
+        self.cb_g8_norm_auto.setChecked(True)
+        self.cb_g8_norm_auto.toggled.connect(self._on_g8_norm_auto_toggled)
+        ctrl.addWidget(self.cb_g8_norm_auto)
+        ctrl.addWidget(QLabel('Manual ref (mV):'))
+        self.sp_g8_norm_manual = QDoubleSpinBox()
+        self.sp_g8_norm_manual.setRange(-100_000, 100_000)
+        self.sp_g8_norm_manual.setDecimals(3)
+        self.sp_g8_norm_manual.setValue(self._analysis_g8_manual_ref)
+        self.sp_g8_norm_manual.setEnabled(False)
+        self.sp_g8_norm_manual.valueChanged.connect(self._on_g8_norm_manual_changed)
+        ctrl.addWidget(self.sp_g8_norm_manual)
+
+        ctrl.addWidget(QLabel('Scale:'))
+        self.cb_g8_scale_auto = QCheckBox('Auto')
+        self.cb_g8_scale_auto.setChecked(True)
+        self.cb_g8_scale_auto.toggled.connect(self._on_g8_scale_auto_toggled)
+        ctrl.addWidget(self.cb_g8_scale_auto)
+        ctrl.addWidget(QLabel('± range:'))
+        self.sp_g8_scale_manual = QDoubleSpinBox()
+        self.sp_g8_scale_manual.setRange(0.01, 1000)
+        self.sp_g8_scale_manual.setDecimals(3)
+        self.sp_g8_scale_manual.setValue(self._analysis_g8_manual_halfrange)
+        self.sp_g8_scale_manual.setEnabled(False)
+        self.sp_g8_scale_manual.valueChanged.connect(self._on_g8_scale_manual_changed)
+        ctrl.addWidget(self.sp_g8_scale_manual)
+        ctrl.addStretch(1)
+        return ctrl
+
+    def _build_analysis_grid8(self):
+        self.analysis_g8_glw = pg.GraphicsLayoutWidget()
+        self._rebuild_analysis_grid8()
+        return self.analysis_g8_glw
+
+    def _rebuild_analysis_grid8(self):
+        """Rebuilds panel count/order to match the current profile's n_bands
+        (called from _apply_profile() on every profile change, same pattern
+        as _rebuild_stats_table/_rebuild_heatmap_axes). Y axis is linked
+        across all panels (locked to panel 0) since they share one scale."""
+        self.analysis_g8_glw.clear()
+        self.analysis_g8_plots = []
+        self.analysis_g8_curves = []
+        self.analysis_g8_template_curves = []
+        for i, b in enumerate(self._pulse_sort_order):
+            plot = self.analysis_g8_glw.addPlot(row=0, col=i)
+            self._style_compact(plot, title='{0:.0f}µs'.format(self._bands_meta[b][1]))
+            if i > 0:
+                plot.hideAxis('left')
+            plot.addLine(y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
+            curve = plot.plot([], [], pen=pg.mkPen('b', width=2), symbol='o', symbolSize=4)
+            self.analysis_g8_plots.append(plot)
+            self.analysis_g8_curves.append(curve)
+            self.analysis_g8_template_curves.append({})
+        self._rebuild_analysis_grid8_ticks()
+
+    def _rebuild_analysis_grid8_ticks(self):
+        """x-axis: each cell's delay_us averaged across all bands (1 d.p.) --
+        not threshold_v, so grid8 shows a different identifying dimension
+        than grid9's per-panel titles."""
+        ticks = [(j + 0.5, '{0:.1f}'.format(self._cell_delay_avg_us[j])) for j in range(self._n_cells)]
+        for plot in self.analysis_g8_plots:
+            plot.getAxis('bottom').setTicks([ticks])
+            plot.setXRange(0, self._n_cells, padding=0)
+
+    def _on_g8_norm_auto_toggled(self, checked):
+        self._analysis_g8_norm_auto = checked
+        self.sp_g8_norm_manual.setEnabled(not checked)
+        self._refresh_analysis_overlays()
+
+    def _on_g8_norm_manual_changed(self, val):
+        self._analysis_g8_manual_ref = val
+        self._refresh_analysis_overlays()
+
+    def _on_g8_scale_auto_toggled(self, checked):
+        self._analysis_g8_scale_auto = checked
+        self.sp_g8_scale_manual.setEnabled(not checked)
+        self._apply_g8_scale()
+
+    def _on_g8_scale_manual_changed(self, val):
+        self._analysis_g8_manual_halfrange = val
+        self._apply_g8_scale()
+
+    def _apply_g8_scale(self):
+        self._lock_group_yaxis(self.analysis_g8_plots, self._analysis_g8_scale_auto,
+                                self._analysis_g8_manual_halfrange)
+
+    # -- 9-grid: one panel per cell -- that cell's own per-band profile -----
+
+    def _build_analysis_grid9_group(self):
+        box = QGroupBox('Sample Delay Band Profiles (9-grid)')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+        v.addLayout(self._build_analysis_g9_ctrl_row())
+        v.addWidget(self._build_analysis_grid9())
+        return box
+
+    def _build_analysis_g9_ctrl_row(self):
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel('Normalize:'))
+        self.cb_g9_norm_auto = QCheckBox('Auto (− group mean)')
+        self.cb_g9_norm_auto.setChecked(True)
+        self.cb_g9_norm_auto.toggled.connect(self._on_g9_norm_auto_toggled)
+        ctrl.addWidget(self.cb_g9_norm_auto)
+        ctrl.addWidget(QLabel('Manual ref (mV):'))
+        self.sp_g9_norm_manual = QDoubleSpinBox()
+        self.sp_g9_norm_manual.setRange(-100_000, 100_000)
+        self.sp_g9_norm_manual.setDecimals(3)
+        self.sp_g9_norm_manual.setValue(self._analysis_g9_manual_ref)
+        self.sp_g9_norm_manual.setEnabled(False)
+        self.sp_g9_norm_manual.valueChanged.connect(self._on_g9_norm_manual_changed)
+        ctrl.addWidget(self.sp_g9_norm_manual)
+
+        ctrl.addWidget(QLabel('Scale:'))
+        self.cb_g9_scale_auto = QCheckBox('Auto')
+        self.cb_g9_scale_auto.setChecked(True)
+        self.cb_g9_scale_auto.toggled.connect(self._on_g9_scale_auto_toggled)
+        ctrl.addWidget(self.cb_g9_scale_auto)
+        ctrl.addWidget(QLabel('± range:'))
+        self.sp_g9_scale_manual = QDoubleSpinBox()
+        self.sp_g9_scale_manual.setRange(0.01, 1000)
+        self.sp_g9_scale_manual.setDecimals(3)
+        self.sp_g9_scale_manual.setValue(self._analysis_g9_manual_halfrange)
+        self.sp_g9_scale_manual.setEnabled(False)
+        self.sp_g9_scale_manual.valueChanged.connect(self._on_g9_scale_manual_changed)
+        ctrl.addWidget(self.sp_g9_scale_manual)
+        ctrl.addStretch(1)
+        return ctrl
+
+    def _build_analysis_grid9(self):
+        self.analysis_g9_glw = pg.GraphicsLayoutWidget()
+        self._rebuild_analysis_grid9()
+        return self.analysis_g9_glw
+
+    def _rebuild_analysis_grid9(self):
+        """Rebuilds panel count/order to match the current profile's n_cells
+        (called from _apply_profile() on every profile change). Y axis is
+        linked across all panels (locked to panel 0). Panel titles are each
+        cell's delay_us range across all bands, same format as the heatmap's
+        threshold sub-label -- not threshold_v (that's grid8's job now)."""
+        self.analysis_g9_glw.clear()
+        self.analysis_g9_plots = []
+        self.analysis_g9_curves = []
+        self.analysis_g9_template_curves = []
+        for j in range(self._n_cells):
+            lo, hi = self._cell_delay_range_us[j]
+            title = '{0:.2f}-{1:.2f}µs'.format(lo, hi)
+            plot = self.analysis_g9_glw.addPlot(row=0, col=j)
+            plot.setLogMode(x=True, y=False)
+            self._style_compact(plot, title=title)
+            if j > 0:
+                plot.hideAxis('left')
+            plot.addLine(y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
+            curve = plot.plot([], [], pen=pg.mkPen('b', width=2), symbol='o', symbolSize=4)
+            self.analysis_g9_plots.append(plot)
+            self.analysis_g9_curves.append(curve)
+            self.analysis_g9_template_curves.append({})
+        self._rebuild_analysis_grid9_ticks()
+
+    def _rebuild_analysis_grid9_ticks(self):
+        ticks = [(math.log10(p), '{0:.3g}'.format(p)) for p in self._pulse_us_sorted]
+        lo, hi = math.log10(min(self._pulse_us_sorted)), math.log10(max(self._pulse_us_sorted))
+        for plot in self.analysis_g9_plots:
+            plot.getAxis('bottom').setTicks([ticks, []])
+            plot.setXRange(lo, hi, padding=0.1)
+
+    def _on_g9_norm_auto_toggled(self, checked):
+        self._analysis_g9_norm_auto = checked
+        self.sp_g9_norm_manual.setEnabled(not checked)
+
+    def _on_g9_norm_manual_changed(self, val):
+        self._analysis_g9_manual_ref = val
+
+    def _on_g9_scale_auto_toggled(self, checked):
+        self._analysis_g9_scale_auto = checked
+        self.sp_g9_scale_manual.setEnabled(not checked)
+        self._apply_g9_scale()
+
+    def _on_g9_scale_manual_changed(self, val):
+        self._analysis_g9_manual_halfrange = val
+        self._apply_g9_scale()
+
+    def _apply_g9_scale(self):
+        self._lock_group_yaxis(self.analysis_g9_plots, self._analysis_g9_scale_auto,
+                                self._analysis_g9_manual_halfrange)
+
+    @staticmethod
+    def _lock_group_yaxis(plots, scale_auto, manual_halfrange):
+        """'Y axis locked to the first chart in that series': panel 0 sets
+        the range (auto-fit to its own data, or the manual ± range) and
+        every sibling panel is explicitly set to that exact same range --
+        NOT pyqtgraph's setYLink, which aligns ranges by on-screen pixel
+        geometry rather than copying identical numeric bounds, and gave
+        visibly different ranges for panels of the same size in testing."""
+        if not plots:
+            return
+        master = plots[0]
+        if scale_auto:
+            master.enableAutoRange(axis=pg.ViewBox.YAxis)
+            y_range = master.viewRange()[1]
+        else:
+            master.disableAutoRange(axis=pg.ViewBox.YAxis)
+            y_range = (-manual_halfrange, manual_halfrange)
+            master.setYRange(*y_range, padding=0)
+        for plot in plots[1:]:
+            plot.disableAutoRange(axis=pg.ViewBox.YAxis)
+            plot.setYRange(*y_range, padding=0)
+
+    # -- Strip: overall average delta vs time, one chart ---------------------
+
+    def _build_analysis_strips_group(self):
+        box = QGroupBox('Band Mean vs Time (average)')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+        self._build_analysis_strip_ctrl_row(v)
+
+        self.analysis_strip_glw = pg.GraphicsLayoutWidget()
+        self.analysis_strip_plot = self.analysis_strip_glw.addPlot()
+        self._style_compact(self.analysis_strip_plot)
+        self.analysis_strip_plot.setLabel('bottom', 'time (s)', **{'font-size': '7pt'})
+        self.analysis_strip_refline = self.analysis_strip_plot.addLine(
+            y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
+        self.analysis_strip_curve = self.analysis_strip_plot.plot([], [], pen=pg.mkPen('b', width=1))
+        self.analysis_strip_template_lines = {}
+        v.addWidget(self.analysis_strip_glw)
+        return box
+
+    def _build_analysis_strip_ctrl_row(self, v):
+        row_a = QHBoxLayout()
+        row_a.addWidget(QLabel('Normalize:'))
+        self.cb_strip_norm_auto = QCheckBox('Auto (− group mean)')
+        self.cb_strip_norm_auto.setChecked(True)
+        self.cb_strip_norm_auto.toggled.connect(self._on_strip_norm_auto_toggled)
+        row_a.addWidget(self.cb_strip_norm_auto)
+        row_a.addWidget(QLabel('Manual ref (mV):'))
+        self.sp_strip_norm_manual = QDoubleSpinBox()
+        self.sp_strip_norm_manual.setRange(-100_000, 100_000)
+        self.sp_strip_norm_manual.setDecimals(3)
+        self.sp_strip_norm_manual.setValue(self._analysis_strip_manual_ref)
+        self.sp_strip_norm_manual.setEnabled(False)
+        self.sp_strip_norm_manual.valueChanged.connect(self._on_strip_norm_manual_changed)
+        row_a.addWidget(self.sp_strip_norm_manual)
+        row_a.addStretch(1)
+        v.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        row_b.addWidget(QLabel('Scale:'))
+        self.cb_strip_scale_auto = QCheckBox('Auto')
+        self.cb_strip_scale_auto.setChecked(True)
+        self.cb_strip_scale_auto.toggled.connect(self._on_strip_scale_auto_toggled)
+        row_b.addWidget(self.cb_strip_scale_auto)
+        row_b.addWidget(QLabel('± range:'))
+        self.sp_strip_scale_manual = QDoubleSpinBox()
+        self.sp_strip_scale_manual.setRange(0.01, 1000)
+        self.sp_strip_scale_manual.setDecimals(3)
+        self.sp_strip_scale_manual.setValue(self._analysis_strip_manual_halfrange)
+        self.sp_strip_scale_manual.setEnabled(False)
+        self.sp_strip_scale_manual.valueChanged.connect(self._on_strip_scale_manual_changed)
+        row_b.addWidget(self.sp_strip_scale_manual)
+
+        pb_reset = QPushButton('Reset time')
+        pb_reset.clicked.connect(self._on_analysis_strip_reset)
+        row_b.addWidget(pb_reset)
+        row_b.addStretch(1)
+        v.addLayout(row_b)
+
+    def _on_analysis_strip_reset(self):
+        self._analysis_strip_reset_ts = time.time()
+
+    def _on_strip_norm_auto_toggled(self, checked):
+        self._analysis_strip_norm_auto = checked
+        self.sp_strip_norm_manual.setEnabled(not checked)
+
+    def _on_strip_norm_manual_changed(self, val):
+        self._analysis_strip_manual_ref = val
+
+    def _on_strip_scale_auto_toggled(self, checked):
+        self._analysis_strip_scale_auto = checked
+        self.sp_strip_scale_manual.setEnabled(not checked)
+        self._apply_strip_scale()
+
+    def _on_strip_scale_manual_changed(self, val):
+        self._analysis_strip_manual_halfrange = val
+        self._apply_strip_scale()
+
+    def _apply_strip_scale(self):
+        if self._analysis_strip_scale_auto:
+            self.analysis_strip_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+        else:
+            self.analysis_strip_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
+            half = self._analysis_strip_manual_halfrange
+            self.analysis_strip_plot.setYRange(-half, half, padding=0)
+
+    # -- Shared live computation ---------------------------------------------
+
+    def _compute_analysis_matrix(self):
+        """(n_bands, n_cells) delta_mV matrix in raw profile-channel order
+        (band_index*n_cells+cell_index -- NOT display order), averaged over
+        the last 'Avg N frames' raw frames and baseline-corrected via the
+        same shared baseline as the Heatmap tab. None if no data/baseline."""
+        if not self._rolling_buf:
+            return None
+        n = max(1, self._analysis_avg_n)
+        recent = list(self._rolling_buf)[-n:]
+        raw = np.mean([arr for _, arr in recent], axis=0)
+        mean, _ = self._get_current_baseline()
+        if mean is None:
+            return None
+        raw_nxn = raw.reshape(self._n_bands, self._n_cells)
+        return (raw_nxn - mean) / 1000.0
+
+    @staticmethod
+    def _normalize_group(values, auto, manual_ref):
+        """Auto: subtract this curve's own mean. Manual: subtract one shared,
+        user-entered reference value instead -- freezes the comparison scale
+        rather than letting it shift every redraw as the live mean drifts.
+        Mean rather than first-element: a single noisy reference point (e.g.
+        one high-variance cell) used to get imposed at full strength on
+        every other point in the group; the mean dilutes one outlier's
+        contribution by ~1/group-size instead."""
+        values = np.asarray(values, dtype=float)
+        ref = values.mean() if auto else manual_ref
+        return values - ref
+
+    def _update_analysis_heatmap(self):
+        """Chart 1's own matrix/levels, decoupled from the main Heatmap tab
+        except when its Normalize combo is left on 'Auto' -- then it uses
+        whatever display mode is selected there. Runs every redraw tick
+        (cheap, same array sizes as the main heatmap) regardless of which
+        tab is visible, so switching tabs shows current data instantly."""
+        if self._latest_raw is None:
+            return
+        mode = self._analysis_hm_mode()
+        mean, std = self._get_current_baseline()
+        raw_nxn = self._latest_raw.reshape(self._n_bands, self._n_cells)[self._band_display_order]
+        if mean is not None:
+            mean = mean[self._band_display_order]
+            if std is not None:
+                std = std[self._band_display_order]
+        matrix = self._compute_display_matrix(raw_nxn, mean, std, mode=mode)
+
+        cmap = self.cm_seq if mode in ('raw', 'stddev') else self.cm_div
+        self.analysis_img.setColorMap(cmap)
+        self.analysis_colorbar.setColorMap(cmap)
+
+        if self._analysis_hm_scale_auto:
+            if mode in ('raw', 'stddev'):
+                levels = (0.0, float(matrix.max()) * 1.05 + 1.0)
+            else:
+                lim = float(np.max(np.abs(matrix)))
+                if lim < 1.0:
+                    lim = 1.0
+                levels = (-lim, lim)
+            self.analysis_img.setImage(matrix.T, levels=levels)
+            # ImageItem has no sigLevelsChanged in this pyqtgraph version, so
+            # the bar won't pick up a programmatic level change on its own --
+            # push it explicitly (update_items=False: don't bounce back into
+            # the image we just set).
+            self.analysis_colorbar.setLevels(levels, update_items=False)
+        else:
+            # Manual: the colorbar (dragged, or set via the range spinbox) is
+            # the single source of truth for levels -- leave them alone here,
+            # just repaint with whatever's already set, or a drag would get
+            # overwritten on the very next tick.
+            self.analysis_img.setImage(matrix.T, autoLevels=False)
+
+    def _update_analysis_charts(self):
+        matrix = self._compute_analysis_matrix()
+        if hasattr(self, 'lbl_analysis_baseline_info'):
+            self.lbl_analysis_baseline_info.setText(self.lbl_baseline_info.text())
+        if matrix is None:
+            return
+        sorted_matrix = matrix[self._pulse_sort_order]   # rows now pulse_us ascending
+
+        bandmeans = sorted_matrix.mean(axis=1)
+        y2 = self._normalize_group(bandmeans, self._analysis_c2_norm_auto, self._analysis_c2_manual_ref)
+        self.analysis_c2_curve.setData(self._pulse_us_sorted, y2)
+
+        for i in range(self._n_bands):
+            y = self._normalize_group(sorted_matrix[i, :], self._analysis_g8_norm_auto,
+                                       self._analysis_g8_manual_ref)
+            self.analysis_g8_curves[i].setData(np.arange(self._n_cells) + 0.5, y)
+
+        for j in range(self._n_cells):
+            y = self._normalize_group(sorted_matrix[:, j], self._analysis_g9_norm_auto,
+                                       self._analysis_g9_manual_ref)
+            self.analysis_g9_curves[j].setData(self._pulse_us_sorted, y)
+
+        # "Y axis locked to the first chart" -- re-synced every tick since,
+        # in Auto scale mode, panel 0's auto-fit range moves with live data.
+        self._apply_g8_scale()
+        self._apply_g9_scale()
+
+    def _update_analysis_strips(self):
+        """One chart: the whole matrix's average delta_mV (all bands, all
+        cells) vs time -- derived from self._rolling_buf on the fly rather
+        than a dedicated buffer; Reset just moves the cutoff timestamp
+        forward."""
+        mean, _ = self._get_current_baseline()
+        if mean is None or not self._rolling_buf:
+            return
+        ts_all  = np.fromiter((ts for ts, _ in self._rolling_buf), dtype=float)
+        mask = ts_all >= self._analysis_strip_reset_ts
+        if not mask.any():
+            self.analysis_strip_curve.setData([], [])
+            return
+        raw_all = np.array([arr for ts, arr in self._rolling_buf if ts >= self._analysis_strip_reset_ts],
+                           dtype=float)
+        t_sel = ts_all[mask]
+        y = (raw_all.mean(axis=1) - mean.mean()) / 1000.0
+        y = self._normalize_group(y, self._analysis_strip_norm_auto, self._analysis_strip_manual_ref)
+        self.analysis_strip_curve.setData(t_sel - t_sel[0], y)
+
+    # -- Controls handlers ----------------------------------------------------
+
+    def _on_analysis_avg_n_changed(self, val):
+        self._analysis_avg_n = val
+
+    # -- Corpus signature overlay (excludes chart 1) -------------------------
+
+    def _on_load_signatures_clicked(self):
+        # DontUseNativeDialog: the native GTK/portal file dialog renders as a
+        # completely blank window in this environment -- Qt's own dialog
+        # widget works reliably instead.
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Load signature corpus', '', 'CSV files (*.csv)',
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if not path:
+            return
+        try:
+            sigs = pimd_corpus_check.load_corpus(path)
+        except (SystemExit, Exception) as e:
+            self.statusBar().showMessage('Load failed: {0}'.format(e))
+            return
+        self._merge_template_list(sigs, source='loaded')
+        self.statusBar().showMessage('Loaded {0} signature(s) from {1}'.format(len(sigs), path))
+
+    def _merge_template_list(self, sigs, source):
+        """Replace only the entries tagged `source` ('loaded' = read-only
+        reference corpus, 'editable' = the active editable file), leaving
+        entries from the other source untouched -- a loaded reference corpus
+        and an active editable file coexist in one list, both overlay-able.
+        Preserves checked state across a reload of the same source (so
+        Save/Delete don't drop an overlay you had checked)."""
+        prev_checked = {
+            item.data(Qt.ItemDataRole.UserRole): item.checkState()
+            for i in range(self.lw_analysis_templates.count())
+            for item in [self.lw_analysis_templates.item(i)]
+            if self._analysis_templates.get(item.data(Qt.ItemDataRole.UserRole), {}).get('source') == source
+        }
+        self.lw_analysis_templates.blockSignals(True)
+        for i in reversed(range(self.lw_analysis_templates.count())):
+            item = self.lw_analysis_templates.item(i)
+            if self._analysis_templates.get(item.data(Qt.ItemDataRole.UserRole), {}).get('source') == source:
+                self.lw_analysis_templates.takeItem(i)
+        self._analysis_templates = {k: v for k, v in self._analysis_templates.items() if v['source'] != source}
+
+        keys_sorted = sorted(sigs.keys(), key=lambda k: (str(k[0]), str(k[1]), str(k[2])))
+        prefix = '✎ ' if source == 'editable' else ''
+        for i, key in enumerate(keys_sorted):
+            sig = sigs[key]
+            session, target, distance = key
+            amp, splithalf, quality = sig['amp'], sig['splithalf'], sig['quality']
+            snr = amp / splithalf if splithalf > 1e-9 else float('inf')
+            label = '{0}{1} @{2}cm  amp={3:.0f} SNR={4:.1f} [{5}]'.format(
+                prefix, target, distance, amp, snr, quality)
+            color = pg.intColor(i, hues=max(len(sigs), 9))
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(prev_checked.get(key, Qt.CheckState.Unchecked))
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setForeground(QBrush(color))
+            item.setToolTip('{0} @{1}cm ({2})  amp={3:.3f}mV  splithalf={4:.3f}mV  SNR={5:.2f}  quality={6}'.format(
+                target, distance, session, amp, splithalf, snr, quality))
+            self.lw_analysis_templates.addItem(item)
+            self._analysis_templates[key] = {'shape': sig['shape'], 'color': color, 'label': label,
+                                              'amp': amp, 'splithalf': splithalf, 'quality': quality,
+                                              'source': source, 'session': session}
+        self.lw_analysis_templates.blockSignals(False)
+        self._refresh_analysis_overlays()
+
+    def _on_clear_signatures_clicked(self):
+        self.lw_analysis_templates.blockSignals(True)
+        for i in range(self.lw_analysis_templates.count()):
+            self.lw_analysis_templates.item(i).setCheckState(Qt.CheckState.Unchecked)
+        self.lw_analysis_templates.blockSignals(False)
+        self._refresh_analysis_overlays()
+
+    def _on_analysis_template_item_changed(self, _item):
+        self._refresh_analysis_overlays()
+
+    def _checked_template_keys(self):
+        keys = []
+        for i in range(self.lw_analysis_templates.count()):
+            item = self.lw_analysis_templates.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                keys.append(item.data(Qt.ItemDataRole.UserRole))
+        return keys
+
+    def _refresh_analysis_overlays(self):
+        """Rebuild every overlay curve/line from scratch against the current
+        checked-template set. Templates are static (one capture, not live),
+        so this only needs to run on load/(un)check/normalize-toggle -- not
+        every redraw tick."""
+        for curve in self.analysis_c2_template_curves.values():
+            self.analysis_c2_plot.removeItem(curve)
+        self.analysis_c2_template_curves = {}
+        for i, plot in enumerate(self.analysis_g8_plots):
+            for curve in self.analysis_g8_template_curves[i].values():
+                plot.removeItem(curve)
+            self.analysis_g8_template_curves[i] = {}
+        for j, plot in enumerate(self.analysis_g9_plots):
+            for curve in self.analysis_g9_template_curves[j].values():
+                plot.removeItem(curve)
+            self.analysis_g9_template_curves[j] = {}
+        for line in self.analysis_strip_template_lines.values():
+            self.analysis_strip_plot.removeItem(line)
+        self.analysis_strip_template_lines = {}
+
+        for key in self._checked_template_keys():
+            tpl = self._analysis_templates.get(key)
+            if tpl is None:
+                continue
+            shape = tpl['shape']
+            if len(shape) != self._n_channels:
+                self.statusBar().showMessage(
+                    "Skipping overlay '{0}': {1} channels vs live profile's {2} -- "
+                    "refusing to mix profile geometries (DESIGN §11)".format(
+                        tpl['label'], len(shape), self._n_channels))
+                continue
+            pen = pg.mkPen(tpl['color'], width=2, style=Qt.PenStyle.DashLine)
+            # Already pulse_us-ascending / threshold_v-descending, per the
+            # corpus's own row-sort convention (pimd_corpus_check.load_long) --
+            # matches sorted_matrix's row order directly, no reindex needed.
+            tmatrix = shape.reshape(self._n_bands, self._n_cells)
+
+            y2 = self._normalize_group(tmatrix.mean(axis=1), self._analysis_c2_norm_auto,
+                                        self._analysis_c2_manual_ref)
+            self.analysis_c2_template_curves[key] = self.analysis_c2_plot.plot(
+                self._pulse_us_sorted, y2, pen=pen)
+
+            for i, plot in enumerate(self.analysis_g8_plots):
+                y = self._normalize_group(tmatrix[i, :], self._analysis_g8_norm_auto,
+                                           self._analysis_g8_manual_ref)
+                self.analysis_g8_template_curves[i][key] = plot.plot(
+                    np.arange(self._n_cells) + 0.5, y, pen=pen)
+
+            for j, plot in enumerate(self.analysis_g9_plots):
+                y = self._normalize_group(tmatrix[:, j], self._analysis_g9_norm_auto,
+                                           self._analysis_g9_manual_ref)
+                self.analysis_g9_template_curves[j][key] = plot.plot(
+                    self._pulse_us_sorted, y, pen=pen)
+
+            # Strip overlay: the template's raw overall average (no time
+            # axis on a static capture, so this is a plain reference line,
+            # not passed through the strip's time-based normalize control).
+            val = float(tmatrix.mean())
+            line = pg.InfiniteLine(pos=val, angle=0, pen=pen)
+            self.analysis_strip_plot.addItem(line)
+            self.analysis_strip_template_lines[key] = line
+
+    # -- Signature capture (air-before / target / air-after) ----------------
+
+    _SIG_CAPTURE_LABELS = {
+        'air_before': 'Capture Air (before)',
+        'target':     'Capture Target',
+        'air_after':  'Capture Air (after)',
+    }
+
+    def _start_sig_capture(self, slot):
+        if self._sig_capturing:
+            return
+        self._sig_capture_n    = self.sp_sig_capture_n.value()
+        self._sig_capture_slot = slot
+        self._sig_capture_buf  = []
+        self._sig_capturing    = True
+        self._sig_capture_buttons[slot].setStyleSheet(self.MY_YELLOW)
+
+    def _finalise_sig_capture(self):
+        ts_arr  = np.array([ts for ts, _ in self._sig_capture_buf], dtype=float)
+        raw_arr = np.array([r for _, r in self._sig_capture_buf], dtype=float)
+        entry = {'t_seconds': ts_arr, 'frames_mV': raw_arr / 1000.0, 'n_frames': len(ts_arr)}
+        slot = self._sig_capture_slot
+        if slot == 'air_before':
+            self._sig_air_before = entry
+        elif slot == 'air_after':
+            self._sig_air_after = entry
+        else:
+            self._sig_target = entry
+        btn = self._sig_capture_buttons[slot]
+        btn.setText(self._SIG_CAPTURE_LABELS[slot])
+        btn.setStyleSheet('')
+        self._sig_capturing    = False
+        self._sig_capture_slot = None
+        self._sig_capture_buf  = []
+        self._update_sig_readout()
+        self._update_sig_capture_gating()
+
+    def _reset_sig_capture_state(self):
+        self._sig_air_before = None
+        self._sig_air_after  = None
+        self._sig_target     = None
+        self._sig_last_stats = None
+        for slot, btn in getattr(self, '_sig_capture_buttons', {}).items():
+            btn.setText(self._SIG_CAPTURE_LABELS[slot])
+            btn.setStyleSheet('')
+        self._update_sig_readout()
+        self._update_sig_capture_gating()
+
+    def _compute_sig_stats(self):
+        """Reuses pimd_features.py's own plateau/baseline/quality math
+        verbatim, just fed a live 1-2 anchor window instead of a recorded
+        session's air segments. None if not enough captures yet; a dict with
+        'error' if the air anchor(s) and target capture have mismatched
+        channel counts (e.g. a profile change mid-sequence)."""
+        if self._sig_target is None or self._sig_air_before is None:
+            return None
+        anchor_ts, anchor_vs = [], []
+        for entry in (self._sig_air_before, self._sig_air_after):
+            if entry is None:
+                continue
+            plateau = pimd_features.Plateau('air', None, True, 0, entry['n_frames'])
+            c0, c1 = pimd_features.central_frames(plateau)
+            anchor_ts.append(float(np.median(entry['t_seconds'][c0:c1])))
+            anchor_vs.append(np.median(entry['frames_mV'][c0:c1], axis=0))
+        order = np.argsort(anchor_ts)
+        anchor_ts = np.array(anchor_ts)[order]
+        anchor_vs = np.array(anchor_vs)[order]
+
+        tgt = self._sig_target
+        if anchor_vs.shape[1] != tgt['frames_mV'].shape[1]:
+            return {'error': "channel-count mismatch vs air anchor(s) -- refusing to mix profile "
+                              "geometries (DESIGN §11)"}
+        plateau_t = pimd_features.Plateau('target', None, False, 0, tgt['n_frames'])
+        c0, c1 = pimd_features.central_frames(plateau_t)
+        delta_mV, plateau_amp_mV, amp_mean_abs_mV, splithalf_floor, n_central, center_t = \
+            pimd_features.compute_plateau_stats(tgt['frames_mV'], tgt['t_seconds'], c0, c1, anchor_ts, anchor_vs)
+        quality = pimd_features.quality_flags(splithalf_floor, plateau_amp_mV, n_central)
+        return dict(delta_mV=delta_mV, plateau_amp_mV=plateau_amp_mV, amp_mean_abs_mV=amp_mean_abs_mV,
+                    splithalf_floor=splithalf_floor, quality=quality, n_central=n_central,
+                    used_air_after=self._sig_air_after is not None,
+                    out_of_range=(center_t < anchor_ts[0] or center_t > anchor_ts[-1]))
+
+    def _update_sig_readout(self):
+        self._sig_last_stats = stats = self._compute_sig_stats()
+        if stats is None:
+            self.lbl_sig_readout.setText('Amp: —  Mean|Δ|: —  Splithalf: —  SNR: —  Quality: —')
+            self.lbl_sig_readout.setStyleSheet('')
+        elif 'error' in stats:
+            self.lbl_sig_readout.setText('Error: {0}'.format(stats['error']))
+            self.lbl_sig_readout.setStyleSheet(self.MY_RED)
+        else:
+            splithalf = stats['splithalf_floor']
+            snr = stats['plateau_amp_mV'] / splithalf if splithalf > 1e-9 else float('inf')
+            note = '' if stats['used_air_after'] else '  (single air anchor — flat baseline)'
+            self.lbl_sig_readout.setText(
+                'Amp(L2): {0:.3f}mV  Mean|Δ|: {1:.3f}mV  Splithalf: {2:.3f}mV  SNR: {3:.1f}  '
+                'Quality: {4}{5}'.format(stats['plateau_amp_mV'], stats['amp_mean_abs_mV'], splithalf,
+                                          snr, stats['quality'], note))
+            self.lbl_sig_readout.setStyleSheet('' if stats['quality'] == 'ok' else self.MY_YELLOW)
+
+    def _update_sig_capture_gating(self):
+        has_file = self._editable_sig_path is not None
+        self.le_sig_target.setEnabled(has_file)
+        self.cb_sig_no_distance.setEnabled(has_file)
+        self.sp_sig_distance.setEnabled(has_file and not self.cb_sig_no_distance.isChecked())
+        self.sp_sig_capture_n.setEnabled(has_file)
+        self.pb_sig_air_before.setEnabled(has_file and not self._sig_capturing)
+        self.pb_sig_target.setEnabled(has_file and not self._sig_capturing and self._sig_air_before is not None)
+        self.pb_sig_air_after.setEnabled(has_file and not self._sig_capturing and self._sig_target is not None)
+        stats = self._sig_last_stats
+        self.pb_sig_save.setEnabled(
+            has_file and stats is not None and 'error' not in stats and bool(self.le_sig_target.text().strip()))
+        item = self.lw_analysis_templates.currentItem()
+        tpl = self._analysis_templates.get(item.data(Qt.ItemDataRole.UserRole)) if item else None
+        self.pb_sig_delete.setEnabled(bool(tpl) and tpl['source'] == 'editable')
+
+    # -- Signature file operations (New / Open for editing / Save / Delete) --
+
+    def _on_sig_new_file_clicked(self):
+        os.makedirs(CORPORA_DIR, exist_ok=True)
+        default = os.path.join(CORPORA_DIR, 'gui_signatures_{0}.csv'.format(
+            datetime.now().strftime('%Y%m%d_%H%M%S')))
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'New signature file', default, 'CSV files (*.csv)',
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if not path:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(pimd_features.CORPUS_HEADER + '\n')
+        self._editable_sig_path = path
+        self._editable_sig_session_id = 'gui_{0}'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
+        self._editable_visit_counts = {}
+        self._reset_sig_capture_state()
+        self._merge_template_list({}, source='editable')
+        self._update_sig_mode_label()
+        self.statusBar().showMessage('New signature file: {0}'.format(path))
+
+    def _on_sig_open_for_edit_clicked(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Open signature file for editing', '', 'CSV files (*.csv)',
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if not path:
+            return
+        try:
+            fmt = pimd_corpus_check.sniff_format(path)
+        except SystemExit as e:
+            self.statusBar().showMessage('Open failed: {0}'.format(e))
+            return
+        if fmt != 'long':
+            self.statusBar().showMessage(
+                'GUI editing only supports long-format corpus files -- use "Load signatures…" '
+                'to browse this wide-format file read-only.')
+            return
+        sigs = self._scan_editable_signature_file(path)
+        if sigs and QMessageBox.question(
+                self, 'Open for editing',
+                "'{0}' already has {1} signature(s). Add/Delete will modify this file directly. "
+                "Continue?".format(os.path.basename(path), len(sigs)),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._editable_sig_path = path
+        self._editable_sig_session_id = 'gui_{0}'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
+        self._reset_sig_capture_state()
+        self._reload_editable_signature_list()
+        self._update_sig_mode_label()
+        self.statusBar().showMessage('Editing: {0} ({1} signature(s))'.format(path, len(sigs)))
+
+    def _scan_editable_signature_file(self, path):
+        """Mirrors pimd_corpus_check.load_long()'s grouping/sort, but keeps
+        the literal on-disk distance string as part of the key -- load_long's
+        dist_key() casts distance to int, which is lossy for non-integer
+        distances and unsafe as a Delete match key."""
+        groups, order = {}, []
+        with open(path) as f:
+            header_seen = False
+            for line in f:
+                line = line.rstrip('\n')
+                if not line or line.startswith('#'):
+                    continue
+                if not header_seen:
+                    header_seen = True   # first non-comment line is the CORPUS_HEADER row
+                    continue
+                parts = line.split(',')
+                key = (parts[0], parts[1], parts[2])
+                if key not in groups:
+                    groups[key] = []
+                    order.append(key)
+                groups[key].append(parts)
+        sigs = {}
+        for key in order:
+            rows = sorted(groups[key], key=lambda p: (float(p[3]), -float(p[4])))  # pulse_us asc, threshold_v desc
+            sigs[key] = dict(shape=np.array([float(p[5]) for p in rows]),
+                              amp=float(rows[0][6]), splithalf=float(rows[0][7]), quality=rows[0][8])
+        return sigs
+
+    def _reload_editable_signature_list(self):
+        if self._editable_sig_path is None:
+            return
+        sigs = self._scan_editable_signature_file(self._editable_sig_path)
+        self._merge_template_list(sigs, source='editable')
+        self._editable_visit_counts = {}
+        for session, target, distance in sigs.keys():
+            base = pimd_corpus_check.REPEAT_MARK_RE.sub('', target).strip().lower()
+            key = (base, distance)
+            self._editable_visit_counts[key] = self._editable_visit_counts.get(key, 0) + 1
+
+    def _update_sig_mode_label(self):
+        if self._editable_sig_path is None:
+            self.lbl_sig_mode.setText('Mode: read-only')
+            self.lbl_sig_mode.setStyleSheet('')
+        else:
+            self.lbl_sig_mode.setText('Mode: EDITING — {0}'.format(os.path.basename(self._editable_sig_path)))
+            self.lbl_sig_mode.setStyleSheet(self.MY_YELLOW)
+
+    def _build_colmap_for_corpus(self):
+        colmap = []
+        for b in self._profile['bands']:
+            thr = b.get('threshold_v') if self._has_threshold_v else None
+            for j in range(self._n_cells):
+                colmap.append({'pulse_us': b['pulse_us'], 'threshold_v': thr[j] if thr else float('nan')})
+        return colmap
+
+    def _on_sig_save_clicked(self):
+        stats = self._sig_last_stats
+        if stats is None or 'error' in stats:
+            self.statusBar().showMessage(
+                stats['error'] if stats else 'Capture Air (before) and Capture Target first.')
+            return
+        if self._editable_sig_path is None:
+            self.statusBar().showMessage('No editable signature file open.')
+            return
+        target_name = self.le_sig_target.text().strip()
+        if not target_name:
+            self.statusBar().showMessage('Enter a target name before saving.')
+            return
+
+        existing = self._scan_editable_signature_file(self._editable_sig_path)
+        if existing:
+            existing_len = len(next(iter(existing.values()))['shape'])
+            if existing_len != self._n_channels:
+                self.statusBar().showMessage(
+                    "Refusing to save: file has {0}-channel signatures, live profile has {1} channels "
+                    "-- never mix profile geometries (DESIGN §11)".format(existing_len, self._n_channels))
+                return
+
+        distance_cm = None if self.cb_sig_no_distance.isChecked() else self.sp_sig_distance.value()
+        distance_str = pimd_features.format_distance(distance_cm)
+        base_key = (target_name.lower(), distance_str)
+        visit = self._editable_visit_counts.get(base_key, 0) + 1
+        if visit == 1:
+            label = target_name
+        elif visit == 2:
+            label = '{0} (rpt)'.format(target_name)
+        else:
+            label = '{0} (rpt{1})'.format(target_name, visit)
+
+        colmap = self._build_colmap_for_corpus()
+        plateau = pimd_features.Plateau(label, distance_cm, target_name.lower() == 'air', 0, 0)
+        rows = pimd_features.build_rows(self._editable_sig_session_id, plateau, colmap,
+                                         stats['delta_mV'], stats['plateau_amp_mV'], stats['splithalf_floor'],
+                                         stats['quality'], stats['amp_mean_abs_mV'], self._editable_sig_path)
+        with open(self._editable_sig_path, 'a') as f:
+            f.write('\n'.join(rows) + '\n')
+        self._reload_editable_signature_list()
+        self._reset_sig_capture_state()
+        self.statusBar().showMessage(
+            "Saved '{0}' ({1} rows) to {2}".format(label, len(rows), self._editable_sig_path))
+
+    def _on_sig_delete_clicked(self):
+        item = self.lw_analysis_templates.currentItem()
+        key = item.data(Qt.ItemDataRole.UserRole) if item else None
+        tpl = self._analysis_templates.get(key) if key else None
+        if tpl is None or tpl['source'] != 'editable' or self._editable_sig_path is None:
+            self.statusBar().showMessage('Only signatures in the active editable file can be deleted.')
+            return
+        if QMessageBox.question(
+                self, 'Delete signature', "Delete '{0}' from {1}? This cannot be undone.".format(
+                    item.text(), self._editable_sig_path),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        with open(self._editable_sig_path) as f:
+            lines = [l.rstrip('\n') for l in f]
+        preamble   = [l for l in lines if l.startswith('#')]
+        body       = [l for l in lines if l and not l.startswith('#')]
+        header, data_lines = body[0], body[1:]
+        kept = [l for l in data_lines if tuple(l.split(',')[:3]) != key]
+        with open(self._editable_sig_path, 'w') as f:
+            for l in preamble:
+                f.write(l + '\n')
+            f.write(header + '\n')
+            for l in kept:
+                f.write(l + '\n')
+        self._reload_editable_signature_list()
+        self.statusBar().showMessage("Deleted '{0}' from {1}".format(item.text(), self._editable_sig_path))
+
+    # -- Session recording (alternate path -- same file format as the ----
+    # -- Training Session tab, reuses its machinery verbatim) -------------
+
+    def _on_sig_session_start(self):
+        if not self.serial.isOpen() or self.pb_start.text() != 'Running':
+            self.statusBar().showMessage('Connect and start streaming before recording a session.')
+            return
+        if self._recording:
+            self.statusBar().showMessage('A session is already recording — stop it first.')
+            return
+        self._session_start()   # notes=None -> interactive prompt, same as the plain Stats-tab flow
+        self.pb_record.blockSignals(True)
+        self.pb_record.setChecked(True)
+        self.pb_record.blockSignals(False)
+        self._analysis_session_recording = True
+        self._set_sig_session_active_ui(True)
+        self._update_sig_session_status_label()
+
+    def _on_sig_session_pause_toggled(self, checked):
+        # Shared with the Training Session tab's own pause -- process_packet's
+        # frame-write gate checks this same flag regardless of which tab set it.
+        self._training_paused = checked
+        self.pb_sig_session_pause.setText('Resume' if checked else 'Pause')
+        self.pb_sig_session_pause.setStyleSheet(self.MY_YELLOW if checked else '')
+        self._update_sig_session_status_label()
+
+    def _on_sig_session_stop(self):
+        if not self._analysis_session_recording:
+            return
+        self.pb_record.setChecked(False)   # -> _session_stop() -> centralized reset
+
+    def _on_sig_session_mark(self):
+        if not self._recording:
+            self.statusBar().showMessage('Start recording before marking.')
+            return
+        if self._training_paused:
+            self.statusBar().showMessage('Paused — resume before marking.')
+            return
+        target = self.le_sig_target.text().strip()
+        if not target:
+            self.statusBar().showMessage('Enter a target name before marking.')
+            return
+        if target.lower() == 'air':
+            text = 'air'
+        elif self.cb_sig_no_distance.isChecked():
+            self.statusBar().showMessage('Non-air targets need a distance — uncheck "no distance".')
+            return
+        else:
+            text = '{0} @{1}'.format(target, pimd_features.format_distance(self.sp_sig_distance.value()))
+        self._append_mark(text)
+        self.statusBar().showMessage('Marked: {0}'.format(text))
+
+    def _set_sig_session_active_ui(self, active):
+        self.pb_sig_session_start.setEnabled(not active)
+        self.pb_sig_session_pause.setEnabled(active)
+        self.pb_sig_session_stop.setEnabled(active)
+        self.pb_sig_session_mark.setEnabled(active)
+        if not active:
+            self.pb_sig_session_pause.blockSignals(True)
+            self.pb_sig_session_pause.setChecked(False)
+            self.pb_sig_session_pause.setText('Pause')
+            self.pb_sig_session_pause.setStyleSheet('')
+            self.pb_sig_session_pause.blockSignals(False)
+
+    def _update_sig_session_status_label(self):
+        if not self._analysis_session_recording:
+            self.lbl_sig_session_status.setText('Not recording')
+        else:
+            self.lbl_sig_session_status.setText(
+                'Recording{0}'.format(' (paused)' if self._training_paused else ''))
 
     # ------------------------------------------------------------------
     # Serial
@@ -1018,10 +3013,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('Disconnected')
 
     def read_from_serial(self):
+        # Count lines drained in this single readyRead callback -- a batch of
+        # more than a couple means GUI processing fell behind the incoming
+        # stream between events and lines queued up in Qt's serial buffer.
+        # _update_rate() surfaces the worst batch seen each second.
+        n = 0
         while self.serial.canReadLine():
             raw = self.serial.readLine().data().decode('utf-8', errors='replace').rstrip()
             if raw:
                 self.process_packet(raw)
+            n += 1
+        if n > self._serial_max_batch:
+            self._serial_max_batch = n
 
     def send_command(self, text):
         self.serial.write((text + '\n').encode())
@@ -1097,7 +3100,7 @@ class MainWindow(QMainWindow):
         self._frame_count += 1
         self._rolling_buf.append((now, raw))
 
-        if self._recording and self._session_file:
+        if self._recording and self._session_file and not self._training_paused:
             self._session_write_row(fw_time_ms, now, raw, glitch_mask)
 
         if self._capturing:
@@ -1106,6 +3109,16 @@ class MainWindow(QMainWindow):
             self.pb_capture.setText('Capturing {0}/{1}…'.format(n, self._capture_n))
             if n >= self._capture_n:
                 self._finalise_capture()
+
+        # Analysis tab signature capture -- independent of the baseline
+        # capture above (self._capturing/_capture_buf stay Heatmap-tab-only).
+        if self._sig_capturing:
+            self._sig_capture_buf.append((now, raw.copy()))
+            n = len(self._sig_capture_buf)
+            btn = self._sig_capture_buttons[self._sig_capture_slot]
+            btn.setText('Capturing {0}/{1}…'.format(n, self._sig_capture_n))
+            if n >= self._sig_capture_n:
+                self._finalise_sig_capture()
 
         if self._continuous_log:
             raw_nxn = raw.reshape(self._n_bands, self._n_cells)
@@ -1157,16 +3170,33 @@ class MainWindow(QMainWindow):
         std  = mat.std(axis=0).reshape(self._n_bands, self._n_cells)
         return mean, std
 
+    def _compute_rolling_stddev_nxn(self):
+        """Per-cell std dev of the raw (unfiltered-by-baseline) signal over the
+        last N samples -- a live noise/jitter monitor, independent of any
+        baseline capture. N is the Stats tab's 'Std dev N' spinbox, reusing
+        _update_stats_table's exact rolling-window computation so the heatmap
+        and stats-table std dev always agree for the same N."""
+        n = self.sp_stats_window.value()
+        recent = list(self._rolling_buf)[-n:]
+        if len(recent) < 2:
+            return np.zeros((self._n_bands, self._n_cells))
+        mat  = np.array([arr for _, arr in recent], dtype=float)
+        stds = mat.std(0).reshape(self._n_bands, self._n_cells)
+        return stds[self._band_display_order]
+
     # ------------------------------------------------------------------
     # Display computation (heatmap)
     # ------------------------------------------------------------------
-    def _compute_display_matrix(self, raw_nxn, mean, std):
-        if self._display_mode == 'raw':
+    def _compute_display_matrix(self, raw_nxn, mean, std, mode=None):
+        mode = mode or self._display_mode
+        if mode == 'raw':
             return raw_nxn.copy()
+        if mode == 'stddev':
+            return self._compute_rolling_stddev_nxn()
         if mean is None:
             return np.zeros((self._n_bands, self._n_cells))
         delta = raw_nxn - mean
-        if self._display_mode == 'delta':
+        if mode == 'delta':
             return delta
         safe_std = np.where(std is not None and std > 1.0, std, 1.0)
         return delta / safe_std
@@ -1179,16 +3209,23 @@ class MainWindow(QMainWindow):
         else:
             lim = self._manual_range
 
-        if self._display_mode == 'raw':
-            self.img.setColorMap(self.cm_seq)
-            self.img.setImage(matrix.T, levels=(0.0, float(matrix.max()) * 1.05 + 1.0))
-            self.lbl_scale.setText('Scale: 0…{0:.3f} mV'.format(matrix.max() / 1000))
+        if self._display_mode in ('raw', 'stddev'):
+            cmap   = self.cm_seq
+            levels = (0.0, float(matrix.max()) * 1.05 + 1.0)
+            if self._display_mode == 'raw':
+                self.lbl_scale.setText('Scale: 0…{0:.3f} mV'.format(matrix.max() / 1000))
+            else:
+                self.lbl_scale.setText('Std Dev (N={0}): 0…{1:.3f} mV'.format(
+                    self.sp_stats_window.value(), matrix.max() / 1000))
         else:
-            self.img.setColorMap(self.cm_div)
-            self.img.setImage(matrix.T, levels=(-lim, lim))
+            cmap   = self.cm_div
+            levels = (-lim, lim)
             unit = 'σ' if self._display_mode == 'z' else 'mV'
             val  = lim if self._display_mode == 'z' else lim / 1000
             self.lbl_scale.setText('Scale: ±{0:.3f} {1}'.format(val, unit))
+
+        self.img.setColorMap(cmap)
+        self.img.setImage(matrix.T, levels=levels)
 
     def _update_3d(self, matrix):
         # Note: the band axis is coarse — interpolation between bands is
@@ -1267,10 +3304,15 @@ class MainWindow(QMainWindow):
         else:
             self._session_stop()
 
-    def _session_start(self):
-        """Open a new self-describing session-dump CSV and write its header."""
-        notes, _ = QInputDialog.getMultiLineText(
-            self, 'Session notes', 'Planned target order / notes for this session:')
+    def _session_start(self, notes=None):
+        """Open a new self-describing session-dump CSV and write its header.
+        notes: pre-supplied session notes (e.g. auto-derived from the Training
+        Session run list) that skip the interactive prompt entirely. If None,
+        prompts the operator via QInputDialog (the plain Stats-tab "Record
+        Session" flow, which has no run list to derive notes from)."""
+        if notes is None:
+            notes, _ = QInputDialog.getMultiLineText(
+                self, 'Session notes', 'Planned target order / notes for this session:')
         os.makedirs(SESSIONS_DIR, exist_ok=True)
         ts   = datetime.now()
         path = os.path.join(SESSIONS_DIR, 'session_{0}.csv'.format(ts.strftime('%Y%m%d_%H%M%S')))
@@ -1336,30 +3378,21 @@ class MainWindow(QMainWindow):
         self._session_file       = None
         self._session_path       = None
         self._session_start_wall = None
+        # Centralized reset: covers this method being triggered from any of its
+        # callers (this tab's own toggle, _apply_profile force-stop on a profile
+        # change, start_stop force-stop on disconnect) so the Training Session
+        # tab's UI never gets stuck in a "started" state when the underlying
+        # recording is closed out from under it.
+        if self._training_current_row is not None:
+            self._reset_training_ui()
+        if self._analysis_session_recording:
+            self._analysis_session_recording = False
+            self._set_sig_session_active_ui(False)
+            self._update_sig_session_status_label()
 
     # ------------------------------------------------------------------
-    # Ground-truth mark hotkeys
+    # Ground-truth marks (low-level writer, reused by the Training Session tab)
     # ------------------------------------------------------------------
-    def _on_mark_hotkey(self, cm):
-        """Dispatch a mark hotkey. cm is 5/10/15 (distance mark) or None (air
-        mark, ignores the label field). No-op (status bar message only) if no
-        session is currently recording, or if a distance mark is requested
-        with an empty label."""
-        if not (self._recording and self._session_file):
-            self.statusBar().showMessage('Mark ignored — no session recording.')
-            return
-        if cm is None:
-            text = 'air'
-        else:
-            label = self.le_mark_label.text().strip()
-            if not label:
-                self.statusBar().showMessage('Mark ignored — enter a label first.')
-                return
-            text = '{0} @{1}'.format(label, cm)
-        self._append_mark(text)
-        self._update_mark_log_display()
-        self.statusBar().showMessage('Marked: {0}'.format(text), 3000)
-
     def _append_mark(self, text):
         """Append one '#'-prefixed ground-truth mark line to the currently-open
         session CSV and flush immediately. Cheap, synchronous write+flush on the
@@ -1371,11 +3404,6 @@ class MainWindow(QMainWindow):
         ts = datetime.fromtimestamp(time.time()).isoformat()
         self._session_file.write('# mark: {0}, {1}\n'.format(ts, text))
         self._session_file.flush()
-        self._mark_log.append((ts, text))
-
-    def _update_mark_log_display(self):
-        lines = ['{0}  {1}'.format(ts.split('T')[1][:12], text) for ts, text in self._mark_log]
-        self.lbl_mark_log.setText('\n'.join(lines) if lines else '(no marks yet)')
 
     # ------------------------------------------------------------------
     # Redraw (30 Hz timer)
@@ -1409,6 +3437,22 @@ class MainWindow(QMainWindow):
         # Stats table — only compute when that tab is visible
         if self.tabs.currentIndex() == 1:
             self._update_stats_table()
+
+        # Analysis tab's heatmap variant is always kept current (own scale/
+        # normalize mode, decoupled from the main Heatmap tab), same "always
+        # update" convention as the main heatmap, so switching tabs is instant.
+        self._update_analysis_heatmap()
+
+        # The rest of the Analysis tab's charts/strips — only compute when
+        # that tab is visible.
+        if self.tabs.currentIndex() == self.ANALYSIS_TAB_INDEX:
+            self._update_analysis_charts()
+            self._update_analysis_strips()
+
+        # Training Session live cells — always live regardless of visible tab
+        # (operator may be watching Heatmap while physically holding the probe).
+        if self._training_current_row is not None:
+            self._update_training_live()
 
     def _update_baseline_label(self, mean):
         mode = self._baseline_mode
@@ -1557,7 +3601,7 @@ class MainWindow(QMainWindow):
     # UI signal handlers
     # ------------------------------------------------------------------
     def _on_display_changed(self, idx):
-        self._display_mode = ('delta', 'z', 'raw')[idx]
+        self._display_mode = ('delta', 'z', 'raw', 'stddev')[idx]
 
     def _on_baseline_mode_changed(self, idx):
         self._baseline_mode = ('static', 'rolling', 'nominal')[idx]
@@ -1598,6 +3642,37 @@ class MainWindow(QMainWindow):
             '{0}Frames: {1}  Cmd: {2:<6}  Last: {3}'.format(
                 rec, self._frame_count, self._last_cmd, self._last_packet[:60]))
 
+    def _update_rate(self):
+        """Runs once/sec (see _rate_timer, __init__) — updates the top-bar
+        throughput readout so it's visible regardless of which tab is active.
+        Exact frames-in-the-last-second, not a smoothed average, so a stall
+        shows up immediately as 0 Hz rather than decaying slowly into view."""
+        now    = time.time()
+        dt     = now - self._fps_last_calc_wall
+        dcount = max(0, self._frame_count - self._fps_last_frame_count)
+        self._fps_hz = dcount / dt if dt > 0 else 0.0
+        self._fps_last_calc_wall   = now
+        self._fps_last_frame_count = self._frame_count
+
+        burst = self._serial_max_batch
+        self._serial_max_batch = 0
+
+        if not self.serial.isOpen() or self.pb_start.text() != 'Running':
+            self.lbl_rate.setText('Rate: — (idle)')
+            self.lbl_rate.setStyleSheet('')
+            return
+
+        cell_hz = self._fps_hz * self._n_channels
+        txt = 'Rate: {0:.1f} Hz  ({1:,.0f} cells/s)'.format(self._fps_hz, cell_hz)
+        if burst > 3:
+            # A single readyRead drained more than 3 complete lines -- the
+            # event loop briefly fell behind the ~100 Hz nominal stream.
+            txt += '  ⚠ burst×{0}'.format(burst)
+            self.lbl_rate.setStyleSheet(self.MY_YELLOW)
+        else:
+            self.lbl_rate.setStyleSheet('')
+        self.lbl_rate.setText(txt)
+
     # ------------------------------------------------------------------
     # Settings persistence
     # ------------------------------------------------------------------
@@ -1621,6 +3696,41 @@ class MainWindow(QMainWindow):
             x, y = s.get('window_x'), s.get('window_y')
             if x is not None and y is not None:
                 self.move(int(x), int(y))
+
+            # Analysis tab -- avg-N, per-group Auto/Manual normalize+scale
+            # (heatmap/chart2/8-grid/9-grid/strip), signature capture-N.
+            # Deliberately NOT persisted: the active editable signature-file
+            # path, in-progress captures, target/distance inputs -- resuming
+            # a stale "editing" pointer at a file that may have changed or
+            # been deleted between sessions is a foot-gun; every session
+            # starts read-only with no active file.
+            self.sp_analysis_avg_n.setValue(int(s.get('analysis_avg_n', 1)))
+
+            self.cb_hm_norm.setCurrentIndex(int(s.get('analysis_hm_norm_idx', 0)))
+            self.cb_hm_scale_auto.setChecked(bool(s.get('analysis_hm_scale_auto', True)))
+            self.sp_hm_scale_manual.setValue(float(s.get('analysis_hm_scale_manual', 200_000.0)))
+
+            self.cb_c2_norm_auto.setChecked(bool(s.get('analysis_c2_norm_auto', True)))
+            self.sp_c2_norm_manual.setValue(float(s.get('analysis_c2_norm_manual', 0.0)))
+            self.cb_c2_scale_auto.setChecked(bool(s.get('analysis_c2_scale_auto', True)))
+            self.sp_c2_scale_manual.setValue(float(s.get('analysis_c2_scale_manual', 5.0)))
+
+            self.cb_g8_norm_auto.setChecked(bool(s.get('analysis_g8_norm_auto', True)))
+            self.sp_g8_norm_manual.setValue(float(s.get('analysis_g8_norm_manual', 0.0)))
+            self.cb_g8_scale_auto.setChecked(bool(s.get('analysis_g8_scale_auto', True)))
+            self.sp_g8_scale_manual.setValue(float(s.get('analysis_g8_scale_manual', 5.0)))
+
+            self.cb_g9_norm_auto.setChecked(bool(s.get('analysis_g9_norm_auto', True)))
+            self.sp_g9_norm_manual.setValue(float(s.get('analysis_g9_norm_manual', 0.0)))
+            self.cb_g9_scale_auto.setChecked(bool(s.get('analysis_g9_scale_auto', True)))
+            self.sp_g9_scale_manual.setValue(float(s.get('analysis_g9_scale_manual', 5.0)))
+
+            self.cb_strip_norm_auto.setChecked(bool(s.get('analysis_strip_norm_auto', True)))
+            self.sp_strip_norm_manual.setValue(float(s.get('analysis_strip_norm_manual', 0.0)))
+            self.cb_strip_scale_auto.setChecked(bool(s.get('analysis_strip_scale_auto', True)))
+            self.sp_strip_scale_manual.setValue(float(s.get('analysis_strip_scale_manual', 5.0)))
+
+            self.sp_sig_capture_n.setValue(int(s.get('sig_capture_n', pimd_features.MIN_CENTRAL_FRAMES)))
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             self.resize(1100, 900)  # first run
 
@@ -1638,6 +3748,34 @@ class MainWindow(QMainWindow):
             'window_h':     self.height(),
             'window_x':     self.x(),
             'window_y':     self.y(),
+
+            'analysis_avg_n': self.sp_analysis_avg_n.value(),
+
+            'analysis_hm_norm_idx':     self.cb_hm_norm.currentIndex(),
+            'analysis_hm_scale_auto':   self.cb_hm_scale_auto.isChecked(),
+            'analysis_hm_scale_manual': self.sp_hm_scale_manual.value(),
+
+            'analysis_c2_norm_auto':    self.cb_c2_norm_auto.isChecked(),
+            'analysis_c2_norm_manual':  self.sp_c2_norm_manual.value(),
+            'analysis_c2_scale_auto':   self.cb_c2_scale_auto.isChecked(),
+            'analysis_c2_scale_manual': self.sp_c2_scale_manual.value(),
+
+            'analysis_g8_norm_auto':    self.cb_g8_norm_auto.isChecked(),
+            'analysis_g8_norm_manual':  self.sp_g8_norm_manual.value(),
+            'analysis_g8_scale_auto':   self.cb_g8_scale_auto.isChecked(),
+            'analysis_g8_scale_manual': self.sp_g8_scale_manual.value(),
+
+            'analysis_g9_norm_auto':    self.cb_g9_norm_auto.isChecked(),
+            'analysis_g9_norm_manual':  self.sp_g9_norm_manual.value(),
+            'analysis_g9_scale_auto':   self.cb_g9_scale_auto.isChecked(),
+            'analysis_g9_scale_manual': self.sp_g9_scale_manual.value(),
+
+            'analysis_strip_norm_auto':    self.cb_strip_norm_auto.isChecked(),
+            'analysis_strip_norm_manual':  self.sp_strip_norm_manual.value(),
+            'analysis_strip_scale_auto':   self.cb_strip_scale_auto.isChecked(),
+            'analysis_strip_scale_manual': self.sp_strip_scale_manual.value(),
+
+            'sig_capture_n': self.sp_sig_capture_n.value(),
         }
         try:
             os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
@@ -1650,22 +3788,19 @@ class MainWindow(QMainWindow):
     # Global key handling — mark hotkeys
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
-        """App-wide filter (installed on the QApplication instance) so mark
-        hotkeys work regardless of focus, and can be swallowed before widgets
-        that already consume 1/2/3/0/Space (e.g. QTableWidget's default
-        AnyKeyPressed edit trigger, QPushButton's Space-to-click) act on them.
-        Suppressed whenever a text-entry widget has focus."""
+        """App-wide filter (installed on the QApplication instance) so the
+        Training Session tab's Space-bar step-advance works regardless of
+        focus, and is swallowed before widgets that already consume Space
+        (e.g. QPushButton's Space-to-click). Suppressed whenever a text-entry
+        widget has focus (including a QTableWidget cell mid-edit, which uses
+        an embedded QLineEdit)."""
         if event.type() == QEvent.Type.KeyPress:
             if isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox)):
                 return super().eventFilter(obj, event)
             if event.isAutoRepeat():
-                return True   # swallow held-key repeats; don't spam marks
-            key = event.key()
-            if key in (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3):
-                self._on_mark_hotkey({Qt.Key.Key_1: 5, Qt.Key.Key_2: 10, Qt.Key.Key_3: 15}[key])
-                return True
-            if key in (Qt.Key.Key_0, Qt.Key.Key_Space):
-                self._on_mark_hotkey(None)
+                return True   # swallow held-key repeats
+            if event.key() == Qt.Key.Key_Space:
+                self._on_training_space()
                 return True
         return super().eventFilter(obj, event)
 

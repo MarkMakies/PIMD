@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.23
+# PIMD Delay Calibration v1.24
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -20,6 +20,14 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.24 Auto Nudge zigzag now respects the signal-detect ceiling (sp_signal_v,
+#       default 4.9 V): once a channel's monitored voltage reaches/exceeds it
+#       (no real signal — see v1.15), _auto_check_ceiling() latches
+#       _auto_ceiling_flat[ch] and all subsequent nudges for that channel are
+#       forced down-only (growing magnitude, no more +offset attempts), instead
+#       of continuing to zigzag up into no-signal territory. Wired into both
+#       the sequential (_auto_evaluate_channel) and parallel
+#       (_auto_evaluate_parallel) evaluators.
 # v1.23 sp_auto_max_iter range raised 1-20 -> 1-100 (Max iterations / Max
 #       att/cell spinbox) — 20 was too low for Sequential mode's per-channel
 #       max-attempts use, where the zigzag search (v1.20) needs more attempts
@@ -271,6 +279,8 @@ class MainWindow(QMainWindow):
         self._auto_cal_delays_flat: 'list[float]' = []  # calibrated delays µs, per channel
         self._auto_cur_delays_flat: 'list[float]' = []  # working delays µs, per channel
         self._auto_attempt_flat:    'list[int]'   = []  # nudge attempt count per channel (drives zigzag)
+        self._auto_ceiling_flat:    'list[bool]'  = []  # True once mean_v hit sp_signal_v ceiling — down-only from here
+        self._auto_down_mult_flat:  'list[int]'   = []  # next down-only nudge magnitude, once ceiling hit
         self._auto_locked_flat:     'list[bool]'  = []  # True once channel first passed (parallel mode only)
         self._auto_skip_flat:       'list[bool]'  = []  # True for N/R cells (excluded)
         self._auto_best_std_uV:     'list[float]' = []  # min std dev seen µV per channel
@@ -1322,6 +1332,8 @@ class MainWindow(QMainWindow):
         ]
         self._auto_cur_delays_flat  = list(self._auto_cal_delays_flat)
         self._auto_attempt_flat     = [0] * n_ch
+        self._auto_ceiling_flat     = [False] * n_ch
+        self._auto_down_mult_flat   = [0] * n_ch
         self._auto_locked_flat      = [False] * n_ch
         self._auto_best_std_uV      = [float('inf')] * n_ch
         self._auto_best_delays_flat = list(self._auto_cal_delays_flat)
@@ -1468,6 +1480,10 @@ class MainWindow(QMainWindow):
                     ch, _COL_DONE if std_uV <= threshold_uV else _COL_AUTO_DRIFTED)
                 continue
 
+            mean_v = (self._thermal_latest[ch] / 1_000_000
+                      if self._thermal_latest else 0.0)
+            self._auto_check_ceiling(ch, mean_v)
+
             if std_uV < self._auto_best_std_uV[ch]:
                 self._auto_best_std_uV[ch]     = std_uV
                 self._auto_best_delays_flat[ch] = self._auto_cur_delays_flat[ch]
@@ -1587,6 +1603,7 @@ class MainWindow(QMainWindow):
         cur_us  = self._auto_cur_delays_flat[ch]
         mean_v  = (self._thermal_latest[ch] / 1_000_000
                    if self._thermal_latest else 0.0)
+        self._auto_check_ceiling(ch, mean_v)
 
         if std_uV <= threshold_uV:
             self._log(f'  attempt {self._auto_ch_attempts + 1}: '
@@ -1618,16 +1635,38 @@ class MainWindow(QMainWindow):
         self._auto_nudge_channel(ch)
         self._auto_run_soak()
 
+    def _auto_check_ceiling(self, ch: int, mean_v: float):
+        """Once a channel's monitored voltage reaches the signal-detect ceiling
+        (sp_signal_v, default 4.9 V — no real signal, see v1.15), lock its Auto
+        Nudge search to down-only steps from that point on; nudging further up
+        just walks deeper into no-signal territory."""
+        if self._auto_ceiling_flat[ch] or mean_v < self.sp_signal_v.value():
+            return
+        self._auto_ceiling_flat[ch] = True
+        k    = self._auto_attempt_flat[ch]
+        mult = (k + 1) // 2
+        self._auto_down_mult_flat[ch] = mult
+        self._log(f'  {self._ch_label(ch)}: mean {mean_v:.3f} V ≥ signal-detect '
+                  f'ceiling ({self.sp_signal_v.value():.1f} V) — further nudges will only move down.')
+
     def _auto_nudge_channel(self, ch: int):
-        """Nudge one channel along an expanding ±nudge_ns zigzag from the calibrated delay."""
+        """Nudge one channel along an expanding ±nudge_ns zigzag from the calibrated
+        delay.  Once _auto_check_ceiling() has flagged this channel, the zigzag is
+        overridden to down-only steps of growing magnitude (see _auto_ceiling_flat)."""
         nudge_us = self.sp_auto_nudge_ns.value() / 1000.0
         cap_us   = self.sp_auto_cap_ns.value()   / 1000.0
         cal      = self._auto_cal_delays_flat[ch]
 
         self._auto_attempt_flat[ch] += 1
-        k      = self._auto_attempt_flat[ch]
-        mult   = (k + 1) // 2
-        sign   = 1 if k % 2 else -1
+        k = self._auto_attempt_flat[ch]
+
+        if self._auto_ceiling_flat[ch]:
+            mult = self._auto_down_mult_flat[ch]
+            sign = -1
+            self._auto_down_mult_flat[ch] += 1
+        else:
+            mult = (k + 1) // 2
+            sign = 1 if k % 2 else -1
         offset = mult * nudge_us
 
         if offset > cap_us:
