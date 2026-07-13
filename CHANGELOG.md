@@ -1,3 +1,37 @@
+### Bench observations — 2026-07-13 — fw v4.24 verified; noisy threshold zone is ~4.45–4.65 V, not the whole top of the range
+
+fw v4.24's time-floored boundary settling is confirmed on hardware: the
+first-column noise (elevated σ in the first cell of each band regardless of
+calibrated voltages, wandering on a seconds timescale) is gone.
+
+With the position-dependent artifact removed, the remaining noise is tied to
+the absolute threshold *voltage*, not the column position — but NOT as a
+simple "avoid the top of the range" rule. Two captures:
+
+1. Coarse list 4.90/4.80/4.70/4.50/3.80/3.20/2.40/1.50 V
+   (`assets/Screenshot_2026-07-13_17-26-53.jpg`): the 4.50 V column is the
+   noisiest across multiple bands (up to ~1.2 mV σ); 3.80 V down uniformly
+   quiet.
+2. Fine sweep 4.700 → 4.400 V in 37.5 mV steps, all 8 bands
+   (`assets/Screenshot_2026-07-13_17-33-36.jpg`): the *endpoints* are clean —
+   4.700/4.662 V and 4.438/4.400 V mostly ≤ 0.5 mV σ — while the interior
+   4.625–4.513 V columns carry the noise (σ 0.5–2.24 mV, worst 2.24 mV at
+   30 µs / 4.588 V and 1.85 mV at 100 µs / 4.513 V, elevated in nearly every
+   band). The bad zone is roughly **4.45–4.65 V**; values above it (4.7, 4.8,
+   4.9) and below it (≤ 4.4) both perform well.
+
+This refines the earlier anchor-step-down story (4.8 → 4.5 → 4.2 V, DESIGN
+§10/§17.5): the top of the curve is not inherently noisy — 4.5 V simply sat
+inside this newly-mapped bad zone. The high-voltage/early-decay region is
+informative and worth sampling: a reverse-geometric target progression
+(steps densest near the top) gives more consistent patterns, and a list with
+4.8/4.7/4.3/4.0 in the top region performs well. Practical rule for
+calibration target lists: sample the top freely but keep targets out of
+~4.45–4.65 V. Mechanism of the bad zone not yet identified (clamp-release
+region; further tests planned). (2026-07-13)
+
+---
+
 ### mcu/pimd_mcu.py — v4.24 — FIX: boundary settling now time-floored, not period-scaled
 
 Root cause of the "first heatmap column is always noisy, whatever voltages I
