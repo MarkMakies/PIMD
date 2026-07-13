@@ -1,3 +1,30 @@
+### mcu/pimd_mcu.py — v4.24 — FIX: boundary settling now time-floored, not period-scaled
+
+Root cause of the "first heatmap column is always noisy, whatever voltages I
+calibrate" report (and of classviz v1.30's independently-confirmed noisiest
+cell, band=9µs/cell=0): `acquire_mode2`'s band-boundary settling was
+`BOUNDARY_PRIME = 15` PWM *periods*, so its absolute duration scaled with
+band frequency — 25 kHz and 20 kHz bands got only 600/750 µs, below the
+~1 ms+ the band-to-band energy-step transient needs (v4.20 itself measured
+470 µs insufficient, 1.41 ms adequate — on a 94 µs-period band, which is why
+the constant looked fine when it was set). The first cell of each band was
+therefore sampled on a partially-decayed transient; ±1-period jitter in the
+effective settle count turned that into telegraph-level alternation, which
+the 32-deep (~9.2 s) rolling average smeared into the observed seconds-scale
+oscillation. Band 1's first cell was clean only by accident: the 72-field
+W-record print() at i==0 runs between that cell's CC write and its read
+(after the settling sleep — the v4.20 comment claiming the print overlaps
+the sleep was wrong, and has been corrected), donating milliseconds of
+free-running settling every sweep. Fix: new `SETTLE_FLOOR_US = 3000`;
+per-band settle periods are `max(BOUNDARY_PRIME, ceil(SETTLE_FLOOR_US /
+period_us))`, precomputed into the flattened cell list, so every boundary
+(including the band8→band1 wrap, whose old 320 µs budget could be entirely
+consumed by the up-to-320 µs band-8 MCLK wait inside read_raw_sample) gets
+≥ 3 ms of real settling. Sweep cost ≈ +12 ms on cal_72_air_v2 (289 → ~301 ms
+refresh). No wire-format, PWM-slice, or profile changes. (2026-07-13)
+
+---
+
 ### src/pimd_knn_baseline.py — v1.1 — fix crash when output dir doesn't exist
 
 `main()` now calls `os.makedirs(outdir, exist_ok=True)` before `fig.savefig()`.

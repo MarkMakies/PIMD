@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.23, coil v4
+# Pulse Induction Metal Detector, v4.24, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -33,6 +33,29 @@
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
+# v4.24 FIX acquire_mode2: boundary settling was measured in PWM periods
+#       (BOUNDARY_PRIME = 15), not absolute time — so high-frequency bands got
+#       proportionally tiny settling budgets (25 kHz: 600 µs, 20 kHz: 750 µs)
+#       even though the coil/front-end energy-step transient needs roughly
+#       constant absolute time (~1 ms+; v4.20 measured 470 µs insufficient and
+#       1.41 ms adequate on a 94 µs-period band). Symptom: the first cell of
+#       each band (first heatmap column) noisy regardless of the calibrated
+#       delay/threshold values, oscillating on a seconds timescale (partially-
+#       settled sample rides the transient; ±1-period jitter in effective
+#       settle count becomes telegraph noise, low-passed by the 32-deep /
+#       ~9.2 s rolling buffer into slow wander — the v4.21 "32-frame level
+#       shift" signature). Band 1's first cell escaped by accident: the
+#       72-field W-record print() at i==0 runs between its CC write and its
+#       read, donating ms-scale extra settling every sweep (the v4.20 comment
+#       claiming the print overlaps the settling sleep was wrong — the code
+#       sleeps then prints — but the rescue is real). Fix: SETTLE_FLOOR_US
+#       (3000) — per-band settle periods are now
+#       max(BOUNDARY_PRIME, ceil(SETTLE_FLOOR_US / period_us)), precomputed in
+#       the cell list, so every boundary gets >= 3 ms regardless of band
+#       frequency. Also covers the band8->band1 wrap boundary, where waiting
+#       up to a full 320 µs band-8 MCLK inside read_raw_sample() could consume
+#       band 1's entire old 320 µs budget (seen as overrun_count ticks).
+#       Sweep cost ~ +12 ms (289 -> ~301 ms refresh).
 # v4.23 serial protocol: freq now in Hz (was kHz), pulse/delay now in ns (was µs),
 #       in *, R, V, L output records and in the * config command.  No rounding
 #       ambiguity: values are exact integers at 8 ns PWM grid resolution.
@@ -268,7 +291,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.23'
+FW_VERSION = '4.24'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -324,6 +347,11 @@ BOUNDARY_PRIME = 15   # extra PWM periods to let coil settle after a band-freq c
                       # the settling signature (3.1→1.6→0.6 mV gradient in band 0) persisted.
                       # 15 × 94 µs = 1.41 ms; with emit firing during this sleep the effective
                       # settling is 3–7 ms on emit cycles — enough for the thermal transient.
+SETTLE_FLOOR_US = 3000  # minimum ABSOLUTE settling time at a band/energy boundary (v4.24).
+                        # BOUNDARY_PRIME alone scales with the band period, so high-frequency
+                        # bands got far less real settling time (25 kHz: 600 µs) than the
+                        # ~1 ms+ the energy-step transient needs. Per-band settle periods are
+                        # max(BOUNDARY_PRIME, ceil(SETTLE_FLOOR_US / period_us)).
 COMMAND_POLL_MS = 1   # poll stdin for commands at most once per ms instead of once
                       # per sweep cycle (was every PWM period for a 1-2 cell profile).
                       # A reasonable reduction in syscall rate regardless, but tested
@@ -595,13 +623,19 @@ def acquire_mode2(profile):
 
     avg_depth = profile['averages']
 
-    # Flatten bands into a cell list: (freq_hz, period_us, drive_duty, sample_duty)
+    # Flatten bands into a cell list:
+    # (freq_hz, period_us, drive_duty, sample_duty, settle_periods).
+    # settle_periods (v4.24): boundary settling in periods, floored so the
+    # ABSOLUTE settle time is at least SETTLE_FLOOR_US — BOUNDARY_PRIME alone
+    # under-settled high-frequency bands (see header note).
     cells = []
     for freq_hz, pulse_us, delays_us in profile['bands']:
         period_us = 1_000_000 // freq_hz
+        settle = max(BOUNDARY_PRIME,
+                     (SETTLE_FLOOR_US + period_us - 1) // period_us)
         for delay_us in delays_us:
             dd, sd = compute_pulse_duties(pulse_us, delay_us, freq_hz)
-            cells.append((freq_hz, period_us, dd, sd))
+            cells.append((freq_hz, period_us, dd, sd, settle))
 
     n = len(cells)
     # Pre-allocated fixed-size circular buffers — avoids list.append()+pop(0)'s
@@ -617,7 +651,7 @@ def acquire_mode2(profile):
 
     # Prime: fire cell[n-1] so that iteration i=0 stores the result in
     # rolling[(0-1)%n] = rolling[n-1] with no startup transient.
-    f_last, p_last, dd_last, sd_last = cells[n - 1]
+    f_last, p_last, dd_last, sd_last, _ = cells[n - 1]
     drive_coil_pwm.freq(f_last)
     sample_coil_pwm.freq(f_last)
     drive_coil_pwm.duty_u16(dd_last)
@@ -633,7 +667,7 @@ def acquire_mode2(profile):
         for i in range(n):
             t0 = ticks_us()
 
-            freq_i, period_i, dd, sd = cells[i]
+            freq_i, period_i, dd, sd, settle_i = cells[i]
             prev = (i - 1) % n
             at_boundary = freq_i != cells[prev][0]
             # needs_settling also catches pulse-width-only transitions between
@@ -704,13 +738,14 @@ def acquire_mode2(profile):
                 last_dd, last_sd = dd, sd
 
             # Sleep out the remainder of this cell's period.
-            # At band/drive-energy boundaries add BOUNDARY_PRIME extra periods
-            # so the coil reaches steady state before the next cell reads this
-            # cell's SDOB, breaking the contamination cascade.
+            # At band/drive-energy boundaries add settle_i extra periods
+            # (>= BOUNDARY_PRIME, floored to SETTLE_FLOOR_US of real time —
+            # v4.24) so the coil reaches steady state before the next cell
+            # reads this cell's SDOB, breaking the contamination cascade.
             elapsed = ticks_diff(ticks_us(), t0)
             remaining = period_i - elapsed - 2
             if needs_settling:
-                remaining += period_i * BOUNDARY_PRIME
+                remaining += period_i * settle_i
             if remaining > 0:
                 sleep_us(remaining)
             else:
@@ -722,8 +757,13 @@ def acquire_mode2(profile):
             # (at i=0) was the first read after print() — USB CDC IRQs from print()
             # have ~10-50 µs latency, wider than the 2.5 µs BUSY-LOW window at 57 kHz,
             # causing bit-truncated outliers (the §7 mid-conversion read mechanism).
-            # Moving here: cell[n-1] is read clean (i=0 read before this block),
-            # and the USB activity overlaps cell[0]'s already-running settling sleep.
+            # Moving here: cell[n-1] is read clean (i=0 read before this block).
+            # NOTE (v4.24): the print() does NOT overlap the settling sleep as the
+            # v4.20 note claimed — sleep_us blocks, then print() runs. The PWM keeps
+            # free-running at cell[0]'s config during the ms-scale print, so cell[0]
+            # in effect receives extra settling every emit cycle — which is why
+            # band 1's first cell stayed clean while other bands' first cells were
+            # under-settled before the SETTLE_FLOOR_US fix.
             if i == 0:
                 now = ticks_ms()
                 if ticks_diff(now, last_emit_ms) >= MIN_EMIT_MS:
