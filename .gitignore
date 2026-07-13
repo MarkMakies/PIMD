@@ -13,6 +13,11 @@ assets
 # ML chat-handover bundles (working docs, not repo source)
 ML/
 
+# Previous-epoch ML tools — kept locally, not repo source (2026-07-13 epoch reset)
+src/pimd_classify.py
+src/pimd_corpus_check.py
+src/pimd_v2_findings.py
+
 src/data/classviz_settings.json
 src/data/classify_settings.json
 src/data/delaycal_settings.json
