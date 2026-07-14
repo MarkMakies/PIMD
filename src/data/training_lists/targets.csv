@@ -1,0 +1,32 @@
+# targets.csv — v1  commit (2026-07-14) — PIMD target registry,,,,,,,,,,,,
+"# v1 (2026-07-14): initial population from IMG_0878.JPEG, and fixed measuremnents from user",,,,,,,,,,,,
+# One row per physical object. target_id is stable and referenced by capture files — never rename or reuse an id.,,,,,,,,,,,,
+# Units: mm,Dims are the sorted bounding box  dim_a >= dim_b >= dim_c., dim_a >= dim_b >= dim_c.,,,,,,,,,,
+# For solid sheets/discs, thickness lives in dim_c. wall_thickness_mm is for hollow sections only (tube/box/dome; for rings = radial wall).,,,,,,,,,,,
+# shape_class: rod | tube | ring | disc | plate | dome | block | sphere | bolt | wire_coil | collection | composite | irregular,,,,,,,,,,,,
+# closed_loop: y = contains a macroscopic closed conductive ring path (bore/hole comparable to object size).,,,,,,,,,,,,
+#   Small fastener holes and suspension bails don't count. na = non-conductive material. unk = unknown.,,,,,,,,,,,,
+# magnet_test: strong | weak | none (owner-measured where reported; unambiguous pure-metal classes filled from material physics;,,,,,,,,,,,,
+target_id,short_name,shape_class,dim_a_mm,dim_b_mm,dim_c_mm,wall_thickness_mm,closed_loop,mass_g,magnet_test,material_class,plating_material,substrate
+Ag_jewellery_01,solid silver pendant,irregular,70,70,10,,n,46,none,silver,,
+Cu_Zn_brass_block_01,brass block,block,85,34,30,5.4,y,369,none,brass,,
+Sn_Pb_solder_spool_01,solder roll,wire_coil,55,55,35,11.2,y,198,none,solder_sn_pb,,
+Al_plate_01,aluminium plate (large),plate,170,120,10,,n,362,none,aluminium,,
+Ag_SS_spoon_plated_01,silver serving server,irregular,300,80,2,,n,153,none,stainless,silver,stainless
+Cu_Zn_brass_gear_01,brass gear,ring,55,55,25,20,y,282,none,brass,,
+Cu_pipe_01,copper pipe (long),tube,220,25,22,1.2,y,122,none,copper,,
+Fe_Cast_iron_trivet_01,cast iron trivet,disc,75,75,3,,n,103,strong,cast_iron,,
+Fe_Zn_gal_rhs_01,gal RHS offcut,tube,135,25,25,1.4,y,143,strong,steel,zinc,steel
+Fe_Zn_gal_pipe_01,gal pipe offcut,tube,100,25,25,2.3,y,135,strong,steel,zinc,steel
+Pb_pipe_01,lead pipe,tube,120,25,25,3.5,y,203,none,lead,,
+Cu_Zn_brass_handle_01,crank handle (brass/bronze),irregular,90,60,25,,y,199,none,cu_alloy,,
+ferrite_toroid_01,ferrite toroid,ring,36,36,12,9,na,56,strong,ferrite,,
+Cu_Zn_brass_dome_01,brass dome,dome,55,55,25,1.8,n,62,none,brass,,
+Fe_SS_disc_01,stainless perforated disc,disc,85,85,0.7,,n,35,strong,stainless,,
+Cu_Zn_brass_valve_01,brass gas valve,composite,110,80,40,,n,712,none,brass,,
+Fe_spanner_01,adjustable spanner 250,irregular,210,60,15,,n,271,strong,steel,,
+Cu_ingot_01,copper piece,block,40,30,5,,n,42,none,copper,,
+Fe_bolt_zn_01,zinc-plated bolt + nut,bolt,45,35,35,,n,151,strong,steel,zinc,steel
+Fe_SS_shackle_01,D-shackle (screw pin),ring,50,45,12,7.6,y,62,weak,stainless,,
+Fe_bolt_rusty_01,rusty old bolt,bolt,60,20,20,,n,147,strong,steel,,
+NdFeB_magnet_nd_01,rare-earth magnet cylinder,rod,20,7.5,7.5,,n,5,strong,ndfeb,nickel,ndfeb
