@@ -1,3 +1,42 @@
+### Bench observations — 2026-07-14 — fw v4.26 A/B verified; 100 µs / 4.70 V cell has drifted to the noise-zone edge
+
+A/B session recordings under cal_63_air_v1 (`sessions/A.csv` fw v4.25
+114 frames, `sessions/B.csv` fw v4.26 134 frames, ~10 min apart):
+
+- **v4.26 fix verified.** Channel 1 (band 1, cell 2): σ 3050 → 284 µV.
+  Discrete corruption events (single-frame jumps in the 32-deep rolling
+  mean, threshold 400 µV ≈ a 13 mV single sample) fell from 9 per 114
+  frames — up to ±5.7 mV jumps, i.e. single samples ~180 mV off — to 1
+  small event (−477 µV) per 134 frames. The residual matches the low-rate
+  ~±13 mV background events also seen on ch9/ch54/ch55 (1–6 each per
+  session, both firmwares), so the CC-write race is closed; occasional
+  live sightings of a small flicker at that cell are this background, an
+  order of magnitude smaller and rarer than before.
+- **New dominant σ cell is NOT a firmware artifact.** ch56 (100 µs band,
+  4.70 V column, delay 7.6 µs): σ 605 (A) → 2693 µV (B). Its events are
+  quantized at ±~2.0 mV in the rolling mean = single samples of ±64 mV,
+  identical size under v4.25 (1 event) and v4.26 (10 events) — a
+  pre-existing bimodal phenomenon whose RATE changed, not a new mechanism.
+  Cause: operating-point drift into the §17.7 threshold noise zone. The
+  cell is calibrated to sample at 4.70 V but sits at 4.673 V (A) / 4.669 V
+  (B); heavy bands have drifted −20…−31 mV below nominal (monotonic with
+  pulse width — thermal signature), light bands +9 mV high. Going 4.673 →
+  4.669 V took the event rate 1 → 10 per session: the zone's upper edge is
+  sharp and sits near ≈ 4.67 V on this band (the 2026-07-13 mapping used
+  37.5 mV steps — 4.700 clean, 4.625 elevated — so an edge at 4.67 is
+  consistent with it). The ±64 mV two-state character suggests the zone
+  mechanism is discrete (ringing-phase-like), not broadband; mechanism
+  still unknown (§14.7).
+- **Follow-ups:** (1) confirm thermal state / warm-up and re-run delaycal
+  fully soaked so the 4.7 V column re-anchors; (2) consider fine-mapping
+  4.65–4.70 V on the heavy bands to locate the zone edge; (3) if the edge
+  crowds 4.70 V warm, move the third threshold up (e.g. 4.75 V) in the
+  next profile rev; (4) watch item: ch9 (13.44 µs band, first cell) shows
+  6 small quantized events per session under v4.26 — band-head related,
+  minor. (2026-07-14)
+
+---
+
 ### mcu/pimd_mcu.py — v4.26 — post-emit IRQ burst mis-timed cell[1]'s CC write (channel-1 σ anomaly)
 
 Root cause of the index-locked σ anomaly on the Analysis heatmap: channel 1
