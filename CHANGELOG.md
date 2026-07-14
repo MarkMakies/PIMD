@@ -1,3 +1,35 @@
+### mcu/pimd_mcu.py — v4.26 — post-emit IRQ burst mis-timed cell[1]'s CC write (channel-1 σ anomaly)
+
+Root cause of the index-locked σ anomaly on the Analysis heatmap: channel 1
+(band 1, cell 2) showed ~8× the σ of its neighbours, and stayed at the same
+heatmap position when the first band changed from 6 µs/50 kHz (v3 profile)
+to 9 µs/25 kHz (cal_63_air_v1) — i.e. locked to sweep position, not to the
+physical band. PC side ruled out (the σ heatmap is a uniform per-channel
+std over unfiltered W frames); the v3-era corpus
+(`gui_signatures_20260713_212807.csv`) independently shows gross mean bias
+at sweep positions 0–1 (e.g. copper ch1 +15.5 mV against a −1.2 mV band
+trend). Mechanism: the W-record `print()` at sweep index 0 leaves USB CDC
+TX-drain IRQs pending; `read_raw_sample()` re-enables IRQs immediately
+after the SPI read, so at i==1 the queued burst (10–50 µs each, v4.21
+measurement) fires exactly between the read and cell[1]'s `duty_u16` write
+— and the outlier-gate/rolling bookkeeping added tens of µs of interpreter
+time in the same gap for every cell. The RP2040 CC register is not
+double-buffered (v4.13/v4.04): a write landing past the wrap leaves the
+next conversion sampling at the previous cell's compare point (112 ns early
+on the steep 4.8–4.9 V decay ≈ +100 mV raw — inside the outlier gate),
+poisoning rolling[1] every sweep. The 6 µs band's 20 µs period gave the
+tightest write budget of all bands — likely a contributor to its
+"notoriously noisy" reputation. Fix: new `read_raw_bytes_hold()` keeps IRQs
+disabled from the BUSY-synced read through the freq/CC writes (~2–6 µs on
+top of the ≤36 µs v4.21 blackout), bookkeeping moved after the hardware
+writes (the two identical branch copies deduplicated into one), decode
+split into `raw14_from_bytes()` shared with `read_raw_sample()`. Read still
+precedes all CC writes (v4.13). Needs bench A/B: channel 1's σ should
+collapse to ~100 µV; `overrun_count` (B command) should not grow faster
+than on v4.25. (2026-07-14)
+
+---
+
 ### src/data/profiles/cal_63_air_v1.json — new — 6 µs band dropped from the operating profile
 
 New operating profile derived from `cal_72_air_v3` (locked 2026-07-13): the

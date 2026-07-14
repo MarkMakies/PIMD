@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.25, coil v4
+# Pulse Induction Metal Detector, v4.26, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -33,6 +33,28 @@
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
+# v4.26 FIX acquire_mode2: post-emit USB IRQ burst could delay cell[i]'s CC
+#       write past the PWM wrap, mis-timing the next conversion. Symptom:
+#       channel 1 (band 1, cell 2 — the first cell acquired after the W-record
+#       print at i==0) showed ~8x the σ of its neighbours and a biased mean,
+#       locked to SWEEP POSITION: it stayed at the same heatmap cell when the
+#       first band changed from 6 µs/50 kHz (cal_72_air_v3) to 9 µs/25 kHz
+#       (cal_63_air_v1). Mechanism: read_raw_sample() re-enables IRQs right
+#       after the SPI read, so the USB CDC TX-drain IRQs queued during the
+#       read's critical section (10-50 µs latency each, v4.21) fire exactly
+#       between the read and the duty_u16 write for cell[i]; the gate/rolling
+#       bookkeeping (tens of µs of interpreter time) sat in the same gap. CC
+#       is not double-buffered (v4.13/v4.04): a write landing after the wrap
+#       leaves the next period sampling at cell[i-1]'s compare point (112 ns
+#       early on the steep 4.8-4.9 V decay ≈ +100 mV raw — passes the outlier
+#       gate, poisons rolling[1] every sweep). The 6 µs band's 20 µs period
+#       gave the tightest write budget of all — likely a contributor to its
+#       "notoriously noisy" reputation. Fix: read_raw_bytes_hold() keeps IRQs
+#       disabled from the BUSY-synced read through the freq/CC writes (adds
+#       ~2-6 µs to the ≤36 µs v4.21 blackout — same USB SOF tolerance
+#       argument), and the bookkeeping moved after the hardware writes
+#       (deduplicated: both branches carried identical copies). Read still
+#       precedes all CC writes (v4.13 invariant).
 # v4.25 FIX acquire_mode2: outlier gate could permanently latch small-signal
 #       cells. The v4.21 plausibility gate rejected samples deviating more than
 #       mean_raw // OUTLIER_GATE_FRAC from the rolling mean — written for large
@@ -305,7 +327,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.25'
+FW_VERSION = '4.26'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -568,6 +590,15 @@ overrun_count = 0     # DIAGNOSTIC (temporary): counts how often acquire_mode2's
                       # behind the free-running hardware PWM. Read out via 'B'.
 
 
+def raw14_from_bytes(data_bytes):
+    """Decode a 4-byte SDOB SPI word into a signed 14-bit sample."""
+    word = struct.unpack('>I', data_bytes)[0]
+    raw14 = (word >> RAW_DIFF_SHIFT) & RAW_DIFF_MASK
+    if raw14 & (RAW_DIFF_MASK // 2 + 1):
+        raw14 -= RAW_DIFF_MASK + 1
+    return raw14
+
+
 def read_raw_sample():
     """Read one signed 14-bit raw sample from SDOB over SPI0."""
     global busy_high_count
@@ -579,11 +610,29 @@ def read_raw_sample():
         pass
     data_bytes = adc_raw_spi.read(4)
     enable_irq(irq_state)          # restore IRQs before Python processing
-    word = struct.unpack('>I', data_bytes)[0]
-    raw14 = (word >> RAW_DIFF_SHIFT) & RAW_DIFF_MASK
-    if raw14 & (RAW_DIFF_MASK // 2 + 1):
-        raw14 -= RAW_DIFF_MASK + 1
-    return raw14
+    return raw14_from_bytes(data_bytes)
+
+
+_held_irq = None   # irq state stashed by read_raw_bytes_hold() (module global,
+                   # not a return tuple, to keep the Mode 2 hot path
+                   # allocation-free — the v4.14 heap-churn lesson)
+
+
+def read_raw_bytes_hold():
+    """BUSY-synced SDOB read like read_raw_sample(), but leaves IRQs DISABLED
+    and returns the undecoded 4 SPI bytes. The caller performs its
+    time-critical PWM writes, then MUST call enable_irq(_held_irq) on every
+    path, and decodes via raw14_from_bytes(). Added in v4.26 so the post-emit
+    USB IRQ burst cannot land between the SDOB read and the next cell's CC
+    write (see header note)."""
+    global busy_high_count, _held_irq
+    _held_irq = disable_irq()
+    while not busy_pin.value():   # wait for MCLK to fire (BUSY high)
+        pass
+    busy_high_count += 1
+    while busy_pin.value():        # wait for conversion complete (BUSY low)
+        pass
+    return adc_raw_spi.read(4)
 
 
 def acquire_raw_average(n_samples):
@@ -634,6 +683,9 @@ def acquire_mode2(profile):
       every compiled profile (smallest is band4's drive_duty+6.03us+0.75us
       correction ≈ 11.8us). Reading first removes the write-before-read race
       that caused a clean, deterministic value swap between cells (see v4.13).
+      As of v4.26 the read -> freq/CC-write sequence runs in one IRQ-off
+      critical section with the rolling bookkeeping done afterwards, so the
+      write lands ~2 us after the read with no USB IRQ exposure.
 
     Prime fires cell[n-1] so iteration i=0 correctly stores the result in
     rolling[(0-1)%n] = rolling[n-1], eliminating the startup transient.
@@ -712,57 +764,49 @@ def acquire_mode2(profile):
             # to follow array order (reversing the delay order reversed which
             # channel reported which value). Reading first removes the race:
             # at boundaries this also avoids the v4.04 WRAP-shrink issue.
+            #
+            # v4.26: IRQs stay disabled from the BUSY-synced read through the
+            # freq/CC writes, and the gate/rolling bookkeeping (identical in
+            # both branches, now a single copy) moved AFTER the hardware
+            # writes. Previously ~tens of µs of interpreter time plus the
+            # post-emit USB IRQ burst sat between the read and cell[i]'s CC
+            # write, which could push the write past the PWM wrap — CC is not
+            # double-buffered, so the next conversion then fired at cell[i-1]'s
+            # compare point (see header note; symptom was channel 1's inflated
+            # σ / biased mean).
+            data_bytes = read_raw_bytes_hold()
             if at_boundary:
-                raw = read_raw_sample()
-                cnt = rolling_count[prev]
-                if cnt >= 8:
-                    mean_raw = rolling_sum[prev] // cnt
-                    dev = raw - mean_raw
-                    if dev < 0:
-                        dev = -dev
-                    gate = mean_raw if mean_raw >= 0 else -mean_raw
-                    gate //= OUTLIER_GATE_FRAC
-                    if gate < OUTLIER_GATE_MIN:
-                        gate = OUTLIER_GATE_MIN
-                    if dev > gate:
-                        raw = mean_raw
-                idx = rolling_idx[prev]
-                rolling_sum[prev] += raw - rolling[prev][idx]
-                rolling[prev][idx] = raw
-                rolling_idx[prev] = (idx + 1) % avg_depth
-                if rolling_count[prev] < avg_depth:
-                    rolling_count[prev] += 1
                 drive_coil_pwm.freq(freq_i)
                 sample_coil_pwm.freq(freq_i)
-            else:
-                raw = read_raw_sample()
-                cnt = rolling_count[prev]
-                if cnt >= 8:
-                    mean_raw = rolling_sum[prev] // cnt
-                    dev = raw - mean_raw
-                    if dev < 0:
-                        dev = -dev
-                    gate = mean_raw if mean_raw >= 0 else -mean_raw
-                    gate //= OUTLIER_GATE_FRAC
-                    if gate < OUTLIER_GATE_MIN:
-                        gate = OUTLIER_GATE_MIN
-                    if dev > gate:
-                        raw = mean_raw
-                idx = rolling_idx[prev]
-                rolling_sum[prev] += raw - rolling[prev][idx]
-                rolling[prev][idx] = raw
-                rolling_idx[prev] = (idx + 1) % avg_depth
-                if rolling_count[prev] < avg_depth:
-                    rolling_count[prev] += 1
-
-            # Write CC for cell[i] — now after the read. Skip the rewrite when
-            # dd/sd are unchanged from the previous period (always true for a
-            # 1-cell profile, occasionally true otherwise) — harmless
-            # micro-optimization, confirmed not itself a fix for anything.
+            # Skip the CC rewrite when dd/sd are unchanged from the previous
+            # period (always true for a 1-cell profile, occasionally true
+            # otherwise) — harmless micro-optimization, confirmed not itself
+            # a fix for anything.
             if dd != last_dd or sd != last_sd:
                 drive_coil_pwm.duty_u16(dd)
                 sample_coil_pwm.duty_u16(sd)
                 last_dd, last_sd = dd, sd
+            enable_irq(_held_irq)
+            raw = raw14_from_bytes(data_bytes)
+
+            cnt = rolling_count[prev]
+            if cnt >= 8:
+                mean_raw = rolling_sum[prev] // cnt
+                dev = raw - mean_raw
+                if dev < 0:
+                    dev = -dev
+                gate = mean_raw if mean_raw >= 0 else -mean_raw
+                gate //= OUTLIER_GATE_FRAC
+                if gate < OUTLIER_GATE_MIN:
+                    gate = OUTLIER_GATE_MIN
+                if dev > gate:
+                    raw = mean_raw
+            idx = rolling_idx[prev]
+            rolling_sum[prev] += raw - rolling[prev][idx]
+            rolling[prev][idx] = raw
+            rolling_idx[prev] = (idx + 1) % avg_depth
+            if rolling_count[prev] < avg_depth:
+                rolling_count[prev] += 1
 
             # Sleep out the remainder of this cell's period.
             # At band/drive-energy boundaries add settle_i extra periods
