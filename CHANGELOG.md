@@ -1,3 +1,51 @@
+### src/data/profiles/cal_63_air_v1.json — new — 6 µs band dropped from the operating profile
+
+New operating profile derived from `cal_72_air_v3` (locked 2026-07-13): the
+6 µs / 50 kHz band is removed on bench judgment — it contains no additional
+target information not already present in the other bands and is notoriously
+noisy. The remaining 7 bands are byte-identical to v3 (delays from cal run
+`cal_20260713_210057`, top-dense threshold ladder 4.9 → 0.5 V), giving
+7 bands × 9 delays = 63 cells. Shipped as a new file rather than an in-place
+edit of v3 because the profile is the firmware↔ML contract (DESIGN §10) and
+signature captures already exist under the v3 geometry — frames must never be
+mixed across the two. `cal_72_air_v3.json` is retained unchanged as the
+superseded locked profile. A `notes` field in the JSON records the rationale
+(all loaders read only `averages`/`bands`; extra keys are ignored, and all
+runtime code is geometry-driven, so no code changes were needed). (2026-07-14)
+
+---
+
+### mcu/pimd_mcu.py — v4.25 — outlier gate could permanently latch small-signal cells
+
+Root cause of the "last cell flat at zero regardless of target" seen on the
+Analysis-tab grids (channel 72 of cal_72_air_v3 — 100 µs band, 11.264 µs
+delay, the deepest-decay cell): the v4.21 plausibility gate rejects samples
+deviating more than `mean_raw // OUTLIER_GATE_FRAC` from the rolling mean,
+but raw14 is signed. For a near-zero mean the threshold floors to 0 (any
+nonzero deviation rejected); for a negative mean, floor division makes the
+threshold negative, so `dev ≥ 0` always exceeds it and every sample is
+rejected. The substituted mean is written back into the rolling buffer, so
+once count ≥ 8 the cell freezes at its warm-up value forever — the plotted
+baseline-delta is exactly 0 no matter the target. Fix: gate on
+`abs(mean_raw)` with an absolute floor `OUTLIER_GATE_MIN = 164` raw14 counts
+(≈ 100 mV, 1 % FS) — the bit-truncation glitches the gate exists for are
+volts-scale and still caught, but a cell can no longer latch. Needs bench
+verification: flash, run the operating profile, confirm the last cell tracks
+a target. (2026-07-14)
+
+---
+
+### README.md — profile references updated to cal_63_air_v1 / 63 cells
+
+Mode 2 description, highlights, bench-test example and Phase 3 roadmap
+updated from `cal_72_air_v2` / 72 cells to the new `cal_63_air_v1` 63-cell
+profile (6 µs band dropped, top-dense 4.9 → 0.5 V threshold ladder, keep-out
+zone noted). Historical image caption and docs/PIMD.md's demo-profile band
+table left unchanged — they describe profiles that really did have the 6 µs
+band. (2026-07-14)
+
+---
+
 ### src/pimd_classviz.py — v1.31 — Analysis-tab signature captures hardened to pipeline rigor
 
 The first post-enclosure corpus test run (gui_signatures_20260713_212807.csv,

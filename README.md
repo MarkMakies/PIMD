@@ -37,13 +37,13 @@ and then a decaying eddy-current response. A nearby target perturbs that decay. 
 signal is sampled at precise, calibrated delays.
 
 - **Mode 1** — a single filtered (32-bit) sample at one held delay: the low-noise telemetry path, used for baselines and field tests.
-- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The current locked profile (`cal_72_air_v2`) spans **8 pulse widths × 9 sample delays = a 72-cell matrix**. Pulse widths are spaced geometrically (6 → 100 µs, ×1.5 per step) so each band interrogates a distinct slice of target time-constant space; repetition rates are chosen to hold duty near 30%.
-- Sample delays are **amplitude-calibrated** — anchored to geometrically spaced voltages (4.2 → 0.5 V, ×0.77 per step) on the region of the decay where this coil carries the most discrimination information — and snapped to the 8 ns PWM grid, deliberately avoiding the LC-ringing dead zones.
+- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The current locked profile (`cal_63_air_v1`) spans **7 pulse widths × 9 sample delays = a 63-cell matrix**. Pulse widths are spaced geometrically (9 → 100 µs, ×1.5 per step) so each band interrogates a distinct slice of target time-constant space; repetition rates are chosen to hold duty near 30%. (An eighth 6 µs band was dropped: it carried no target information not already present in the other bands and was notoriously noisy.)
+- Sample delays are **amplitude-calibrated** — anchored to a top-dense ladder of voltages (4.9 → 0.5 V) on the region of the decay where this coil carries the most discrimination information — and snapped to the 8 ns PWM grid, deliberately avoiding the LC-ringing dead zones and the measured ~4.45–4.65 V noise keep-out zone.
 - **Polarity convention:** ferrous targets read **positive** (stored magnetic energy reinforces the decay); non-ferrous read **negative** (opposing eddy currents weaken it). A third class turns out to be common in practice: **crossover targets** (cast iron, some stainless, real jewelry with steel fittings) read negative at short pulses and positive at long ones — the pulse-width axis resolves what a single operating point would misclassify.
 
 ## Highlights
 
-- 72-cell decay-space matrix recovering **multi-time-constant discrimination from a PI platform** — something most commercial PI detectors don't attempt.
+- 63-cell decay-space matrix recovering **multi-time-constant discrimination from a PI platform** — something most commercial PI detectors don't attempt.
 - **Validated on a 17-target labelled corpus** (July 2026): signature *shape* is invariant with target distance (5–15 cm, 30× amplitude range) and repeats across sessions and recalibrations to within a few percent — the property the classification layer is built on.
 - Targets fall into **three shape families** — ferrous, non-ferrous, and crossover — and overlapping targets combine **linearly** (a spanner + copper pipe frame decomposes back into its parts at 0.99 correlation), so unmixing is on the table, not just classification.
 - Phase-locked TX/sample timing on one RP2040 PWM slice — **~5 ns sample-trigger jitter (measured)**.
@@ -110,7 +110,7 @@ The tools connect to the board on `/dev/ttyACMx` at 115200 baud.
 ```
 V                              identify / firmware version
 L                              list profiles
-Q5   then  G                   Mode 2: stream the 72-cell profile (W5 records);  E to stop
+Q5   then  G                   Mode 2: stream the loaded operating profile (W5 records);  E to stop
 *5000,40000,8400,256  then S   Mode 1: stream (* records, ~20/s);  E to stop
 A32                            one 32-sample boxcar average (R record)
 ```
@@ -130,7 +130,7 @@ A32                            one 32-sample boxcar average (R record)
 
 This release is **Phase 2 — publish the work to date.** Active and planned work:
 
-- **Phase 3 — machine learning.** Use the 72-cell decay-space matrix for filtering, classification and (the stretch goal) ground discrimination. First milestone reached (July 2026): a locked, delay-calibrated operating profile and a 17-target labelled signature corpus recorded at three distances, with distance-invariance, cross-session repeatability and mixture linearity all verified in air.
+- **Phase 3 — machine learning.** Use the 63-cell decay-space matrix for filtering, classification and (the stretch goal) ground discrimination. First milestone reached (July 2026): a locked, delay-calibrated operating profile and a 17-target labelled signature corpus recorded at three distances, with distance-invariance, cross-session repeatability and mixture linearity all verified in air.
 - **Faster response.** Investigate reducing cell count and per-cell averaging for quicker frames — the corpus so far says different targets go redundant in *different* cells, so nothing is cut yet.
 - **Front-end revision** (TX switch + gate driver, as above), plus a scope measurement of TX coil current vs pulse width to settle whether the longest band is past the coil-current plateau.
 
