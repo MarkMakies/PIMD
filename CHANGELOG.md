@@ -1,3 +1,18 @@
+### src/data/profiles/cal_63_air_v2.json — new — locked; fresh soaked recal under fw v4.26
+
+New locked operating profile from the 2026-07-14 delay recalibration (fully
+warmed, fw v4.26). Same band plan and threshold ladder as cal_63_air_v1;
+delays re-anchored — shifts of −56…+16 ns vs v1, heavy bands earliest
+(thermal signature, decays arrive earlier warm). This retires the drift
+that had pushed the 100 µs / 4.70 V cell onto the ~4.67 V upper edge of the
+§17.7 threshold noise zone (σ 2.7 mV in session B); bench-confirmed fixed.
+The delaycal export contained the full 8-band plan; the 6 µs / 50 kHz band
+was stripped per the cal_63_air_v1 rationale before locking, and the name
+field normalised. Same cell geometry as v1 but different delays — treat as
+a new calibration epoch for corpus purposes. (2026-07-14)
+
+---
+
 ### Bench observations — 2026-07-14 — fw v4.26 A/B verified; 100 µs / 4.70 V cell has drifted to the noise-zone edge
 
 A/B session recordings under cal_63_air_v1 (`sessions/A.csv` fw v4.25
