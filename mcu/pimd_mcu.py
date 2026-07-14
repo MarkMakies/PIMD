@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.24, coil v4
+# Pulse Induction Metal Detector, v4.25, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -33,6 +33,20 @@
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
+# v4.25 FIX acquire_mode2: outlier gate could permanently latch small-signal
+#       cells. The v4.21 plausibility gate rejected samples deviating more than
+#       mean_raw // OUTLIER_GATE_FRAC from the rolling mean — written for large
+#       positive means, but raw14 is SIGNED: for a near-zero mean the threshold
+#       floors to 0 (any nonzero deviation rejected) and for a negative mean
+#       floor division makes it negative (-3 // 10 = -1), so dev >= 0 is ALWAYS
+#       over it and EVERY sample is rejected. The substituted mean is written
+#       back into the rolling buffer, so once count >= 8 the cell freezes at
+#       its warm-up value forever. Observed on the deepest-decay cell (last
+#       delay of the 100 µs band, ch 72 of cal_72_air_v3, 1 count ≈ 610 µV):
+#       flat 0 delta in classviz regardless of target. Fix: gate on
+#       abs(mean_raw) with an absolute floor OUTLIER_GATE_MIN (164 counts
+#       ≈ 100 mV ≈ 1% FS) — still catches the volts-scale bit-truncation
+#       glitches the gate exists for, but can never latch a cell.
 # v4.24 FIX acquire_mode2: boundary settling was measured in PWM periods
 #       (BOUNDARY_PRIME = 15), not absolute time — so high-frequency bands got
 #       proportionally tiny settling budgets (25 kHz: 600 µs, 20 kHz: 750 µs)
@@ -291,7 +305,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.24'
+FW_VERSION = '4.25'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -360,6 +374,11 @@ COMMAND_POLL_MS = 1   # poll stdin for commands at most once per ms instead of o
 OUTLIER_GATE_FRAC = 10  # per-cell raw14 plausibility gate: reject samples deviating
                         # >1/10 (10%) from rolling mean; substitute mean instead.
                         # Secondary defence after the IRQ critical section (v4.21).
+OUTLIER_GATE_MIN = 164  # absolute gate floor in raw14 counts (≈100 mV, 1% FS).
+                        # raw14 is signed: without a floor, a near-zero mean gives
+                        # a 0 threshold and a negative mean a negative one — every
+                        # sample rejected, cell latched at its warm-up value (v4.25;
+                        # bit-truncation glitches are volts-scale, still caught).
 
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
@@ -701,7 +720,11 @@ def acquire_mode2(profile):
                     dev = raw - mean_raw
                     if dev < 0:
                         dev = -dev
-                    if dev > mean_raw // OUTLIER_GATE_FRAC:
+                    gate = mean_raw if mean_raw >= 0 else -mean_raw
+                    gate //= OUTLIER_GATE_FRAC
+                    if gate < OUTLIER_GATE_MIN:
+                        gate = OUTLIER_GATE_MIN
+                    if dev > gate:
                         raw = mean_raw
                 idx = rolling_idx[prev]
                 rolling_sum[prev] += raw - rolling[prev][idx]
@@ -719,7 +742,11 @@ def acquire_mode2(profile):
                     dev = raw - mean_raw
                     if dev < 0:
                         dev = -dev
-                    if dev > mean_raw // OUTLIER_GATE_FRAC:
+                    gate = mean_raw if mean_raw >= 0 else -mean_raw
+                    gate //= OUTLIER_GATE_FRAC
+                    if gate < OUTLIER_GATE_MIN:
+                        gate = OUTLIER_GATE_MIN
+                    if dev > gate:
                         raw = mean_raw
                 idx = rolling_idx[prev]
                 rolling_sum[prev] += raw - rolling[prev][idx]
