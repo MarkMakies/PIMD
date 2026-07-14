@@ -1,34 +1,81 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v5
-# — offline session-CSV -> training-corpus CSV converter
+# PIMD Feature Extractor (pimd_features.py) v6
+# — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
-# Reads one or more self-describing session-dump CSVs produced by ClassViz's
-# "Record Session" feature (pimd_classviz.py v1.16+), validates each against
-# the locked cal_72_air_v2 operating profile (DESIGN §10 — never mix profile
-# geometries, DESIGN §11), segments the frame stream into air/target plateaus
-# (from '# mark:' ground-truth lines if present — pimd_classviz.py v1.19+ —
-# else a rolling-window change-point fallback), corrects thermal drift
-# (DESIGN §3/§17.5) with a piecewise-linear per-channel baseline anchored on
-# air segments, and emits one row per (session, target, cell) matching the
-# existing hand-built PIMD_target_corpus_signatures.csv schema, plus one
-# appended column not in that legacy schema:
-#   session,target,distance_cm,pulse_us,threshold_v,delta_mV,plateau_amp_mV,
-#   splithalf_floor,quality,amp_mean_abs_mV
-# plateau_amp_mV is ||delta_mV||_2 (L2 norm across the 72 cells -- the v1
-# corpus's convention); amp_mean_abs_mV is mean(|delta_mV|) per cell, a
-# distinct, smaller quantity kept under its own name (see
-# compute_plateau_stats() for the exact definitions and why they differ).
-# Optionally also emits a wide-format signatures CSV (--out-wide): one row
-# per plateau, c00..c71 = that plateau's delta_mV vector, derived from the
-# same per-plateau computation as the long rows (no re-parsing).
-# Also writes one diagnostic PNG per input session (band-mean vs time, drift-
-# corrected, with segment boundaries marked) for eyeballing before trusting a
-# capture. Plain numpy + matplotlib only — no pandas, no csv module,
-# consistent with the rest of the repo (plain comma-split, no quoting).
+# Reads one or more input files -- either self-describing session-dump CSVs
+# produced by ClassViz's "Record Session" feature, or gui_signatures_*.csv
+# files produced directly by the Analysis tab's quick-capture (the primary
+# corpus source since pimd_classviz.py v1.32) -- joins each row's target_id
+# against the target registry (pimd_targets.py), enforces that a single
+# corpus build never spans more than one profile geometry (DESIGN §10/§11),
+# and emits one row per (capture, cell) -- see the module docstring below for
+# the exact column list.
 #
+# v6 Structured target-metadata capture regime. Replaces the free-text
+#    `target`/`distance_cm` columns with a registry-backed `target_id` plus
+#    structured placement (distance_mm/long_axis/face_normal/offset_x_mm/
+#    offset_y_mm/medium/repeat_idx/notes) and capture provenance
+#    (profile_name/profile_sha8/fw_version/tool_version/supply) -- see
+#    CORPUS_HEADER/JOINED_CORPUS_HEADER below. Six structural changes:
+#      (1) Plateau redesigned around target_id/short_name/placement instead
+#      of a free-text label; a plateau with no resolvable target_id (a
+#      no-marks change-point segment, or an old-style '@distance' mark with
+#      no structured 'mark_target:' companion line) gets target_id=None and
+#      is loudly warned + excluded from output -- there is no free-text ->
+#      target_id migration, by the same "no migration code" principle the
+#      brief states for pre-v1.32 gui_signatures files.
+#      (2) New 'mark_target:' comment-line parsing (parse_mark_target_line(),
+#      SessionData.mark_targets) -- additive alongside the existing 'mark:'
+#      line, which is untouched, so pre-v1.32 session dumps stay readable.
+#      segment_from_marks() nearest-timestamp-matches each 'mark:' to its
+#      'mark_target:' companion (classviz writes them back-to-back) and
+#      retires the old visit-count '(rpt)'-suffix scheme in favor of the
+#      structured repeat_idx column.
+#      (3) The profile-geometry gate is no longer a --profile reference-file
+#      comparison that [SKIP]s mismatches (load_reference_profile/
+#      validate_profile/DEFAULT_PROFILE/--profile removed). It's now a hard
+#      guard: every input file's (profile_name, profile_sha8) is grouped,
+#      and a corpus build spanning more than one group is a hard SystemExit
+#      naming every offending file -- silent skipping of a wrong-geometry
+#      session masked a real error class, plus a --profile reference file
+#      doesn't scale to mixed session-dump + gui_signatures batches, which
+#      each carry their own profile identity now. profile_sha8 is SHA-256
+#      of the profile JSON bytes as loaded, truncated to 8 hex chars
+#      (profile_sha8_of_bytes()); classviz computes and embeds it directly
+#      ('# profile_sha8:' in session dumps, a literal column in
+#      gui_signatures rows) since only classviz has the literal loaded
+#      bytes -- a session dump's embedded '# profile_json:' text is a
+#      re-serialization (different key order/separators are possible) that
+#      would hash differently from the same profile loaded as a file, so
+#      re-hashing it here is only used as a fallback for dumps that predate
+#      the explicit '# profile_sha8:' line.
+#      (4) New gui_signatures ingest path (sniff_input_kind(),
+#      load_gui_signatures_csv(), process_gui_signatures_file()): these
+#      files are already at full per-cell corpus-row granularity, so no
+#      segmentation/baseline math runs on them, just registry join. A file
+#      with the pre-v1.32 target/distance_cm columns is a hard, clearly-
+#      worded SystemExit (no migration path).
+#      (5) Registry join (registry_join_fields(), pimd_targets.load_targets())
+#      appends shape_class/dim_a_mm/.../substrate to every output row;
+#      'air' passes through with those fields blank; an unknown target_id is
+#      a hard SystemExit naming the file and id. Registry errors abort the
+#      whole run before any file is processed; registry warnings print but
+#      don't block.
+#      (6) CSV-quoting switch: build_rows()/build_wide_row() now return
+#      dicts written through csv.writer(quoting=QUOTE_MINIMAL) instead of
+#      hand '','.join()' with a comma->semicolon replace-and-warn --
+#      `notes`/`short_name` are free text and will contain commas. This is
+#      an intentional on-disk convention change (quoted fields use '"' now)
+#      for any external consumer of the old semicolon convention.
+#    No-marks change-point sessions can no longer produce named corpus rows
+#    (a 'segment_NN' placeholder was never a valid registry target_id) --
+#    every non-air segment from that fallback gets target_id=None and is
+#    warned/skipped. Use the (now target-registry-aware) mark hotkeys.
+#    TOOL_VERSION introduced (no version string previously existed in this
+#    file) since the new schema needs a real tool_version column value.
 # v5 plateau_amp_mV restored to the v1 hand-built corpus's convention: L2
 #    norm of the 72-cell drift-corrected delta_mV vector (was silently
 #    emitting mean(|delta_mV|) per cell instead -- a different, ~9x smaller
@@ -89,7 +136,7 @@
 #    (copper pipe / copper pipe (rpt) / steel spanner) instead of a mixed
 #    [72, 144] crash, and pimd_corpus_check.py's repeat-consistency check now
 #    correctly compares the repeat visit against its base capture at all 3
-#    distances.
+#    distances. (Superseded in v6 by the structured repeat_idx column.)
 # v3 Fixed parse_session_file(): the single-pass parser flipped `header_done`
 #    to True on the first non-'#' line (the CSV data-header row) and never
 #    checked for '#' again afterward -- but '# mark: ...' lines are written
@@ -136,22 +183,67 @@
 #    ambiguity.
 ###############################################################################
 
+"""Output corpus schema (the ML contract for downstream tooling).
+
+CORPUS_HEADER (raw, unjoined -- also what pimd_classviz.py writes directly to
+gui_signatures_*.csv, one row per (capture, cell)):
+  session          -- session/file stem the capture came from
+  capture_id       -- '<session>_cNN', unique per capture press
+  captured_at      -- ISO-8601 local time the capture completed
+  target_id        -- registry key (pimd_targets.py), or 'air'
+  short_name       -- denormalised from the registry at write time (display only; join on target_id)
+  distance_mm      -- int, coil face -> nearest target surface
+  long_axis        -- x|y|z|na, direction the registry's dim_a points
+  face_normal      -- x|y|z|na, normal of the dim_a x dim_b face
+  offset_x_mm      -- int, target centroid offset from coil centre (coil long axis)
+  offset_y_mm      -- int, target centroid offset from coil centre (coil short axis)
+  medium           -- air|soil|other
+  repeat_idx       -- int >= 1, disambiguates repeated captures of the same placement tuple
+  notes            -- free text, per-capture
+  pulse_us         -- band pulse width
+  threshold_v      -- cell sample threshold
+  delta_mV         -- baseline-corrected amplitude for this cell
+  plateau_amp_mV   -- ||delta_mV||_2 across all cells in this capture
+  splithalf_floor  -- noise-floor estimate, same L2 convention as plateau_amp_mV
+  quality          -- 'ok', or '+'-joined flags ('noisy', 'short')
+  amp_mean_abs_mV  -- mean(|delta_mV|) across all cells in this capture
+  profile_name     -- loaded profile JSON's 'name' field
+  profile_sha8     -- first 8 hex chars of SHA-256 of the profile JSON bytes as loaded
+  fw_version       -- parsed from the board's V-identify reply
+  tool_version     -- capturing tool's version string
+  supply           -- battery|usb
+
+JOINED_CORPUS_HEADER = CORPUS_HEADER plus, from a registry join on target_id
+(blank for 'air'; pimd_features.py's own --out corpus build only):
+  shape_class, dim_a_mm, dim_b_mm, dim_c_mm, wall_thickness_mm, closed_loop,
+  mass_g, magnet_test, material_class, plating_material, substrate
+
+Wide format (--out-wide, one row per capture instead of per cell):
+  WIDE_METADATA_FIELDS + WIDE_SCALAR_FIELDS + c00..cNN (delta_mV vector, same
+  channel order as CORPUS_HEADER's per-cell rows) + WIDE_TAIL_FIELDS, plus
+  the same registry-joined columns appended for pimd_features.py's own build.
+"""
+
 import argparse
+import csv
+import hashlib
+import io
 import json
 import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PROFILE  = os.path.join(SCRIPT_DIR, 'data', 'profiles', 'cal_72_air_v2.json')
-PROFILE_TOL      = 1e-6   # float compare tolerance for profile geometry validation
+import pimd_targets
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TOOL_VERSION = 'pimd_features.py v6'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling
@@ -165,8 +257,28 @@ NOISY_RATIO_THRESHOLD = 0.20   # splithalf_floor > this * plateau_amp_mV -> qual
 QUALITY_FLAG_SEP      = '+'    # NOT ',' -- every CSV in this repo is parsed with a plain split(',')
 NOMINAL_FRAME_RATE_HZ = 7.3    # sanity-check only; actual rate is always measured from the data
 
-CORPUS_HEADER = ('session,target,distance_cm,pulse_us,threshold_v,delta_mV,plateau_amp_mV,'
-                  'splithalf_floor,quality,amp_mean_abs_mV')
+MARK_TARGET_MATCH_TOL_S = 2.0   # max |dt| between a 'mark:' and its 'mark_target:' companion line
+
+CORPUS_HEADER_FIELDS = [
+    'session', 'capture_id', 'captured_at', 'target_id', 'short_name', 'distance_mm',
+    'long_axis', 'face_normal', 'offset_x_mm', 'offset_y_mm', 'medium', 'repeat_idx', 'notes',
+    'pulse_us', 'threshold_v', 'delta_mV', 'plateau_amp_mV', 'splithalf_floor', 'quality',
+    'amp_mean_abs_mV', 'profile_name', 'profile_sha8', 'fw_version', 'tool_version', 'supply',
+]
+CORPUS_HEADER = ','.join(CORPUS_HEADER_FIELDS)
+
+JOINED_EXTRA_FIELDS = ['shape_class', 'dim_a_mm', 'dim_b_mm', 'dim_c_mm', 'wall_thickness_mm',
+                        'closed_loop', 'mass_g', 'magnet_test', 'material_class',
+                        'plating_material', 'substrate']
+JOINED_CORPUS_HEADER_FIELDS = CORPUS_HEADER_FIELDS + JOINED_EXTRA_FIELDS
+JOINED_CORPUS_HEADER = ','.join(JOINED_CORPUS_HEADER_FIELDS)
+
+WIDE_METADATA_FIELDS = ['session', 'capture_id', 'captured_at', 'target_id', 'short_name',
+                         'distance_mm', 'long_axis', 'face_normal', 'offset_x_mm', 'offset_y_mm',
+                         'medium', 'repeat_idx', 'notes']
+WIDE_SCALAR_FIELDS = ['plateau_amp_mV', 'splithalf_floor', 'quality']
+WIDE_TAIL_FIELDS = ['amp_mean_abs_mV', 'profile_name', 'profile_sha8', 'fw_version',
+                     'tool_version', 'supply']
 
 
 def warn(session_path, message):
@@ -175,6 +287,16 @@ def warn(session_path, message):
 
 def skip(session_path, message):
     print('[SKIP] {0}: {1}'.format(os.path.basename(session_path), message), file=sys.stderr)
+
+
+def profile_sha8_of_bytes(raw_bytes):
+    """First 8 hex chars of SHA-256 of `raw_bytes`. Per the target-metadata
+    capture regime, this must be the profile JSON bytes as loaded/embedded --
+    NOT a freshly re-json.dumps'd canonical form. Two content-identical but
+    differently-formatted JSON files legitimately produce different sha8s;
+    that's intentional (a provenance fingerprint of the literal artifact
+    used, pinning geometry per DESIGN §10 -- not a semantic-equality check)."""
+    return hashlib.sha256(raw_bytes).hexdigest()[:8]
 
 
 # ---------------------------------------------------------------------------
@@ -190,9 +312,14 @@ class SessionData:
     n_cells: int
     n_channels: int
     profile: dict
+    profile_raw_json: str    # exact embedded JSON substring, for the profile_sha8 fallback
+    profile_sha8_explicit: object   # str or None -- authoritative when present (see module changelog v6.3)
+    fw_version: str
+    supply: str
     colmap: list            # list[dict] length n_channels: band_index, freq_hz, pulse_us, delay_us, threshold_v
     session_notes: str
     marks: list              # list[(datetime, str)]
+    mark_targets: list        # list[(datetime, dict)] -- structured 'mark_target:' companions
     t0: datetime              # first frame's pc_wallclock timestamp (epoch for t_seconds / mark alignment)
     t_seconds: np.ndarray      # (n,)
     frames_mV: np.ndarray       # (n, n_channels)
@@ -207,10 +334,56 @@ def _parse_mark_content(content):
     return datetime.fromisoformat(ts_str.strip()), label.strip()
 
 
+_MARK_TARGET_KEYS = ['target_id', 'distance_mm', 'long_axis', 'face_normal', 'offset_x_mm',
+                     'offset_y_mm', 'medium', 'repeat_idx', 'notes']
+
+
+def parse_mark_target_line(content):
+    """content is the '#'-stripped text of a 'mark_target: <iso-ts>, <csv
+    fields>' line (with the 'mark_target:' prefix still attached). Returns
+    (datetime, dict) with keys _MARK_TARGET_KEYS, or None if content isn't a
+    mark_target line. The field portion is parsed with csv.reader (not a
+    plain split) so a quoted comma inside `notes` survives -- classviz writes
+    it with csv.writer, not hand-join."""
+    if not content.startswith('mark_target:'):
+        return None
+    rest = content.split(':', 1)[1]
+    ts_str, _, field_str = rest.strip().partition(',')
+    reader = csv.reader(io.StringIO(field_str.strip()))
+    raw_fields = next(reader, [])
+    d = dict(zip(_MARK_TARGET_KEYS, (f.strip() for f in raw_fields)))
+    d.setdefault('target_id', '')
+    d['distance_mm'] = float(d['distance_mm']) if d.get('distance_mm') else None
+    d['offset_x_mm'] = int(float(d['offset_x_mm'])) if d.get('offset_x_mm') else 0
+    d['offset_y_mm'] = int(float(d['offset_y_mm'])) if d.get('offset_y_mm') else 0
+    d['repeat_idx'] = int(float(d['repeat_idx'])) if d.get('repeat_idx') else 1
+    d.setdefault('long_axis', 'na')
+    d.setdefault('face_normal', 'na')
+    d.setdefault('medium', 'air')
+    d.setdefault('notes', '')
+    return datetime.fromisoformat(ts_str.strip()), d
+
+
+def _fw_version_from_v_response(raw):
+    """raw is the literal V-identify reply string (e.g. 'V4.26,1,5,4,...').
+    Mirrors pimd_classviz.py's _parsed_fw_version() -- same read-only
+    extraction, no protocol involvement."""
+    if not raw or raw.startswith('unknown'):
+        return 'unknown'
+    parts = raw.split(',')
+    return parts[0].lstrip('V').strip() if parts else 'unknown'
+
+
 def parse_session_file(path):
     marks = []
+    mark_targets = []
     colmap = []
     profile = None
+    profile_raw_json = ''
+    profile_sha8_explicit = None
+    firmware_v_response_raw = None
+    fw_version_explicit = None
+    supply = 'unknown'
     notes_lines = []
     n_bands = n_cells = n_channels = None
     session_start_iso = None
@@ -237,7 +410,17 @@ def parse_session_file(path):
                         if m:
                             n_bands, n_cells, n_channels = (int(x) for x in m.groups())
                     elif content.startswith('profile_json:'):
-                        profile = json.loads(content.split(':', 1)[1].strip())
+                        profile_raw_json = content.split(':', 1)[1].strip()
+                        profile = json.loads(profile_raw_json)
+                    elif content.startswith('profile_sha8:'):
+                        profile_sha8_explicit = content.split(':', 1)[1].strip()
+                    elif content.startswith('fw_version:'):
+                        fw_version_explicit = content.split(':', 1)[1].strip()
+                    elif content.startswith('firmware_v_response'):
+                        _, _, raw = content.partition('): ')
+                        firmware_v_response_raw = raw.strip()
+                    elif content.startswith('supply:'):
+                        supply = content.split(':', 1)[1].strip()
                     elif content.startswith('colmap_fields:'):
                         pass  # fixed known order (col_index,band_index,freq_hz,pulse_us,delay_us,threshold_v)
                     elif content.startswith('colmap:'):
@@ -252,9 +435,13 @@ def parse_session_file(path):
                         })
                     elif content.startswith('session_notes:'):
                         notes_lines.append(content.split(':', 1)[1].strip())
+                    elif content.startswith('mark_target:'):
+                        parsed = parse_mark_target_line(content)
+                        if parsed:
+                            mark_targets.append(parsed)
                     elif content.startswith('mark:'):
                         marks.append(_parse_mark_content(content))
-                    # else: unrecognised '#' line (active_profile_idx, firmware_v_response, ...) - ignored
+                    # else: unrecognised '#' line (active_profile_idx, ...) - ignored
                     continue
                 else:
                     data_header_cols = line.split(',')
@@ -268,7 +455,11 @@ def parse_session_file(path):
                     # targets, so they land interspersed among data rows, not just
                     # before the first one -- must still be recognised here.
                     content = line[1:].strip()
-                    if content.startswith('mark:'):
+                    if content.startswith('mark_target:'):
+                        parsed = parse_mark_target_line(content)
+                        if parsed:
+                            mark_targets.append(parsed)
+                    elif content.startswith('mark:'):
                         marks.append(_parse_mark_content(content))
                     # else: unrecognised '#' line mid-stream - ignored
                     continue
@@ -292,12 +483,27 @@ def parse_session_file(path):
     frames_mV = np.array(rows, dtype=np.float64) / 1000.0
     flagged_arr = np.array(flagged, dtype=bool)
 
+    fw_version = fw_version_explicit or _fw_version_from_v_response(firmware_v_response_raw)
+
     return SessionData(
         path=path, session_start_iso=session_start_iso, tool_version=tool_version,
         n_bands=n_bands, n_cells=n_cells, n_channels=n_channels, profile=profile,
+        profile_raw_json=profile_raw_json, profile_sha8_explicit=profile_sha8_explicit,
+        fw_version=fw_version, supply=supply,
         colmap=colmap, session_notes='\n'.join(notes_lines), marks=marks,
+        mark_targets=mark_targets,
         t0=t0, t_seconds=t_seconds, frames_mV=frames_mV, flagged=flagged_arr,
     )
+
+
+def session_profile_sha8(sess):
+    """The authoritative profile_sha8 for a parsed session dump: prefer the
+    explicit '# profile_sha8:' line (classviz computed it from the literal
+    loaded bytes -- see module changelog v6.3) and only fall back to hashing
+    the embedded '# profile_json:' text for dumps that predate that line."""
+    if sess.profile_sha8_explicit:
+        return sess.profile_sha8_explicit
+    return profile_sha8_of_bytes(sess.profile_raw_json.encode('utf-8'))
 
 
 def drop_flagged(sess):
@@ -316,50 +522,30 @@ def measure_frame_rate_hz(t_seconds):
 
 
 # ---------------------------------------------------------------------------
-# Profile validation (never mix profile geometries -- DESIGN §11-adjacent)
-# ---------------------------------------------------------------------------
-
-def load_reference_profile(path):
-    with open(path) as f:
-        return json.load(f)
-
-
-def validate_profile(profile, reference, tol=PROFILE_TOL):
-    if profile.get('name') != reference['name']:
-        return False, "name '{0}' != '{1}'".format(profile.get('name'), reference['name'])
-    if profile.get('averages') != reference['averages']:
-        return False, 'averages {0} != {1}'.format(profile.get('averages'), reference['averages'])
-    bands, ref_bands = profile.get('bands', []), reference['bands']
-    if len(bands) != len(ref_bands):
-        return False, '{0} bands != {1} bands'.format(len(bands), len(ref_bands))
-    for i, (b, rb) in enumerate(zip(bands, ref_bands)):
-        if int(b.get('freq_hz', -1)) != int(rb['freq_hz']):
-            return False, 'band {0}: freq_hz {1} != {2}'.format(i, b.get('freq_hz'), rb['freq_hz'])
-        if abs(float(b.get('pulse_us', -1)) - rb['pulse_us']) > tol:
-            return False, 'band {0}: pulse_us {1} != {2}'.format(i, b.get('pulse_us'), rb['pulse_us'])
-        delays, ref_delays = b.get('delays_us', []), rb['delays_us']
-        if len(delays) != len(ref_delays) or any(abs(d - rd) > tol for d, rd in zip(delays, ref_delays)):
-            return False, 'band {0}: delays_us mismatch'.format(i)
-        thr, ref_thr = b.get('threshold_v', []), rb['threshold_v']
-        if len(thr) != len(ref_thr) or any(abs(t - rt) > tol for t, rt in zip(thr, ref_thr)):
-            return False, 'band {0}: threshold_v mismatch'.format(i)
-    return True, ''
-
-
-# ---------------------------------------------------------------------------
 # Segmentation
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Plateau:
-    label: str
-    distance_cm: object   # float or None
+    target_id: object     # str, or None if no structured metadata could be resolved (row is skipped)
+    short_name: str
+    distance_mm: object    # int/float or None (air)
+    long_axis: str           # x|y|z|na
+    face_normal: str          # x|y|z|na
+    offset_x_mm: int
+    offset_y_mm: int
+    medium: str                # air|soil|other
+    repeat_idx: int
+    notes: str
     is_air: bool
     start_idx: int
-    end_idx: int           # [start_idx, end_idx) into the flagged-dropped frame arrays
+    end_idx: int              # [start_idx, end_idx) into the flagged-dropped frame arrays
 
 
 def parse_mark_label(raw_text):
+    """Legacy '@distance' free-text parser -- kept as the fallback for
+    old-style 'mark:' lines with no 'mark_target:' companion. Returns
+    (label, distance_cm, is_air); label is NOT a target_id."""
     text = raw_text.strip()
     if text.lower() == 'air':
         return 'air', None, True
@@ -369,17 +555,31 @@ def parse_mark_label(raw_text):
     return text, None, False
 
 
-def segment_from_marks(sess, frame_rate_hz, settle_s):
+def _match_mark_targets(marks_sorted, mark_targets, tol_s=MARK_TARGET_MATCH_TOL_S):
+    """Nearest-timestamp match each mark to its 'mark_target:' companion
+    (classviz writes them back-to-back, so they're microseconds apart, not
+    exactly equal). Returns dict[mark_dt -> mark_target dict]. Each
+    mark_target entry is consumed by at most one mark."""
+    remaining = sorted(mark_targets, key=lambda mt: mt[0])
+    matched = {}
+    for mark_dt, _ in marks_sorted:
+        best_i, best_delta = None, None
+        for i, (mt_dt, _mt_dict) in enumerate(remaining):
+            delta = abs((mt_dt - mark_dt).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_i, best_delta = i, delta
+        if best_i is not None and best_delta <= tol_s:
+            matched[mark_dt] = remaining.pop(best_i)[1]
+    return matched
+
+
+def segment_from_marks(sess, frame_rate_hz, settle_s, targets):
     marks_sorted = sorted(sess.marks, key=lambda m: m[0])
+    matched_targets = _match_mark_targets(marks_sorted, sess.mark_targets)
     n = len(marks_sorted)
     settle_frames = int(round(settle_s * frame_rate_hz))
     plateaus = []
-    visit_counts = {}   # (label.lower(), distance_cm) -> visits seen so far, this session
     for i, (mark_dt, raw_text) in enumerate(marks_sorted):
-        label, distance_cm, is_air = parse_mark_label(raw_text)
-        if not is_air and distance_cm is None:
-            warn(sess.path, "mark '{0}' has no @distance suffix, treating as target with unknown distance".format(
-                raw_text))
         mark_t = (mark_dt - sess.t0).total_seconds()
         start_idx = min(int(np.searchsorted(sess.t_seconds, mark_t)) + settle_frames, len(sess.t_seconds))
         if i + 1 < n:
@@ -390,26 +590,41 @@ def segment_from_marks(sess, frame_rate_hz, settle_s):
         if start_idx >= end_idx:
             warn(sess.path, "plateau '{0}' has no frames left after settle trim, skipping".format(raw_text))
             continue
-        # A guided Training Session run can legitimately revisit the same
-        # target/distance more than once in one session (e.g. a saved list
-        # visited twice for a repeatability check). Every non-air plateau
-        # only carries (session, target, distance_cm) as its identity in the
-        # output corpus -- without a disambiguator, a second visit would
-        # silently merge into the first under groupby-style corpus tooling
-        # (same key, doubled cell count). Suffix repeats '(rpt)', '(rpt3)',
-        # '(rpt4)', ... -- '(rpt)' for the 2nd visit matches the pre-existing
-        # hand-corpus convention (see pimd_corpus_check.py's repeat-
-        # consistency check) so a simple double-visit needs no other tool
-        # changes; later visits get a numbered variant.
-        if not is_air:
-            key = (label.lower(), distance_cm)
-            visit_counts[key] = visit_counts.get(key, 0) + 1
-            visit = visit_counts[key]
-            if visit == 2:
-                label = '{0} (rpt)'.format(label)
-            elif visit > 2:
-                label = '{0} (rpt{1})'.format(label, visit)
-        plateaus.append(Plateau(label, distance_cm, is_air, start_idx, end_idx))
+
+        mt = matched_targets.get(mark_dt)
+        if mt is not None:
+            target_id = mt['target_id'] or None
+            is_air = (target_id == 'air')
+            short_name = targets[target_id].short_name if target_id in targets else ''
+            plateaus.append(Plateau(
+                target_id=target_id, short_name=short_name, distance_mm=mt['distance_mm'],
+                long_axis=mt['long_axis'], face_normal=mt['face_normal'],
+                offset_x_mm=mt['offset_x_mm'], offset_y_mm=mt['offset_y_mm'], medium=mt['medium'],
+                repeat_idx=mt['repeat_idx'], notes=mt['notes'], is_air=is_air,
+                start_idx=start_idx, end_idx=end_idx))
+            continue
+
+        # Legacy fallback: no structured companion line for this mark. 'air'
+        # still resolves cleanly ('air' is a valid pseudo target_id with no
+        # registry row needed); a real free-text target label does not --
+        # there is no label -> target_id migration (same "no migration code"
+        # principle as the pre-v1.32 gui_signatures rejection), so it's
+        # loudly warned and excluded from output.
+        label, distance_cm, is_air = parse_mark_label(raw_text)
+        if is_air:
+            plateaus.append(Plateau(
+                target_id='air', short_name='', distance_mm=None, long_axis='na', face_normal='na',
+                offset_x_mm=0, offset_y_mm=0, medium='air', repeat_idx=1, notes='',
+                is_air=True, start_idx=start_idx, end_idx=end_idx))
+        else:
+            warn(sess.path, "mark '{0}' predates structured target capture (no 'mark_target:' "
+                             "companion) -- its rows cannot join the registry and will be "
+                             "skipped; re-capture under pimd_classviz.py >= v1.32".format(raw_text))
+            distance_mm = distance_cm * 10.0 if distance_cm is not None else None
+            plateaus.append(Plateau(
+                target_id=None, short_name=label, distance_mm=distance_mm, long_axis='na',
+                face_normal='na', offset_x_mm=0, offset_y_mm=0, medium='air', repeat_idx=1,
+                notes='', is_air=False, start_idx=start_idx, end_idx=end_idx))
     return plateaus
 
 
@@ -490,13 +705,16 @@ def classify_segments(runs, frames_mV, air_threshold_mv):
     later target segments did.) Every other run is compared against the
     first run's median; anything close enough is also "air" (the operator
     re-zeroing between targets), everything else is a target. Target
-    segments get generic placeholder labels only -- there is no ground
-    truth for *which* physical target a run corresponds to without marks,
-    so guessing from session_notes text would risk silently mislabelling
-    training data. If the session doesn't actually open in air (a target
-    already in place at record-start), this heuristic will anchor on that
-    target instead -- a real limitation without marks; use '# mark: ..., air'
-    (pimd_classviz.py v1.19+) to remove the ambiguity entirely.
+    segments carry target_id=None -- there is no ground truth for *which*
+    physical target a run corresponds to without marks, so guessing from
+    session_notes text would risk silently mislabelling training data (and,
+    since v6, a placeholder like 'segment_01' was never a valid registry
+    target_id anyway) -- these plateaus produce no output rows, only a
+    warning. If the session doesn't actually open in air (a target already
+    in place at record-start), this heuristic will anchor on that target
+    instead -- a real limitation without marks; use the mark hotkeys
+    (pimd_classviz.py v1.19+, target-registry-aware since v1.32) to remove
+    the ambiguity entirely.
     """
     seg_medians = [np.median(frames_mV[s:e], axis=0) for s, e in runs]
     air_reference = seg_medians[0]
@@ -505,11 +723,18 @@ def classify_segments(runs, frames_mV, air_threshold_mv):
     for (s, e), med in zip(runs, seg_medians):
         is_air = np.mean(np.abs(med - air_reference)) < air_threshold_mv
         if is_air:
-            plateaus.append(Plateau('air', None, True, s, e))
+            plateaus.append(Plateau('air', '', None, 'na', 'na', 0, 0, 'air', 1, '', True, s, e))
         else:
             target_n += 1
-            plateaus.append(Plateau('segment_{0:02d}'.format(target_n), None, False, s, e))
+            plateaus.append(Plateau(None, 'segment_{0:02d}'.format(target_n), None, 'na', 'na',
+                                     0, 0, 'air', 1, '', False, s, e))
     return plateaus
+
+
+def plateau_display_label(p):
+    if p.is_air:
+        return 'air'
+    return p.target_id if p.target_id else '(unresolved: {0})'.format(p.short_name or '?')
 
 
 # ---------------------------------------------------------------------------
@@ -607,75 +832,106 @@ def format_distance(x):
     return str(int(xf)) if xf.is_integer() else format_value(xf)
 
 
-def build_rows(session_stem, plateau, colmap, delta_mV, plateau_amp_mV, splithalf_floor, quality,
-               amp_mean_abs_mV, session_path):
-    label = plateau.label
-    if ',' in label:
-        warn(session_path, "target label '{0}' contains a comma, replacing with ';'".format(label))
-        label = label.replace(',', ';')
+def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV, plateau_amp_mV,
+               splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
+               fw_version, tool_version, supply, session_path):
+    """One dict per cell, keyed by CORPUS_HEADER_FIELDS -- unjoined (no
+    registry columns). This is the exact row shape pimd_classviz.py writes
+    directly to gui_signatures_*.csv; pimd_features.py's own --out corpus
+    build appends the registry-joined columns afterward (registry_join_
+    fields()), so both callers share this one implementation."""
+    if plateau.target_id is None:
+        raise ValueError('build_rows() called on an unresolved plateau (target_id=None) -- '
+                          'callers must skip these, see plateau_display_label()')
     rows = []
     for ch, c in enumerate(colmap):
-        row = [
-            session_stem, label, format_distance(plateau.distance_cm),
-            format_value(c['pulse_us']), format_value(c['threshold_v']),
-            format_value(delta_mV[ch]), format_value(plateau_amp_mV),
-            format_value(splithalf_floor), quality, format_value(amp_mean_abs_mV),
-        ]
-        rows.append(','.join(row))
+        rows.append({
+            'session': session_stem, 'capture_id': capture_id, 'captured_at': captured_at,
+            'target_id': plateau.target_id, 'short_name': plateau.short_name,
+            'distance_mm': format_distance(plateau.distance_mm),
+            'long_axis': plateau.long_axis, 'face_normal': plateau.face_normal,
+            'offset_x_mm': str(int(plateau.offset_x_mm)), 'offset_y_mm': str(int(plateau.offset_y_mm)),
+            'medium': plateau.medium, 'repeat_idx': str(int(plateau.repeat_idx)), 'notes': plateau.notes,
+            'pulse_us': format_value(c['pulse_us']), 'threshold_v': format_value(c['threshold_v']),
+            'delta_mV': format_value(delta_mV[ch]), 'plateau_amp_mV': format_value(plateau_amp_mV),
+            'splithalf_floor': format_value(splithalf_floor), 'quality': quality,
+            'amp_mean_abs_mV': format_value(amp_mean_abs_mV),
+            'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',
+            'fw_version': fw_version or 'unknown', 'tool_version': tool_version, 'supply': supply,
+        })
     return rows
 
 
-def open_corpus_writer(out_path, append):
+def build_wide_row(session_stem, capture_id, captured_at, plateau, delta_mV, plateau_amp_mV,
+                    splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
+                    fw_version, tool_version, supply):
+    """One dict per plateau (not per cell): same metadata as build_rows() plus
+    the full delta_mV vector as c00..cNN. Built from the exact values already
+    computed for the long rows -- never recomputed -- so long and wide can't
+    drift apart for the same plateau."""
+    row = {
+        'session': session_stem, 'capture_id': capture_id, 'captured_at': captured_at,
+        'target_id': plateau.target_id, 'short_name': plateau.short_name,
+        'distance_mm': format_distance(plateau.distance_mm),
+        'long_axis': plateau.long_axis, 'face_normal': plateau.face_normal,
+        'offset_x_mm': str(int(plateau.offset_x_mm)), 'offset_y_mm': str(int(plateau.offset_y_mm)),
+        'medium': plateau.medium, 'repeat_idx': str(int(plateau.repeat_idx)), 'notes': plateau.notes,
+        'plateau_amp_mV': format_value(plateau_amp_mV), 'splithalf_floor': format_value(splithalf_floor),
+        'quality': quality, 'amp_mean_abs_mV': format_value(amp_mean_abs_mV),
+        'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',
+        'fw_version': fw_version or 'unknown', 'tool_version': tool_version, 'supply': supply,
+    }
+    for i, v in enumerate(delta_mV):
+        row['c{0:02d}'.format(i)] = format_value(v)
+    return row
+
+
+def registry_join_fields(target_id, targets):
+    """Returns dict[JOINED_EXTRA_FIELDS] for target_id: blank for 'air',
+    looked-up registry values for a known id. Raises KeyError(target_id) for
+    an id not present in `targets` -- callers translate that into a hard,
+    file-naming SystemExit (unknown target_id is a hard error, not a
+    degraded row)."""
+    if target_id == 'air':
+        return {k: '' for k in JOINED_EXTRA_FIELDS}
+    if target_id not in targets:
+        raise KeyError(target_id)
+    t = targets[target_id]
+    return {
+        'shape_class': t.shape_class,
+        'dim_a_mm': format_value(t.dim_a_mm), 'dim_b_mm': format_value(t.dim_b_mm),
+        'dim_c_mm': format_value(t.dim_c_mm),
+        'wall_thickness_mm': format_value(t.wall_thickness_mm) if t.wall_thickness_mm is not None else '',
+        'closed_loop': t.closed_loop, 'mass_g': format_value(t.mass_g),
+        'magnet_test': t.magnet_test, 'material_class': t.material_class,
+        'plating_material': t.plating_material or '', 'substrate': t.substrate or '',
+    }
+
+
+def open_corpus_writer(out_path, append, fields):
     exists = os.path.isfile(out_path)
     if exists and not append:
         raise SystemExit('{0} already exists; pass --append to add to it, or choose a different --out.'.format(
             out_path))
-    f = open(out_path, 'a' if exists else 'w')
+    f = open(out_path, 'a' if exists else 'w', newline='')
+    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
     if not exists:
-        f.write(CORPUS_HEADER + '\n')
+        writer.writerow(fields)
         f.flush()
-    return f
+    return f, writer
 
 
-def build_wide_row(session_stem, plateau, delta_mV, plateau_amp_mV, splithalf_floor, quality,
-                    amp_mean_abs_mV):
-    """One row per plateau: same metadata + scalars as build_rows(), plus the
-    full delta_mV vector as c00..c71. Built from the exact values already
-    computed for the long rows -- never recomputed -- so long and wide can't
-    drift apart for the same plateau."""
-    label = plateau.label.replace(',', ';')  # build_rows() already warns on this label
-    cells = ','.join(format_value(v) for v in delta_mV)
-    return ','.join([
-        session_stem, label, format_distance(plateau.distance_cm),
-        format_value(plateau_amp_mV), format_value(splithalf_floor), quality, cells,
-        format_value(amp_mean_abs_mV),
-    ])
-
-
-def wide_header_lines(profile_name, n_channels):
-    c_cols = ','.join('c{0:02d}'.format(i) for i in range(n_channels))
-    return [
-        '# profile: {0}'.format(profile_name),
-        "# columns: session,target,distance_cm,plateau_amp_mV,splithalf_floor,quality,"
-        "c00..c{0:02d} (band-major channel order: pulse_us ascending across bands, "
-        "threshold_v descending within band -- same order as the session CSV colmap), "
-        "amp_mean_abs_mV (mean|delta_mV| per cell -- distinct from plateau_amp_mV's L2 "
-        "norm; see compute_plateau_stats() docstring)".format(n_channels - 1),
-        'session,target,distance_cm,plateau_amp_mV,splithalf_floor,quality,' + c_cols + ',amp_mean_abs_mV',
-    ]
-
-
-def open_wide_writer(out_path, append, profile_name, n_channels):
+def open_wide_writer(out_path, append, fields):
     exists = os.path.isfile(out_path)
     if exists and not append:
         raise SystemExit('{0} already exists; pass --append to add to it, or choose a different --out-wide.'.format(
             out_path))
-    f = open(out_path, 'a' if exists else 'w')
+    f = open(out_path, 'a' if exists else 'w', newline='')
+    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
     if not exists:
-        for line in wide_header_lines(profile_name, n_channels):
-            f.write(line + '\n')
+        writer.writerow(fields)
         f.flush()
-    return f
+    return f, writer
 
 
 # ---------------------------------------------------------------------------
@@ -707,7 +963,7 @@ def plot_diagnostic(session_stem, out_png, sess, plateaus, anchor_ts, anchor_vs)
     for p in plateaus:
         c_start, c_end = min(p.start_idx, len(sess.t_seconds) - 1), min(p.end_idx, len(sess.t_seconds) - 1)
         center_t = sess.t_seconds[(c_start + c_end) // 2]
-        top.text(center_t, ylim[1], p.label, rotation=45, va='bottom', fontsize=7)
+        top.text(center_t, ylim[1], plateau_display_label(p), rotation=45, va='bottom', fontsize=7)
 
     axes[-1].set_xlabel('time (s)')
     title = '{0} -- diagnostic'.format(session_stem)
@@ -724,33 +980,34 @@ def plot_diagnostic(session_stem, out_png, sess, plateaus, anchor_ts, anchor_vs)
 # Per-session orchestration
 # ---------------------------------------------------------------------------
 
-def process_session(path, args, reference_profile):
-    """Returns a list of output CSV row strings. Never raises past this
-    function -- every failure mode is caught at the narrowest reasonable
-    scope and reported to stderr with [SKIP]/[WARN], so one bad session
-    never aborts the batch."""
+def process_session(path, args, targets):
+    """Returns (rows: list[dict] in JOINED_CORPUS_HEADER_FIELDS shape,
+    wide_rows: list[dict], group: (profile_name, profile_sha8) or None).
+    Never raises past this function for parse/segmentation failures -- every
+    such failure is caught at the narrowest reasonable scope and reported to
+    stderr with [SKIP]/[WARN], so one bad session never aborts the batch. An
+    unknown target_id IS allowed to raise SystemExit (via registry_join_
+    fields()) -- that's a hard corpus-build error per the brief, not a
+    per-session skip."""
     try:
         sess = parse_session_file(path)
     except Exception as e:
         skip(path, 'failed to parse -- {0}'.format(e))
-        return [], []
+        return [], [], None
 
-    ok, reason = validate_profile(sess.profile, reference_profile)
-    if not ok:
-        skip(path, 'profile geometry mismatch -- {0} (refusing to mix profile geometries)'.format(reason))
-        return [], []
+    group = (sess.profile.get('name'), session_profile_sha8(sess))
 
     sess = drop_flagged(sess)
     if len(sess.t_seconds) < 2:
         skip(path, 'fewer than 2 usable frames after dropping flagged rows')
-        return [], []
+        return [], [], group
     frame_rate_hz = measure_frame_rate_hz(sess.t_seconds)
     if abs(frame_rate_hz - NOMINAL_FRAME_RATE_HZ) > 0.15 * NOMINAL_FRAME_RATE_HZ:
         warn(path, 'measured frame rate {0:.2f} Hz deviates >15% from nominal {1:.2f} Hz'.format(
             frame_rate_hz, NOMINAL_FRAME_RATE_HZ))
 
     if sess.marks:
-        plateaus = segment_from_marks(sess, frame_rate_hz, args.settle_s)
+        plateaus = segment_from_marks(sess, frame_rate_hz, args.settle_s, targets)
     else:
         runs = detect_changepoints(sess.frames_mV, frame_rate_hz, args.changepoint_window_s,
                                     args.changepoint_threshold_mv, args.min_segment_s)
@@ -759,31 +1016,55 @@ def process_session(path, args, reference_profile):
     air_plateaus = [p for p in plateaus if p.is_air]
     if not air_plateaus:
         skip(path, 'no air segments found, cannot drift-correct')
-        return [], []
+        return [], [], group
     anchor_ts, anchor_vs = build_baseline_anchors(air_plateaus, sess.frames_mV, sess.t_seconds)
     if len(anchor_ts) == 1:
         warn(path, 'only one air anchor -- no drift correction possible, using a flat baseline')
 
     session_stem = os.path.splitext(os.path.basename(path))[0]
+    profile_name, profile_sha8 = group
     rows, wide_rows = [], []
+    seq = 0
     for p in plateaus:
         if p.is_air:
             continue
+        if p.target_id is None:
+            continue   # already warned in segment_from_marks()/classify_segments()
         try:
             c_start, c_end = central_frames(p)
             delta_mV, plateau_amp_mV, amp_mean_abs_mV, splithalf_floor, n_central, center_t = compute_plateau_stats(
                 sess.frames_mV, sess.t_seconds, c_start, c_end, anchor_ts, anchor_vs)
             if center_t < anchor_ts[0] or center_t > anchor_ts[-1]:
                 warn(path, "plateau '{0}' center falls outside the air-anchor time range -- "
-                           "baseline is flat-extrapolated there".format(p.label))
+                           "baseline is flat-extrapolated there".format(plateau_display_label(p)))
             quality = quality_flags(splithalf_floor, plateau_amp_mV, n_central)
-            rows.extend(build_rows(session_stem, p, sess.colmap, delta_mV, plateau_amp_mV,
-                                    splithalf_floor, quality, amp_mean_abs_mV, path))
+
+            seq += 1
+            capture_id = '{0}_c{1:02d}'.format(session_stem, seq)
+            captured_at = (sess.t0 + timedelta(seconds=center_t)).isoformat()
+
+            joined = registry_join_fields(p.target_id, targets)
+
+            cell_rows = build_rows(session_stem, capture_id, captured_at, p, sess.colmap, delta_mV,
+                                    plateau_amp_mV, splithalf_floor, quality, amp_mean_abs_mV,
+                                    profile_name, profile_sha8, sess.fw_version, TOOL_VERSION,
+                                    sess.supply, path)
+            for row in cell_rows:
+                row.update(joined)
+            rows.extend(cell_rows)
+
             if args.out_wide:
-                wide_rows.append(build_wide_row(session_stem, p, delta_mV, plateau_amp_mV,
-                                                 splithalf_floor, quality, amp_mean_abs_mV))
+                wide_row = build_wide_row(session_stem, capture_id, captured_at, p, delta_mV,
+                                           plateau_amp_mV, splithalf_floor, quality, amp_mean_abs_mV,
+                                           profile_name, profile_sha8, sess.fw_version, TOOL_VERSION,
+                                           sess.supply)
+                wide_row.update(joined)
+                wide_rows.append(wide_row)
+        except KeyError as e:
+            raise SystemExit("{0}: unknown target_id '{1}' -- not in the registry and not "
+                              "'air'".format(path, e.args[0]))
         except Exception as e:
-            warn(path, "plateau '{0}' failed -- {1}".format(p.label, e))
+            warn(path, "plateau '{0}' failed -- {1}".format(plateau_display_label(p), e))
 
     if not args.no_plot:
         try:
@@ -793,7 +1074,63 @@ def process_session(path, args, reference_profile):
         except Exception as e:
             warn(path, 'diagnostic plot failed -- {0}'.format(e))
 
-    return rows, wide_rows
+    return rows, wide_rows, group
+
+
+# ---------------------------------------------------------------------------
+# gui_signatures_*.csv direct ingest (primary corpus source since classviz v1.32)
+# ---------------------------------------------------------------------------
+
+def sniff_input_kind(path):
+    """Returns 'session_dump', 'gui_signatures', or 'legacy_gui_signatures'."""
+    with open(path, newline='') as f:
+        for line in f:
+            if line.startswith('# PIMD session dump'):
+                return 'session_dump'
+            if line.startswith('#'):
+                continue
+            cols = next(csv.reader([line]))
+            if 'target_id' in cols and 'distance_mm' in cols:
+                return 'gui_signatures'
+            if 'target' in cols and 'distance_cm' in cols:
+                return 'legacy_gui_signatures'
+            raise SystemExit('{0}: unrecognized input file (not a session dump or a '
+                              'gui_signatures corpus CSV -- header: {1})'.format(path, line.strip()))
+    raise SystemExit('{0}: empty file'.format(path))
+
+
+def load_gui_signatures_csv(path):
+    """Parses a v1.32+ gui_signatures_*.csv (CORPUS_HEADER schema) directly
+    into one dict per row -- this file is already at full per-cell corpus-row
+    granularity, no plateau/segmentation math needed."""
+    with open(path, newline='') as f:
+        lines = [line for line in f if not line.startswith('#')]
+    return list(csv.DictReader(lines))
+
+
+def process_gui_signatures_file(path, targets):
+    """Returns (rows: list[dict] in JOINED_CORPUS_HEADER_FIELDS shape,
+    groups: set[(profile_name, profile_sha8)] seen in this file)."""
+    raw_rows = load_gui_signatures_csv(path)
+    if not raw_rows:
+        warn(path, 'no rows found')
+        return [], set()
+    out_rows = []
+    groups = set()
+    for r in raw_rows:
+        target_id = r.get('target_id', '')
+        try:
+            joined = registry_join_fields(target_id, targets)
+        except KeyError:
+            raise SystemExit("{0}: unknown target_id '{1}' -- not in the registry and not "
+                              "'air'".format(path, target_id))
+        row = dict(r)
+        row.update(joined)
+        out_rows.append(row)
+        groups.add((r.get('profile_name', ''), r.get('profile_sha8', '')))
+    if len(groups) > 1:
+        warn(path, 'file itself spans multiple profile geometries: {0}'.format(sorted(groups)))
+    return out_rows, groups
 
 
 # ---------------------------------------------------------------------------
@@ -802,15 +1139,18 @@ def process_session(path, args, reference_profile):
 
 def build_arg_parser():
     p = argparse.ArgumentParser(
-        description='Convert PIMD ClassViz session-dump CSVs into training-corpus rows.')
-    p.add_argument('sessions', nargs='+', help='One or more session_*.csv files.')
+        description='Convert PIMD ClassViz session-dump or gui_signatures CSVs into a '
+                    'registry-joined training-corpus CSV.')
+    p.add_argument('sessions', nargs='+',
+                    help='One or more session_*.csv (session-dump) or gui_signatures_*.csv files.')
     p.add_argument('--out', required=True, help='Output/append long-format corpus CSV path.')
     p.add_argument('--out-wide', default=None,
-                    help='Optional wide-format signatures CSV (one row per plateau, c00..c71 delta_mV columns).')
+                    help='Optional wide-format signatures CSV (one row per capture, c00..cNN '
+                         'delta_mV columns). Only populated from session-dump inputs.')
     p.add_argument('--append', action='store_true',
                     help='Append to --out/--out-wide if they already exist (default: refuse if they exist).')
-    p.add_argument('--profile', default=DEFAULT_PROFILE,
-                    help='Reference profile JSON to validate sessions against (default: cal_72_air_v2.json).')
+    p.add_argument('--registry', default=pimd_targets.DEFAULT_REGISTRY_PATH,
+                    help='Target registry CSV (default: {0}).'.format(pimd_targets.DEFAULT_REGISTRY_PATH))
     p.add_argument('--air-threshold-mv', type=float, dest='air_threshold_mv', default=AIR_THRESHOLD_MV_DEFAULT)
     p.add_argument('--settle-s', type=float, dest='settle_s', default=SETTLE_S_DEFAULT)
     p.add_argument('--changepoint-window-s', type=float, dest='changepoint_window_s',
@@ -819,37 +1159,89 @@ def build_arg_parser():
                     default=CHANGEPOINT_THRESHOLD_MV_DEFAULT)
     p.add_argument('--min-segment-s', type=float, dest='min_segment_s', default=MIN_SEGMENT_S_DEFAULT)
     p.add_argument('--plot-dir', default=None,
-                    help='Directory for diagnostic PNGs (default: alongside each input CSV).')
+                    help='Directory for diagnostic PNGs (default: alongside each input CSV; '
+                         'session-dump inputs only).')
     p.add_argument('--no-plot', action='store_true', help='Skip diagnostic PNG generation.')
     return p
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
-    reference_profile = load_reference_profile(args.profile)
-    n_channels = sum(len(b['delays_us']) for b in reference_profile['bands'])
-    f = open_corpus_writer(args.out, args.append)
-    f_wide = open_wide_writer(args.out_wide, args.append, reference_profile['name'], n_channels) \
-        if args.out_wide else None
+
     try:
-        total, total_wide = 0, 0
-        for path in args.sessions:
-            rows, wide_rows = process_session(path, args, reference_profile)
-            for r in rows:
-                f.write(r + '\n')
-            f.flush()
-            total += len(rows)
-            if f_wide:
-                for r in wide_rows:
-                    f_wide.write(r + '\n')
-                f_wide.flush()
-                total_wide += len(wide_rows)
-        print('Wrote {0} rows from {1} session(s) to {2}'.format(total, len(args.sessions), args.out))
-        if f_wide:
-            print('Wrote {0} rows from {1} session(s) to {2}'.format(total_wide, len(args.sessions), args.out_wide))
+        targets, reg_issues = pimd_targets.load_targets(args.registry)
+    except OSError as e:
+        raise SystemExit('Could not read target registry {0}: {1}'.format(args.registry, e))
+    reg_errors = [i for i in reg_issues if i.severity == 'error']
+    if reg_errors:
+        for i in reg_errors:
+            print('[REGISTRY ERROR] {0}'.format(i), file=sys.stderr)
+        raise SystemExit('Target registry {0} has {1} error(s) -- fix it before building a '
+                          'corpus (see: python pimd_targets.py --registry {0}).'.format(
+                              args.registry, len(reg_errors)))
+    for i in reg_issues:
+        if i.severity == 'warning':
+            warn(args.registry, str(i))
+
+    file_groups = {}   # (profile_name, profile_sha8) -> [paths]
+    all_rows = []
+    all_wide_rows = []
+
+    for path in args.sessions:
+        kind = sniff_input_kind(path)
+        if kind == 'legacy_gui_signatures':
+            raise SystemExit("{0}: pre-v1.32 schema (target/distance_cm columns) -- no "
+                              "migration path; re-capture under pimd_classviz.py >= "
+                              "v1.32.".format(path))
+        elif kind == 'gui_signatures':
+            rows, groups = process_gui_signatures_file(path, targets)
+            for g in groups:
+                file_groups.setdefault(g, []).append(path)
+            all_rows.extend(rows)
+        else:
+            rows, wide_rows, group = process_session(path, args, targets)
+            if group is not None:
+                file_groups.setdefault(group, []).append(path)
+            all_rows.extend(rows)
+            all_wide_rows.extend(wide_rows)
+
+    if len(file_groups) > 1:
+        lines = ['Refusing to build a corpus spanning multiple profile geometries (DESIGN §11):']
+        for g, paths in sorted(file_groups.items(), key=lambda kv: kv[0]):
+            lines.append('  {0}: {1}'.format(g, ', '.join(os.path.basename(p) for p in paths)))
+        lines.append("Re-run with only one geometry group's files at a time.")
+        raise SystemExit('\n'.join(lines))
+
+    f, writer = open_corpus_writer(args.out, args.append, JOINED_CORPUS_HEADER_FIELDS)
+    try:
+        for row in all_rows:
+            writer.writerow([row.get(k, '') for k in JOINED_CORPUS_HEADER_FIELDS])
+        f.flush()
+        print('Wrote {0} rows from {1} input file(s) to {2}'.format(
+            len(all_rows), len(args.sessions), args.out))
     finally:
         f.close()
-        if f_wide:
+
+    if args.out_wide:
+        # Column count varies with profile geometry -- derive it from the
+        # first wide row actually produced, rather than assuming a fixed 72.
+        n_channels = 0
+        if all_wide_rows:
+            n_channels = sum(1 for k in all_wide_rows[0] if re.match(r'^c\d+$', k))
+        wide_fields = (WIDE_METADATA_FIELDS + WIDE_SCALAR_FIELDS +
+                       ['c{0:02d}'.format(i) for i in range(n_channels)] +
+                       WIDE_TAIL_FIELDS + JOINED_EXTRA_FIELDS)
+        f_wide, writer_wide = open_wide_writer(args.out_wide, args.append, wide_fields)
+        try:
+            for row in all_wide_rows:
+                writer_wide.writerow([row.get(k, '') for k in wide_fields])
+            f_wide.flush()
+            print('Wrote {0} rows from {1} input file(s) to {2}'.format(
+                len(all_wide_rows), len(args.sessions), args.out_wide))
+            if any(sniff_input_kind(p) == 'gui_signatures' for p in args.sessions):
+                warn(args.out_wide, 'gui_signatures-sourced captures are not represented in '
+                                     'the wide output (only session-dump inputs are)')
+        finally:
             f_wide.close()
 
 

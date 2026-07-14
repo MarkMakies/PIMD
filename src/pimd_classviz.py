@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.31
+# PIMD Signature Visualiser (ClassViz) v1.32
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -17,6 +17,47 @@
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
 #
+# v1.32 Structured target-metadata capture regime. The Analysis tab's
+#       free-text target field + distance_cm spinbox are replaced by a
+#       registry-backed target combo (pimd_targets.py) plus structured
+#       placement (distance_mm/long_axis/face_normal/offset_x_mm/
+#       offset_y_mm/medium/repeat_idx/notes), built once by a shared
+#       _build_target_placement_widget_set() and reused inline (Analysis
+#       tab) and in a Training-tab per-row Placement dialog -- one
+#       implementation, not two. A registry reload button and a
+#       degrade-to-air-only UI state (missing file -> air only; load
+#       errors -> dialog + air-plus-valid-rows only; warnings -> status
+#       bar) cover a broken/missing registry. gui_signatures_*.csv's
+#       column set is replaced end-to-end (pimd_features.py v6's new
+#       CORPUS_HEADER; target/distance_cm dropped, not aliased) and now
+#       written via csv.writer (QUOTE_MINIMAL) instead of hand comma-join,
+#       since notes/short_name are free text and will contain commas. A
+#       new '# mark_target:' session-dump comment line is written
+#       alongside the existing '# mark:' line (untouched, byte-identical,
+#       zero risk to old consumers) for both the Training tab's row-advance
+#       marks and the Analysis tab's session-mark button, carrying the same
+#       structured fields pimd_features.py v6 now parses. A new
+#       session-level 'Supply' combo (battery/usb, DESIGN §12) feeds both
+#       capture paths and is embedded in session-dump headers
+#       ('# supply:'). profile_sha8 (first 8 hex chars of SHA-256 of the
+#       literal loaded profile JSON bytes) is computed once per profile
+#       load (_set_profile_dims) and threaded through both capture paths
+#       and into session-dump headers ('# profile_sha8:') -- the
+#       authoritative value pimd_features.py v6 prefers over re-hashing the
+#       embedded profile_json text, which can't reproduce the literal
+#       loaded bytes. fw_version is parsed (read-only) from the existing
+#       raw V-identify reply, no protocol change. Settings persistence of
+#       last-used target_id + placement is added (the v1.11-era "don't
+#       persist target/distance" foot-gun this reverses is resolved by the
+#       registry-validated combo: a stale persisted target_id is now
+#       detectable via a dict lookup and silently falls back to 'air'
+#       instead of restoring stale free text). Training-list JSON
+#       (data/training_lists/*.json) rows without target_id are loudly
+#       rejected on load -- no free-text -> target_id migration is
+#       attempted; existing lists need manual re-authoring against the
+#       registry. See CHANGELOG.md for full rationale and pimd_features.py
+#       v6 / pimd_targets.py v1 for the registry/corpus-side half of this
+#       change.
 # v1.31 Analysis-tab signature captures hardened to session-pipeline rigor.
 #       The quick-capture editor's air/target windows skipped two robustness
 #       steps pimd_features.py applies to recorded sessions, and post-enclosure
@@ -437,6 +478,8 @@
 # pyright: reportOptionalMemberAccess=false
 # pyright: reportAttributeAccessIssue=false
 
+import csv
+import io
 import json
 import math
 import os
@@ -453,7 +496,7 @@ from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
 from PyQt6.QtGui import QBrush, QColor, QFont  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
     QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
@@ -470,8 +513,9 @@ except ImportError:
 
 import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
+import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.31'
+APP_VERSION = '1.32'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -486,6 +530,8 @@ PROFILES_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'd
 SESSIONS_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
 TRAINING_LISTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'training_lists')
 CORPORA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'corpora')
+TARGETS_REGISTRY_PATH = pimd_targets.DEFAULT_REGISTRY_PATH   # single source of truth
+SUPPLY_CHOICES = ['battery', 'usb']
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
 
@@ -517,8 +563,14 @@ def _list_profile_files():
 
 
 def _load_profile_file(name):
-    with open(os.path.join(PROFILES_DIR, name + '.json')) as f:
-        return json.load(f)
+    """Returns (profile_dict, raw_bytes) -- the raw bytes are needed for
+    profile_sha8 (SHA-256 of the profile JSON bytes as loaded, DESIGN §10),
+    which can only be computed from the literal file contents, not a
+    re-serialized dict."""
+    path = os.path.join(PROFILES_DIR, name + '.json')
+    with open(path, 'rb') as f:
+        raw = f.read()
+    return json.loads(raw), raw
 
 
 def _list_training_list_files():
@@ -533,7 +585,11 @@ def _load_training_list_file(name):
 
 
 def _save_training_list_file(name, rows):
-    """rows: list of {'target': str, 'distance_cm': float}. Index is never
+    """rows: list of {'target_id': str, 'distance_mm': float, 'placement':
+    {'long_axis','face_normal','offset_x_mm','offset_y_mm','medium',
+    'repeat_idx','notes'}}. A row missing 'target_id' (e.g. a pre-v1.32 list
+    with the old 'target'/'distance_cm' keys) is loudly rejected on load --
+    see _on_training_load_list() -- rather than migrated. Index is never
     persisted (always derived/renumbered on load); Time/Settledness are live
     per-run data, never part of the saved template."""
     os.makedirs(TRAINING_LISTS_DIR, exist_ok=True)
@@ -667,7 +723,13 @@ class MainWindow(QMainWindow):
         # Analysis tab — signature file editing (New/Open-for-editing/Save/Delete)
         self._editable_sig_path       = None   # str|None -- the currently open-for-editing file
         self._editable_sig_session_id = None   # 'gui_YYYYMMDD_HHMMSS', assigned fresh on New/Open
-        self._editable_visit_counts   = {}     # (target_lower, distance_str) -> visit count, for (rpt) suffixing
+        self._editable_sig_seq        = 0      # running per-file capture_id sequence, reset on New/Open
+        self._editable_repeat_counts  = {}     # placement tuple -> count seen, for repeat_idx auto-increment
+
+        # Target registry (pimd_targets.py) -- shared by the Analysis tab's
+        # inline capture widgets and the Training tab's Placement dialog.
+        self._targets        = {}    # dict[target_id -> pimd_targets.Target]
+        self._target_issues   = []
 
         # Analysis tab — signature capture (air-before / target / air-after).
         # A second, independent capture channel from _capturing/_capture_buf
@@ -706,16 +768,26 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Profile dimensions
     # ------------------------------------------------------------------
-    def _set_profile_dims(self, profile, profile_idx):
+    def _set_profile_dims(self, profile, profile_idx, profile_raw_bytes=None):
         """Pure data update — sets self._n_bands/_n_cells/_band_labels/etc from
         `profile` (dict: name, averages, bands=[{freq_hz,pulse_us,delays_us,
         threshold_v(optional)}, ...], all bands sharing the same delay count).
-        Does not touch any UI widgets — see _apply_profile() for that."""
+        Does not touch any UI widgets — see _apply_profile() for that.
+
+        Also computes self._profile_sha8 (first 8 hex chars of SHA-256 of the
+        profile JSON bytes as loaded, DESIGN §10) -- profile_raw_bytes is the
+        literal bytes read from a saved profile file (_load_profile_file);
+        when there is no file (the built-in _default_profile() fallback), a
+        canonical sort_keys=True re-serialization is used as a documented,
+        deliberate surrogate since there is nothing to hash literally."""
         bands = profile['bands']
         n_bands = len(bands)
         n_cells = len(bands[0]['delays_us'])
         self._profile           = profile
         self._active_profile_idx = profile_idx
+        self._profile_raw_bytes = profile_raw_bytes if profile_raw_bytes is not None \
+            else json.dumps(profile, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        self._profile_sha8 = pimd_features.profile_sha8_of_bytes(self._profile_raw_bytes)
         self._n_bands    = n_bands
         self._n_cells    = n_cells
         self._n_channels = n_bands * n_cells
@@ -760,13 +832,13 @@ class MainWindow(QMainWindow):
             float(np.mean([b['delays_us'][j] for b in bands])) for j in range(n_cells)
         ]
 
-    def _apply_profile(self, profile, profile_idx):
+    def _apply_profile(self, profile, profile_idx, profile_raw_bytes=None):
         """Switch the active profile at runtime: updates dimensions, clears any
         old-shape buffered data, and resizes the heatmap/3D surface/stats table/
         single-cell selectors to match. Called once for the default profile (via
         _set_profile_dims directly, before _build_ui) and again whenever a
         saved profile is loaded and run from the top-bar selector."""
-        self._set_profile_dims(profile, profile_idx)
+        self._set_profile_dims(profile, profile_idx, profile_raw_bytes)
 
         # Old-shape data must not survive a dimension change.
         if self._recording:
@@ -859,6 +931,15 @@ class MainWindow(QMainWindow):
             self._n_bands, self._n_cells))
         row1.addWidget(self.header_label, stretch=1)
 
+        # Session-level supply (DESIGN §12 — battery/USB noise floor differs
+        # and can't be auto-detected). Not per-capture: shared by the
+        # Analysis-tab quick-capture save path and the Training/Analysis
+        # session mark-writing path.
+        row1.addWidget(QLabel('Supply:'))
+        self.cb_supply = QComboBox()
+        self.cb_supply.addItems(SUPPLY_CHOICES)
+        row1.addWidget(self.cb_supply)
+
         # Throughput readout — visible on every tab, updated once/sec by
         # _rate_timer/_update_rate. Answers "is data flowing at full speed".
         self.lbl_rate = QLabel('Rate: — (idle)')
@@ -875,6 +956,11 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.statusBar().showMessage('Not connected')
+
+        # Loaded here (after every tab -- and its target combo(s) -- is
+        # built) so the initial population/degrade behavior applies before
+        # _load_settings() restores any persisted target_id.
+        self._load_targets_registry(show_dialog_on_error=True)
 
     # ------------------------------------------------------------------
     # Tab 0 — Heatmap
@@ -1176,7 +1262,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('No saved profile selected')
             return
         try:
-            profile = _load_profile_file(name)
+            profile, profile_raw_bytes = _load_profile_file(name)
         except Exception as e:
             self.statusBar().showMessage('Load failed: {0}'.format(e))
             return
@@ -1188,7 +1274,7 @@ class MainWindow(QMainWindow):
         self.send_command(cmd)
         self.send_command('Q{0}'.format(DYNAMIC_PROFILE_INDEX))
         self.send_command('G')
-        self._apply_profile(profile, DYNAMIC_PROFILE_INDEX)
+        self._apply_profile(profile, DYNAMIC_PROFILE_INDEX, profile_raw_bytes)
         self.pb_start.setText('Running')
         self.pb_start.setStyleSheet(self.MY_GREEN)
         self.statusBar().showMessage('Loaded and running profile: {0}'.format(
@@ -1237,17 +1323,19 @@ class MainWindow(QMainWindow):
         hint.setStyleSheet('color: gray;')
         layout.addWidget(hint)
 
-        # Table: Index | Target | Distance (cm) | Time at Target (s) | Settledness (mV)
+        # Table: Index | Target ID | Distance (mm) | Time at Target (s) | Settledness (mV)
+        self._training_row_placement = {}   # opaque token -> placement dict (survives Add/Remove Row)
+        self._training_row_token_seq = 0
         self.tbl_training = QTableWidget(0, 5)
         self.tbl_training.setHorizontalHeaderLabels(
-            ['Index', 'Target', 'Distance (cm)', 'Time at Target (s)', 'Settledness (mV)'])
+            ['Index', 'Target ID', 'Distance (mm)', 'Time at Target (s)', 'Settledness (mV)'])
         self.tbl_training.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_training.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.tbl_training.itemChanged.connect(self._on_training_table_changed)
         self._insert_default_training_row()
         layout.addWidget(self.tbl_training, stretch=1)
 
-        # Add/Remove row + validation
+        # Add/Remove row + Placement… + validation
         row_btns = QHBoxLayout()
         self.pb_training_add_row = QPushButton('Add Row')
         self.pb_training_add_row.clicked.connect(self._on_training_add_row)
@@ -1255,6 +1343,12 @@ class MainWindow(QMainWindow):
         self.pb_training_remove_row = QPushButton('Remove Row')
         self.pb_training_remove_row.clicked.connect(self._on_training_remove_row)
         row_btns.addWidget(self.pb_training_remove_row)
+        self.pb_training_placement = QPushButton('Placement…')
+        self.pb_training_placement.setToolTip(
+            'Edit the selected row\'s placement (long_axis/face_normal/offsets/medium/notes) -- '
+            'same widget set as the Analysis tab.')
+        self.pb_training_placement.clicked.connect(self._on_training_placement_clicked)
+        row_btns.addWidget(self.pb_training_placement)
         row_btns.addStretch(1)
         layout.addLayout(row_btns)
 
@@ -1287,16 +1381,25 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         return item
 
-    def _populate_training_row(self, row, target, distance_cm):
-        self.tbl_training.setItem(row, 0, self._make_training_item('', editable=False))
-        self.tbl_training.setItem(row, 1, self._make_training_item(str(target), editable=True))
+    def _default_placement(self):
+        return {'target_id': 'air', 'distance_mm': 0, 'long_axis': 'na', 'face_normal': 'na',
+                'offset_x_mm': 0, 'offset_y_mm': 0, 'medium': 'air', 'repeat_idx': 1, 'notes': ''}
+
+    def _populate_training_row(self, row, target_id, distance_mm, placement=None):
+        self._training_row_token_seq += 1
+        token = self._training_row_token_seq
+        item0 = self._make_training_item('', editable=False)
+        item0.setData(Qt.ItemDataRole.UserRole, token)
+        self.tbl_training.setItem(row, 0, item0)
+        self.tbl_training.setItem(row, 1, self._make_training_item(str(target_id), editable=True))
         try:
-            dist_text = '{0:g}'.format(float(distance_cm))
+            dist_text = str(int(float(distance_mm)))
         except (TypeError, ValueError):
-            dist_text = str(distance_cm)
+            dist_text = str(distance_mm)
         self.tbl_training.setItem(row, 2, self._make_training_item(dist_text, editable=True))
         self.tbl_training.setItem(row, 3, self._make_training_item('—', editable=False))
         self.tbl_training.setItem(row, 4, self._make_training_item('—', editable=False))
+        self._training_row_placement[token] = dict(placement) if placement else self._default_placement()
 
     def _insert_default_training_row(self):
         self.tbl_training.blockSignals(True)
@@ -1324,6 +1427,8 @@ class MainWindow(QMainWindow):
     def _on_training_remove_row(self):
         r = self.tbl_training.currentRow()
         if r >= 0:
+            token = self.tbl_training.item(r, 0).data(Qt.ItemDataRole.UserRole)
+            self._training_row_placement.pop(token, None)
             self.tbl_training.blockSignals(True)
             self.tbl_training.removeRow(r)
             self._renumber_training_rows()
@@ -1331,6 +1436,56 @@ class MainWindow(QMainWindow):
         self._validate_training_table()
 
     def _on_training_table_changed(self, item):
+        self._validate_training_table()
+
+    # -- Placement… dialog (shares _build_target_placement_widget_set with --
+    # -- the Analysis tab's inline widgets -- one implementation) -----------
+
+    def _on_training_placement_clicked(self):
+        row = self.tbl_training.currentRow()
+        if row < 0:
+            self.statusBar().showMessage('Select a row first.')
+            return
+        token = self.tbl_training.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        current = self._training_row_placement.get(token, self._default_placement())
+        current_target_id = self.tbl_training.item(row, 1).text().strip() or current.get('target_id')
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Placement — row {0}'.format(row + 1))
+        dlg_layout = QVBoxLayout(dlg)
+        self._build_target_placement_widget_set(dlg_layout, 'training_dlg')
+        self._populate_target_combo(self.training_dlg_target, selected_target_id=current_target_id)
+        try:
+            self.training_dlg_distance_mm.setValue(int(float(
+                self.tbl_training.item(row, 2).text().strip() or current.get('distance_mm', 0) or 0)))
+        except ValueError:
+            self.training_dlg_distance_mm.setValue(int(current.get('distance_mm', 0) or 0))
+        self.training_dlg_long_axis.setCurrentText(current.get('long_axis', 'na'))
+        self.training_dlg_face_normal.setCurrentText(current.get('face_normal', 'na'))
+        self.training_dlg_offset_x_mm.setValue(int(current.get('offset_x_mm', 0)))
+        self.training_dlg_offset_y_mm.setValue(int(current.get('offset_y_mm', 0)))
+        self.training_dlg_medium.setCurrentText(current.get('medium', 'air'))
+        self.training_dlg_repeat_idx.setValue(int(current.get('repeat_idx', 1)))
+        self.training_dlg_notes.setText(current.get('notes', ''))
+
+        btn_row = QHBoxLayout()
+        pb_ok = QPushButton('OK')
+        pb_ok.clicked.connect(dlg.accept)
+        pb_cancel = QPushButton('Cancel')
+        pb_cancel.clicked.connect(dlg.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(pb_ok)
+        btn_row.addWidget(pb_cancel)
+        dlg_layout.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        placement = self._placement_from_widgets('training_dlg')
+        self._training_row_placement[token] = placement
+        self.tbl_training.blockSignals(True)
+        self.tbl_training.item(row, 1).setText(placement['target_id'] or 'air')
+        self.tbl_training.item(row, 2).setText(str(placement['distance_mm']))
+        self.tbl_training.blockSignals(False)
         self._validate_training_table()
 
     # -- validation -----------------------------------------------------
@@ -1343,9 +1498,9 @@ class MainWindow(QMainWindow):
             error = 'no target rows defined'
         else:
             for r in range(rows):
-                target = self.tbl_training.item(r, 1).text().strip()
+                target_id = self.tbl_training.item(r, 1).text().strip()
                 dist_text = self.tbl_training.item(r, 2).text().strip()
-                if not target:
+                if not target_id:
                     error = 'row {0}: empty target'.format(r + 1)
                     break
                 try:
@@ -1353,10 +1508,13 @@ class MainWindow(QMainWindow):
                 except ValueError:
                     error = 'row {0}: distance is not a number'.format(r + 1)
                     break
-                if target.lower() == 'air':
+                if target_id.lower() == 'air':
                     has_air = True
+                elif target_id not in self._targets:
+                    error = "row {0}: target_id '{1}' not in the registry".format(r + 1, target_id)
+                    break
             if error is None and not has_air:
-                error = 'no row has Target = "air" (required by pimd_features.py)'
+                error = 'no row has Target ID = "air" (required by pimd_features.py)'
 
         valid = error is None
         if valid:
@@ -1378,6 +1536,25 @@ class MainWindow(QMainWindow):
             return 'air'   # no @ suffix — required exact match for pimd_features.py
         distance = self.tbl_training.item(row, 2).text().strip()
         return '{0} @{1}'.format(target, distance)
+
+    def _training_row_mark_target_dict(self, row):
+        """(target_id, placement dict) for _append_mark_target() -- distance_mm
+        and target_id come from the row's live table cells (the source of
+        truth for quick edits); the remaining placement fields come from
+        _training_row_placement (set via the Placement… dialog)."""
+        token = self.tbl_training.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        placement = dict(self._training_row_placement.get(token, self._default_placement()))
+        target_id = self.tbl_training.item(row, 1).text().strip()
+        dist_text = self.tbl_training.item(row, 2).text().strip()
+        placement['target_id'] = target_id
+        if target_id.lower() == 'air':
+            placement['distance_mm'] = None
+        else:
+            try:
+                placement['distance_mm'] = float(dist_text)
+            except ValueError:
+                placement['distance_mm'] = None
+        return target_id, placement
 
     # -- Start / Pause / Stop / Space ---------------------------------------
 
@@ -1409,6 +1586,8 @@ class MainWindow(QMainWindow):
         self._training_paused = False
         self._training_row_start_wall = time.time()
         self._append_mark(self._training_row_mark_text(0))
+        target_id, placement = self._training_row_mark_target_dict(0)
+        self._append_mark_target(target_id, placement)
         self.tbl_training.selectRow(0)
         self._set_training_active_ui(True)
         self._update_training_status_label()
@@ -1430,7 +1609,7 @@ class MainWindow(QMainWindow):
             idx = self.tbl_training.item(r, 0).text()
             target = self.tbl_training.item(r, 1).text()
             distance = self.tbl_training.item(r, 2).text()
-            lines.append('{0}. {1} @{2}cm'.format(idx, target, distance))
+            lines.append('{0}. {1} @{2}mm'.format(idx, target, distance))
         return '\n'.join(lines)
 
     def _on_training_pause_toggled(self, checked):
@@ -1471,6 +1650,8 @@ class MainWindow(QMainWindow):
             self._training_current_row += 1
             self._training_row_start_wall = time.time()
             self._append_mark(self._training_row_mark_text(self._training_current_row))
+            target_id, placement = self._training_row_mark_target_dict(self._training_current_row)
+            self._append_mark_target(target_id, placement)
             self.tbl_training.selectRow(self._training_current_row)
             self._update_training_status_label()
 
@@ -1482,6 +1663,7 @@ class MainWindow(QMainWindow):
         self.pb_training_stop.setEnabled(active)
         self.pb_training_add_row.setEnabled(not active)
         self.pb_training_remove_row.setEnabled(not active)
+        self.pb_training_placement.setEnabled(not active)
         self.pb_training_load_list.setEnabled(not active)
         self.pb_training_save_list.setEnabled(not active)
         self.tbl_training.setEditTriggers(
@@ -1550,12 +1732,26 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('Load failed: {0}'.format(e))
             return
         rows = data.get('rows', [])
+        # Loud rejection, not a free-text -> target_id migration: a row
+        # written by pre-v1.32 classviz (or hand-authored without target_id)
+        # cannot be safely guessed against the registry (e.g. "steel
+        # spanner" -> which target_id?). Re-author the list instead.
+        missing = [i + 1 for i, r in enumerate(rows) if 'target_id' not in r]
+        if missing:
+            self.statusBar().showMessage(
+                "'{0}' predates the target registry (row(s) {1} have no target_id) -- "
+                're-author this list against the current registry; no automatic '
+                'migration is attempted.'.format(name, ', '.join(str(i) for i in missing)))
+            return
         self.tbl_training.blockSignals(True)
         self.tbl_training.setRowCount(0)
+        self._training_row_placement = {}
         for r_data in rows:
             r = self.tbl_training.rowCount()
             self.tbl_training.insertRow(r)
-            self._populate_training_row(r, r_data.get('target', ''), r_data.get('distance_cm', 0))
+            placement = dict(r_data.get('placement', {}))
+            self._populate_training_row(r, r_data.get('target_id', ''), r_data.get('distance_mm', 0),
+                                         placement=placement)
         if self.tbl_training.rowCount() == 0:
             self.tbl_training.insertRow(0)
             self._populate_training_row(0, 'air', 0)
@@ -1571,15 +1767,18 @@ class MainWindow(QMainWindow):
             return
         rows = []
         for r in range(self.tbl_training.rowCount()):
-            target = self.tbl_training.item(r, 1).text().strip()
+            target_id = self.tbl_training.item(r, 1).text().strip()
             dist_text = self.tbl_training.item(r, 2).text().strip()
             try:
-                distance_cm = float(dist_text)
+                distance_mm = float(dist_text)
             except ValueError:
                 self.statusBar().showMessage(
                     'Cannot save: row {0} has a non-numeric distance'.format(r + 1))
                 return
-            rows.append({'target': target, 'distance_cm': distance_cm})
+            _target_id, placement = self._training_row_mark_target_dict(r)
+            placement.pop('target_id', None)
+            placement.pop('distance_mm', None)
+            rows.append({'target_id': target_id, 'distance_mm': distance_mm, 'placement': placement})
         _save_training_list_file(name.strip(), rows)
         self._refresh_training_list_file_list()
         idx = self.cb_training_list.findText(name.strip())
@@ -1728,27 +1927,205 @@ class MainWindow(QMainWindow):
         self.lw_analysis_templates.itemChanged.connect(self._on_analysis_template_item_changed)
         self.lw_analysis_templates.currentItemChanged.connect(lambda *_: self._update_sig_capture_gating())
 
-    def _build_sig_row2_capture_inputs(self, v):
+    # -- Shared target/placement widget set (Analysis tab inline + Training --
+    # -- tab Placement dialog) -- one implementation, two call sites ---------
+
+    def _build_target_placement_widget_set(self, layout, prefix):
+        """Builds a target-registry combo + structured placement widgets into
+        `layout`, storing them as self.{prefix}_target, {prefix}_distance_mm,
+        {prefix}_long_axis, {prefix}_face_normal, {prefix}_offset_x_mm,
+        {prefix}_offset_y_mm, {prefix}_medium, {prefix}_repeat_idx,
+        {prefix}_notes. Pure construction -- caller wires signals and calls
+        _populate_target_combo() to fill the target combo from the currently
+        loaded registry. Instantiated inline (Analysis tab) and inside a
+        QDialog (Training tab's per-row Placement editor) so field
+        definitions never duplicate."""
         row_a = QHBoxLayout()
         row_a.addWidget(QLabel('Target:'))
-        self.le_sig_target = QLineEdit()
-        self.le_sig_target.setPlaceholderText('e.g. copper pipe, or air')
-        self.le_sig_target.setMaximumWidth(160)
-        self.le_sig_target.textChanged.connect(self._update_sig_capture_gating)
-        row_a.addWidget(self.le_sig_target)
+        target_combo = QComboBox()
+        target_combo.setMinimumWidth(220)
+        setattr(self, '{0}_target'.format(prefix), target_combo)
+        row_a.addWidget(target_combo, stretch=1)
 
-        row_a.addWidget(QLabel('Distance (cm):'))
-        self.sp_sig_distance = QDoubleSpinBox()
-        self.sp_sig_distance.setRange(0.0, 500.0)
-        self.sp_sig_distance.setDecimals(1)
-        self.sp_sig_distance.setValue(5.0)
-        row_a.addWidget(self.sp_sig_distance)
+        row_a.addWidget(QLabel('Distance (mm):'))
+        distance_mm = QSpinBox()
+        distance_mm.setRange(0, 5000)
+        distance_mm.setValue(50)
+        distance_mm.setToolTip('Coil face → nearest target surface, in mm.')
+        setattr(self, '{0}_distance_mm'.format(prefix), distance_mm)
+        row_a.addWidget(distance_mm)
+        layout.addLayout(row_a)
 
-        self.cb_sig_no_distance = QCheckBox('no distance (air)')
-        self.cb_sig_no_distance.toggled.connect(self._update_sig_capture_gating)
-        row_a.addWidget(self.cb_sig_no_distance)
-        row_a.addStretch(1)
-        v.addLayout(row_a)
+        row_b = QHBoxLayout()
+        row_b.addWidget(QLabel('Long axis:'))
+        long_axis = QComboBox()
+        long_axis.addItems(['na', 'x', 'y', 'z'])
+        long_axis.setToolTip(
+            "Direction the target registry's dim_a points. x = coil long axis "
+            '(520mm direction), y = coil short axis (360mm), z = coil normal '
+            '(vertical). na for compact/isotropic targets.')
+        setattr(self, '{0}_long_axis'.format(prefix), long_axis)
+        row_b.addWidget(long_axis)
+
+        row_b.addWidget(QLabel('Face normal:'))
+        face_normal = QComboBox()
+        face_normal.addItems(['na', 'x', 'y', 'z'])
+        face_normal.setToolTip(
+            'Normal of the dim_a × dim_b face (plates/discs/sheets). Same x/y/z '
+            'convention as Long axis. na where meaningless.')
+        setattr(self, '{0}_face_normal'.format(prefix), face_normal)
+        row_b.addWidget(face_normal)
+
+        row_b.addWidget(QLabel('Medium:'))
+        medium = QComboBox()
+        medium.addItems(['air', 'soil', 'other'])
+        setattr(self, '{0}_medium'.format(prefix), medium)
+        row_b.addWidget(medium)
+        layout.addLayout(row_b)
+
+        row_c = QHBoxLayout()
+        row_c.addWidget(QLabel('Offset X (mm):'))
+        offset_x_mm = QSpinBox()
+        offset_x_mm.setRange(-500, 500)
+        offset_x_mm.setToolTip('Target centroid offset from coil centre, coil long axis. 0 = centred.')
+        setattr(self, '{0}_offset_x_mm'.format(prefix), offset_x_mm)
+        row_c.addWidget(offset_x_mm)
+
+        row_c.addWidget(QLabel('Offset Y (mm):'))
+        offset_y_mm = QSpinBox()
+        offset_y_mm.setRange(-500, 500)
+        offset_y_mm.setToolTip('Target centroid offset from coil centre, coil short axis. 0 = centred.')
+        setattr(self, '{0}_offset_y_mm'.format(prefix), offset_y_mm)
+        row_c.addWidget(offset_y_mm)
+
+        row_c.addWidget(QLabel('Repeat #:'))
+        repeat_idx = QSpinBox()
+        repeat_idx.setRange(1, 999)
+        repeat_idx.setValue(1)
+        repeat_idx.setToolTip(
+            'Auto-increments when the same (target, distance, axis, offset, medium) '
+            'tuple is captured again in this session; editable.')
+        setattr(self, '{0}_repeat_idx'.format(prefix), repeat_idx)
+        row_c.addWidget(repeat_idx)
+        layout.addLayout(row_c)
+
+        row_d = QHBoxLayout()
+        row_d.addWidget(QLabel('Notes:'))
+        notes = QLineEdit()
+        setattr(self, '{0}_notes'.format(prefix), notes)
+        row_d.addWidget(notes, stretch=1)
+        layout.addLayout(row_d)
+
+    def _populate_target_combo(self, combo, selected_target_id=None):
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem('air — (no target)', 'air')
+        for target_id in sorted(self._targets):
+            t = self._targets[target_id]
+            combo.addItem('{0} — {1}'.format(target_id, t.short_name), target_id)
+        idx = combo.findData(selected_target_id) if selected_target_id else -1
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _placement_from_widgets(self, prefix):
+        """Reads the current values of a _build_target_placement_widget_set()
+        instance back into a plain dict, keyed the same as
+        pimd_features.parse_mark_target_line()'s companion fields."""
+        target_combo = getattr(self, '{0}_target'.format(prefix))
+        return {
+            'target_id': target_combo.currentData(),
+            'distance_mm': getattr(self, '{0}_distance_mm'.format(prefix)).value(),
+            'long_axis': getattr(self, '{0}_long_axis'.format(prefix)).currentText(),
+            'face_normal': getattr(self, '{0}_face_normal'.format(prefix)).currentText(),
+            'offset_x_mm': getattr(self, '{0}_offset_x_mm'.format(prefix)).value(),
+            'offset_y_mm': getattr(self, '{0}_offset_y_mm'.format(prefix)).value(),
+            'medium': getattr(self, '{0}_medium'.format(prefix)).currentText(),
+            'repeat_idx': getattr(self, '{0}_repeat_idx'.format(prefix)).value(),
+            'notes': getattr(self, '{0}_notes'.format(prefix)).text().strip(),
+        }
+
+    def _update_sig_repeat_idx_suggestion(self):
+        """Auto-increments the Analysis tab's repeat_idx spinbox to the next
+        unused value for the current placement tuple, per the brief's rule
+        (still user-editable afterward -- this only sets a suggestion)."""
+        if not hasattr(self, 'sig_target'):
+            return
+        placement = self._placement_from_widgets('sig')
+        key = self._placement_tuple_key(placement)
+        suggested = self._editable_repeat_counts.get(key, 0) + 1
+        self.sig_repeat_idx.blockSignals(True)
+        self.sig_repeat_idx.setValue(suggested)
+        self.sig_repeat_idx.blockSignals(False)
+
+    # -- Target registry loading / degrade behavior --------------------------
+
+    def _load_targets_registry(self, show_dialog_on_error=True):
+        """(Re)loads the target registry and repopulates every combo built by
+        _build_target_placement_widget_set(). Degrade behavior:
+          - missing/unreadable file -> air-only, status bar message.
+          - loads with errors -> dialog (if show_dialog_on_error) + only the
+            non-erroring targets loaded, 'air' always present.
+          - loads with only warnings -> status bar summary, fully populated.
+        Called once at UI-build time and again from the reload button."""
+        try:
+            targets, issues = pimd_targets.load_targets(TARGETS_REGISTRY_PATH)
+        except OSError as e:
+            self._targets, self._target_issues = {}, []
+            self.statusBar().showMessage(
+                "Target registry not found at {0} -- capture disabled except 'air' "
+                '({1})'.format(TARGETS_REGISTRY_PATH, e))
+            self._repopulate_target_combos()
+            return
+
+        self._targets, self._target_issues = targets, issues
+        errors = [i for i in issues if i.severity == 'error']
+        warnings = [i for i in issues if i.severity == 'warning']
+        if errors and show_dialog_on_error:
+            QMessageBox.critical(
+                self, 'Target registry errors',
+                "The target registry has {0} error(s) -- affected rows are unusable "
+                "(only 'air' and valid rows are selectable):\n\n{1}".format(
+                    len(errors), '\n'.join(str(i) for i in errors)))
+        if errors:
+            self.statusBar().showMessage(
+                'Target registry: {0} usable target(s), {1} error(s), {2} warning(s) '
+                '-- see dialog / run pimd_targets.py for detail'.format(
+                    len(targets), len(errors), len(warnings)))
+        elif warnings:
+            self.statusBar().showMessage(
+                'Target registry loaded: {0} target(s), {1} warning(s) (run '
+                'pimd_targets.py for detail)'.format(len(targets), len(warnings)))
+        else:
+            self.statusBar().showMessage('Target registry loaded: {0} target(s)'.format(len(targets)))
+        self._repopulate_target_combos()
+
+    def _repopulate_target_combos(self):
+        if hasattr(self, 'sig_target'):
+            current = self.sig_target.currentData()
+            self._populate_target_combo(self.sig_target, selected_target_id=current)
+        if hasattr(self, '_update_sig_capture_gating'):
+            self._update_sig_capture_gating()
+
+    def _on_reload_targets_registry_clicked(self):
+        self._load_targets_registry(show_dialog_on_error=True)
+
+    def _build_sig_row2_capture_inputs(self, v):
+        self._build_target_placement_widget_set(v, 'sig')
+        self.sig_target.currentIndexChanged.connect(self._update_sig_capture_gating)
+        for widget, signal_name in (
+            (self.sig_target, 'currentIndexChanged'), (self.sig_distance_mm, 'valueChanged'),
+            (self.sig_long_axis, 'currentIndexChanged'), (self.sig_face_normal, 'currentIndexChanged'),
+            (self.sig_offset_x_mm, 'valueChanged'), (self.sig_offset_y_mm, 'valueChanged'),
+            (self.sig_medium, 'currentIndexChanged'),
+        ):
+            getattr(widget, signal_name).connect(self._update_sig_repeat_idx_suggestion)
+
+        row_reload = QHBoxLayout()
+        self.pb_sig_reload_registry = QPushButton('Reload targets')
+        self.pb_sig_reload_registry.clicked.connect(self._on_reload_targets_registry_clicked)
+        row_reload.addWidget(self.pb_sig_reload_registry)
+        row_reload.addStretch(1)
+        v.addLayout(row_reload)
 
         row_b = QHBoxLayout()
         row_b.addWidget(QLabel('Frames:'))
@@ -2534,23 +2911,34 @@ class MainWindow(QMainWindow):
                 self.lw_analysis_templates.takeItem(i)
         self._analysis_templates = {k: v for k, v in self._analysis_templates.items() if v['source'] != source}
 
-        keys_sorted = sorted(sigs.keys(), key=lambda k: (str(k[0]), str(k[1]), str(k[2])))
+        keys_sorted = sorted(sigs.keys(), key=lambda k: tuple(str(v) for v in k))
         prefix = '✎ ' if source == 'editable' else ''
         for i, key in enumerate(keys_sorted):
             sig = sigs[key]
-            session, target, distance = key
             amp, splithalf, quality = sig['amp'], sig['splithalf'], sig['quality']
             snr = amp / splithalf if splithalf > 1e-9 else float('inf')
-            label = '{0}{1} @{2}cm  amp={3:.0f} SNR={4:.1f} [{5}]'.format(
-                prefix, target, distance, amp, snr, quality)
+            if len(key) == 3:
+                # 'loaded'/legacy source (pimd_corpus_check.load_corpus(),
+                # still old target/distance_cm schema -- see its own
+                # changelog entry for the v1.32-schema loud-rejection).
+                session, display_target, display_place = key[0], key[1], '{0}cm'.format(key[2])
+            else:
+                # 'editable' source (this file's own _scan_editable_
+                # signature_file(), v1.32+ schema) -- key is (session,
+                # capture_id); display fields live in the value dict.
+                session, capture_id = key
+                display_target = sig.get('target_id') or capture_id
+                display_place = '{0}mm'.format(sig['distance_mm']) if sig.get('distance_mm') else 'air'
+            label = '{0}{1} @{2}  amp={3:.0f} SNR={4:.1f} [{5}]'.format(
+                prefix, display_target, display_place, amp, snr, quality)
             color = pg.intColor(i, hues=max(len(sigs), 9))
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(prev_checked.get(key, Qt.CheckState.Unchecked))
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setForeground(QBrush(color))
-            item.setToolTip('{0} @{1}cm ({2})  amp={3:.3f}mV  splithalf={4:.3f}mV  SNR={5:.2f}  quality={6}'.format(
-                target, distance, session, amp, splithalf, snr, quality))
+            item.setToolTip('{0} @{1} ({2})  amp={3:.3f}mV  splithalf={4:.3f}mV  SNR={5:.2f}  quality={6}'.format(
+                display_target, display_place, session, amp, splithalf, snr, quality))
             self.lw_analysis_templates.addItem(item)
             self._analysis_templates[key] = {'shape': sig['shape'], 'color': color, 'label': label,
                                               'amp': amp, 'splithalf': splithalf, 'quality': quality,
@@ -2723,7 +3111,13 @@ class MainWindow(QMainWindow):
         for entry in (self._sig_air_before, self._sig_air_after):
             if entry is None:
                 continue
-            plateau = pimd_features.Plateau('air', None, True, 0, entry['n_frames'])
+            # Throwaway plateau -- only start_idx/end_idx/is_air feed
+            # central_frames() here; the target/placement fields are
+            # meaningless for this live 1-2 anchor window.
+            plateau = pimd_features.Plateau(
+                target_id='air', short_name='', distance_mm=None, long_axis='na', face_normal='na',
+                offset_x_mm=0, offset_y_mm=0, medium='air', repeat_idx=1, notes='',
+                is_air=True, start_idx=0, end_idx=entry['n_frames'])
             c0, c1 = pimd_features.central_frames(plateau)
             anchor_ts.append(float(np.median(entry['t_seconds'][c0:c1])))
             anchor_vs.append(np.median(entry['frames_mV'][c0:c1], axis=0))
@@ -2735,7 +3129,10 @@ class MainWindow(QMainWindow):
         if anchor_vs.shape[1] != tgt['frames_mV'].shape[1]:
             return {'error': "channel-count mismatch vs air anchor(s) -- refusing to mix profile "
                               "geometries (DESIGN §11)"}
-        plateau_t = pimd_features.Plateau('target', None, False, 0, tgt['n_frames'])
+        plateau_t = pimd_features.Plateau(
+            target_id='target', short_name='', distance_mm=None, long_axis='na', face_normal='na',
+            offset_x_mm=0, offset_y_mm=0, medium='air', repeat_idx=1, notes='',
+            is_air=False, start_idx=0, end_idx=tgt['n_frames'])
         c0, c1 = pimd_features.central_frames(plateau_t)
         delta_mV, plateau_amp_mV, amp_mean_abs_mV, splithalf_floor, n_central, center_t = \
             pimd_features.compute_plateau_stats(tgt['frames_mV'], tgt['t_seconds'], c0, c1, anchor_ts, anchor_vs)
@@ -2765,9 +3162,15 @@ class MainWindow(QMainWindow):
 
     def _update_sig_capture_gating(self):
         has_file = self._editable_sig_path is not None
-        self.le_sig_target.setEnabled(has_file)
-        self.cb_sig_no_distance.setEnabled(has_file)
-        self.sp_sig_distance.setEnabled(has_file and not self.cb_sig_no_distance.isChecked())
+        self.sig_target.setEnabled(has_file)
+        self.sig_distance_mm.setEnabled(has_file)
+        self.sig_long_axis.setEnabled(has_file)
+        self.sig_face_normal.setEnabled(has_file)
+        self.sig_offset_x_mm.setEnabled(has_file)
+        self.sig_offset_y_mm.setEnabled(has_file)
+        self.sig_medium.setEnabled(has_file)
+        self.sig_repeat_idx.setEnabled(has_file)
+        self.sig_notes.setEnabled(has_file)
         self.sp_sig_capture_n.setEnabled(has_file)
         self.sp_sig_settle_mv.setEnabled(has_file)
         self.pb_sig_air_before.setEnabled(has_file and not self._sig_capturing)
@@ -2775,7 +3178,8 @@ class MainWindow(QMainWindow):
         self.pb_sig_air_after.setEnabled(has_file and not self._sig_capturing and self._sig_target is not None)
         stats = self._sig_last_stats
         self.pb_sig_save.setEnabled(
-            has_file and stats is not None and 'error' not in stats and bool(self.le_sig_target.text().strip()))
+            has_file and stats is not None and 'error' not in stats
+            and self.sig_target.currentData() is not None)
         item = self.lw_analysis_templates.currentItem()
         tpl = self._analysis_templates.get(item.data(Qt.ItemDataRole.UserRole)) if item else None
         self.pb_sig_delete.setEnabled(bool(tpl) and tpl['source'] == 'editable')
@@ -2792,11 +3196,13 @@ class MainWindow(QMainWindow):
         if not path:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            f.write(pimd_features.CORPUS_HEADER + '\n')
+        with open(path, 'w', newline='') as f:
+            csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n').writerow(
+                pimd_features.CORPUS_HEADER_FIELDS)
         self._editable_sig_path = path
         self._editable_sig_session_id = 'gui_{0}'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
-        self._editable_visit_counts = {}
+        self._editable_sig_seq = 0
+        self._editable_repeat_counts = {}
         self._reset_sig_capture_state()
         self._merge_template_list({}, source='editable')
         self._update_sig_mode_label()
@@ -2834,43 +3240,63 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('Editing: {0} ({1} signature(s))'.format(path, len(sigs)))
 
     def _scan_editable_signature_file(self, path):
-        """Mirrors pimd_corpus_check.load_long()'s grouping/sort, but keeps
-        the literal on-disk distance string as part of the key -- load_long's
-        dist_key() casts distance to int, which is lossy for non-integer
-        distances and unsafe as a Delete match key."""
+        """Groups a v1.32+ gui_signatures_*.csv's per-cell rows back into one
+        entry per capture, keyed by (session, capture_id) -- the new schema's
+        natural unique key (columns 0, 1), replacing the old
+        (session, target, distance) key. Uses csv.reader (not a hand split)
+        since notes/short_name can carry quoted commas."""
+        fields = pimd_features.CORPUS_HEADER_FIELDS
+        idx = {name: i for i, name in enumerate(fields)}
         groups, order = {}, []
-        with open(path) as f:
-            header_seen = False
-            for line in f:
-                line = line.rstrip('\n')
-                if not line or line.startswith('#'):
+        with open(path, newline='') as f:
+            reader = csv.reader(line for line in f if not line.startswith('#'))
+            header = next(reader, None)   # CORPUS_HEADER row
+            for parts in reader:
+                if not parts:
                     continue
-                if not header_seen:
-                    header_seen = True   # first non-comment line is the CORPUS_HEADER row
-                    continue
-                parts = line.split(',')
-                key = (parts[0], parts[1], parts[2])
+                key = (parts[idx['session']], parts[idx['capture_id']])
                 if key not in groups:
                     groups[key] = []
                     order.append(key)
                 groups[key].append(parts)
         sigs = {}
         for key in order:
-            rows = sorted(groups[key], key=lambda p: (float(p[3]), -float(p[4])))  # pulse_us asc, threshold_v desc
-            sigs[key] = dict(shape=np.array([float(p[5]) for p in rows]),
-                              amp=float(rows[0][6]), splithalf=float(rows[0][7]), quality=rows[0][8])
+            rows = sorted(groups[key], key=lambda p: (float(p[idx['pulse_us']]), -float(p[idx['threshold_v']])))
+            first = rows[0]
+            sigs[key] = dict(
+                shape=np.array([float(p[idx['delta_mV']]) for p in rows]),
+                amp=float(first[idx['plateau_amp_mV']]), splithalf=float(first[idx['splithalf_floor']]),
+                quality=first[idx['quality']],
+                target_id=first[idx['target_id']], short_name=first[idx['short_name']],
+                distance_mm=first[idx['distance_mm']], long_axis=first[idx['long_axis']],
+                face_normal=first[idx['face_normal']], offset_x_mm=first[idx['offset_x_mm']],
+                offset_y_mm=first[idx['offset_y_mm']], medium=first[idx['medium']],
+                repeat_idx=first[idx['repeat_idx']],
+            )
         return sigs
+
+    @staticmethod
+    def _placement_tuple_key(sig):
+        """The brief's repeat-disambiguation tuple: (target_id, distance_mm,
+        long_axis, face_normal, offset_x_mm, offset_y_mm, medium) --
+        identifies "the same placement", which is what repeat_idx
+        auto-increments against. Accepts either a _scan_editable_signature_
+        file() value dict (string fields, from CSV) or a
+        _placement_from_widgets() dict (int/str fields, from live widgets) --
+        stringified so both sides compare equal."""
+        return tuple(str(sig[k]) for k in ('target_id', 'distance_mm', 'long_axis',
+                                            'face_normal', 'offset_x_mm', 'offset_y_mm', 'medium'))
 
     def _reload_editable_signature_list(self):
         if self._editable_sig_path is None:
             return
         sigs = self._scan_editable_signature_file(self._editable_sig_path)
         self._merge_template_list(sigs, source='editable')
-        self._editable_visit_counts = {}
-        for session, target, distance in sigs.keys():
-            base = pimd_corpus_check.REPEAT_MARK_RE.sub('', target).strip().lower()
-            key = (base, distance)
-            self._editable_visit_counts[key] = self._editable_visit_counts.get(key, 0) + 1
+        self._editable_repeat_counts = {}
+        for sig in sigs.values():
+            key = self._placement_tuple_key(sig)
+            self._editable_repeat_counts[key] = self._editable_repeat_counts.get(key, 0) + 1
+        self._editable_sig_seq = len(sigs)
 
     def _update_sig_mode_label(self):
         if self._editable_sig_path is None:
@@ -2897,10 +3323,17 @@ class MainWindow(QMainWindow):
         if self._editable_sig_path is None:
             self.statusBar().showMessage('No editable signature file open.')
             return
-        target_name = self.le_sig_target.text().strip()
-        if not target_name:
-            self.statusBar().showMessage('Enter a target name before saving.')
+
+        target_id = self.sig_target.currentData()
+        if not target_id:
+            self.statusBar().showMessage('Select a target before saving.')
             return
+        if target_id != 'air' and target_id not in self._targets:
+            self.statusBar().showMessage(
+                "Target '{0}' is no longer in the registry (removed/renamed since it was "
+                "selected) -- reload targets and pick again.".format(target_id))
+            return
+        short_name = self._targets[target_id].short_name if target_id in self._targets else ''
 
         existing = self._scan_editable_signature_file(self._editable_sig_path)
         if existing:
@@ -2911,28 +3344,35 @@ class MainWindow(QMainWindow):
                     "-- never mix profile geometries (DESIGN §11)".format(existing_len, self._n_channels))
                 return
 
-        distance_cm = None if self.cb_sig_no_distance.isChecked() else self.sp_sig_distance.value()
-        distance_str = pimd_features.format_distance(distance_cm)
-        base_key = (target_name.lower(), distance_str)
-        visit = self._editable_visit_counts.get(base_key, 0) + 1
-        if visit == 1:
-            label = target_name
-        elif visit == 2:
-            label = '{0} (rpt)'.format(target_name)
-        else:
-            label = '{0} (rpt{1})'.format(target_name, visit)
+        placement = self._placement_from_widgets('sig')
+        distance_mm = None if target_id == 'air' else placement['distance_mm']
 
         colmap = self._build_colmap_for_corpus()
-        plateau = pimd_features.Plateau(label, distance_cm, target_name.lower() == 'air', 0, 0)
-        rows = pimd_features.build_rows(self._editable_sig_session_id, plateau, colmap,
-                                         stats['delta_mV'], stats['plateau_amp_mV'], stats['splithalf_floor'],
-                                         stats['quality'], stats['amp_mean_abs_mV'], self._editable_sig_path)
-        with open(self._editable_sig_path, 'a') as f:
-            f.write('\n'.join(rows) + '\n')
+        plateau = pimd_features.Plateau(
+            target_id=target_id, short_name=short_name, distance_mm=distance_mm,
+            long_axis=placement['long_axis'], face_normal=placement['face_normal'],
+            offset_x_mm=placement['offset_x_mm'], offset_y_mm=placement['offset_y_mm'],
+            medium=placement['medium'], repeat_idx=placement['repeat_idx'], notes=placement['notes'],
+            is_air=(target_id == 'air'), start_idx=0, end_idx=0)
+
+        self._editable_sig_seq += 1
+        capture_id = '{0}_c{1:02d}'.format(self._editable_sig_session_id, self._editable_sig_seq)
+        captured_at = datetime.now().isoformat()
+
+        rows = pimd_features.build_rows(
+            self._editable_sig_session_id, capture_id, captured_at, plateau, colmap,
+            stats['delta_mV'], stats['plateau_amp_mV'], stats['splithalf_floor'],
+            stats['quality'], stats['amp_mean_abs_mV'], self._profile.get('name'), self._profile_sha8,
+            self._parsed_fw_version(), 'pimd_classviz.py v{0}'.format(APP_VERSION),
+            self.cb_supply.currentText(), self._editable_sig_path)
+        with open(self._editable_sig_path, 'a', newline='') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
+            for row in rows:
+                writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
         self._reload_editable_signature_list()
         self._reset_sig_capture_state()
         self.statusBar().showMessage(
-            "Saved '{0}' ({1} rows) to {2}".format(label, len(rows), self._editable_sig_path))
+            "Saved '{0}' ({1} rows) to {2}".format(capture_id, len(rows), self._editable_sig_path))
 
     def _on_sig_delete_clicked(self):
         item = self.lw_analysis_templates.currentItem()
@@ -2952,7 +3392,10 @@ class MainWindow(QMainWindow):
         preamble   = [l for l in lines if l.startswith('#')]
         body       = [l for l in lines if l and not l.startswith('#')]
         header, data_lines = body[0], body[1:]
-        kept = [l for l in data_lines if tuple(l.split(',')[:3]) != key]
+        # key is (session, capture_id) -- neither field can contain a comma
+        # (both are generated strings), so a plain split is safe here even
+        # though later fields (notes/short_name) may be csv-quoted.
+        kept = [l for l in data_lines if tuple(l.split(',')[:2]) != key]
         with open(self._editable_sig_path, 'w') as f:
             for l in preamble:
                 f.write(l + '\n')
@@ -3000,18 +3443,23 @@ class MainWindow(QMainWindow):
         if self._training_paused:
             self.statusBar().showMessage('Paused — resume before marking.')
             return
-        target = self.le_sig_target.text().strip()
-        if not target:
-            self.statusBar().showMessage('Enter a target name before marking.')
+        target_id = self.sig_target.currentData()
+        if not target_id:
+            self.statusBar().showMessage('Select a target before marking.')
             return
-        if target.lower() == 'air':
+        if target_id != 'air' and target_id not in self._targets:
+            self.statusBar().showMessage(
+                "Target '{0}' is no longer in the registry -- reload targets and pick "
+                'again.'.format(target_id))
+            return
+        placement = self._placement_from_widgets('sig')
+        if target_id == 'air':
+            placement['distance_mm'] = None
             text = 'air'
-        elif self.cb_sig_no_distance.isChecked():
-            self.statusBar().showMessage('Non-air targets need a distance — uncheck "no distance".')
-            return
         else:
-            text = '{0} @{1}'.format(target, pimd_features.format_distance(self.sp_sig_distance.value()))
+            text = '{0} @{1}'.format(target_id, pimd_features.format_distance(placement['distance_mm']))
         self._append_mark(text)
+        self._append_mark_target(target_id, placement)
         self.statusBar().showMessage('Marked: {0}'.format(text))
 
     def _set_sig_session_active_ui(self, active):
@@ -3407,6 +3855,16 @@ class MainWindow(QMainWindow):
         self.pb_record.setText('■ 0 frames')
         self.pb_record.setStyleSheet(self.MY_RED)
 
+    def _parsed_fw_version(self):
+        """Read-only reuse of the existing raw V-response capture (process_
+        packet's 'if line[0]==\"V\"' branch) -- no new protocol behavior, just
+        string extraction from data already received. Mirrors
+        pimd_features._fw_version_from_v_response()."""
+        if not self._fw_version_line:
+            return 'unknown'
+        parts = self._fw_version_line.split(',')
+        return parts[0].lstrip('V').strip() if parts and parts[0] else 'unknown'
+
     def _session_write_header(self, f, ts, notes):
         """Write the '#'-prefixed comment header: everything an AI analyst needs
         to interpret the data rows without any external profile file or context."""
@@ -3416,10 +3874,17 @@ class MainWindow(QMainWindow):
         f.write('# tool: pimd_classviz.py v{0}\n'.format(APP_VERSION))
         f.write('# firmware_v_response (V<fw>,<board_id>,<num_profiles>,<active_idx>,'
                 '<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>): {0}\n'.format(fw_line))
+        f.write('# fw_version: {0}\n'.format(self._parsed_fw_version()))
+        f.write('# supply: {0}\n'.format(self.cb_supply.currentText()))
         f.write('# active_profile_idx: {0}\n'.format(self._active_profile_idx))
         f.write('# n_bands: {0}  n_cells: {1}  n_channels: {2}\n'.format(
             self._n_bands, self._n_cells, self._n_channels))
         f.write('# profile_json: {0}\n'.format(json.dumps(self._profile, separators=(',', ':'))))
+        # Authoritative profile_sha8 -- computed from the literal loaded bytes
+        # (_set_profile_dims), not a re-serialization of the dict above (which
+        # can use different key order/separators and would hash differently).
+        # pimd_features.py v6 prefers this line over re-hashing profile_json.
+        f.write('# profile_sha8: {0}\n'.format(self._profile_sha8))
         f.write('# colmap_fields: col_index,band_index,freq_hz,pulse_us,delay_us,threshold_v\n')
         for ch in range(self._n_channels):
             b, c = ch // self._n_cells, ch % self._n_cells
@@ -3484,6 +3949,29 @@ class MainWindow(QMainWindow):
         readyRead event, not re-entered by this call)."""
         ts = datetime.fromtimestamp(time.time()).isoformat()
         self._session_file.write('# mark: {0}, {1}\n'.format(ts, text))
+        self._session_file.flush()
+
+    def _append_mark_target(self, target_id, placement):
+        """Append one '#'-prefixed structured companion line immediately after
+        a '# mark:' line (same timestamp basis, called right after
+        _append_mark() in the same call frame) -- purely additive, does not
+        alter '# mark:' or any of its existing consumers (pimd_features.
+        parse_mark_label()/segment_from_marks() keep working unchanged on
+        pre-v1.32 sessions with no 'mark_target:' companion). `placement`:
+        dict with distance_mm, long_axis, face_normal, offset_x_mm,
+        offset_y_mm, medium, repeat_idx, notes. csv-quotes the field portion
+        (notes may contain commas) with lineterminator='\\n' so no stray '\\r'
+        lands in the session CSV -- pimd_features.parse_mark_target_line()
+        parses this exact format."""
+        ts = datetime.fromtimestamp(time.time()).isoformat()
+        buf = io.StringIO()
+        csv.writer(buf, lineterminator='\n').writerow([
+            target_id, placement['distance_mm'] if placement['distance_mm'] is not None else '',
+            placement['long_axis'], placement['face_normal'],
+            placement['offset_x_mm'], placement['offset_y_mm'], placement['medium'],
+            placement['repeat_idx'], placement['notes'],
+        ])
+        self._session_file.write('# mark_target: {0}, {1}'.format(ts, buf.getvalue()))
         self._session_file.flush()
 
     # ------------------------------------------------------------------
@@ -3781,11 +4269,34 @@ class MainWindow(QMainWindow):
             # Analysis tab -- avg-N, per-group Auto/Manual normalize+scale
             # (heatmap/chart2/8-grid/9-grid/strip), signature capture-N.
             # Deliberately NOT persisted: the active editable signature-file
-            # path, in-progress captures, target/distance inputs -- resuming
-            # a stale "editing" pointer at a file that may have changed or
-            # been deleted between sessions is a foot-gun; every session
-            # starts read-only with no active file.
+            # path, in-progress captures -- resuming a stale "editing"
+            # pointer at a file that may have changed or been deleted
+            # between sessions is a foot-gun; every session starts read-only
+            # with no active file.
             self.sp_analysis_avg_n.setValue(int(s.get('analysis_avg_n', 1)))
+
+            self.cb_supply.setCurrentText(s.get('supply', SUPPLY_CHOICES[0]))
+
+            # Last-used target_id + placement ARE persisted (v1.32+) -- the
+            # original "don't persist target/distance" foot-gun above was
+            # about *free text*: a stale/typo'd string looked plausible
+            # forever. A registry-validated combo makes a dangling
+            # target_id *detectable* (a dict lookup against the freshly
+            # loaded registry, done in _load_targets_registry() before this
+            # runs), so it's safe to restore -- silently falling back to
+            # 'air' on a miss rather than restoring a meaningless
+            # placement. repeat_idx is deliberately NOT persisted (it's
+            # inherently per-save/derived).
+            sig_target_id = s.get('sig_target_id')
+            if sig_target_id and sig_target_id in self._targets or sig_target_id == 'air':
+                self._populate_target_combo(self.sig_target, selected_target_id=sig_target_id)
+                self.sig_distance_mm.setValue(int(s.get('sig_distance_mm', 50)))
+                self.sig_long_axis.setCurrentText(s.get('sig_long_axis', 'na'))
+                self.sig_face_normal.setCurrentText(s.get('sig_face_normal', 'na'))
+                self.sig_offset_x_mm.setValue(int(s.get('sig_offset_x_mm', 0)))
+                self.sig_offset_y_mm.setValue(int(s.get('sig_offset_y_mm', 0)))
+                self.sig_medium.setCurrentText(s.get('sig_medium', 'air'))
+                self.sig_notes.setText(s.get('sig_notes', ''))
 
             self.cb_hm_norm.setCurrentIndex(int(s.get('analysis_hm_norm_idx', 0)))
             self.cb_hm_scale_auto.setChecked(bool(s.get('analysis_hm_scale_auto', True)))
@@ -3859,6 +4370,17 @@ class MainWindow(QMainWindow):
 
             'sig_capture_n': self.sp_sig_capture_n.value(),
             'sig_settle_mv': self.sp_sig_settle_mv.value(),
+
+            'supply': self.cb_supply.currentText(),
+
+            'sig_target_id':   self.sig_target.currentData(),
+            'sig_distance_mm': self.sig_distance_mm.value(),
+            'sig_long_axis':   self.sig_long_axis.currentText(),
+            'sig_face_normal': self.sig_face_normal.currentText(),
+            'sig_offset_x_mm': self.sig_offset_x_mm.value(),
+            'sig_offset_y_mm': self.sig_offset_y_mm.value(),
+            'sig_medium':      self.sig_medium.currentText(),
+            'sig_notes':       self.sig_notes.text(),
         }
         try:
             os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)

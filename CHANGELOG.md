@@ -1,3 +1,171 @@
+### src/pimd_corpus_check.py — v1.4 — loud rejection of the v1.32+ target-registry schema
+
+Companion to the target-metadata capture regime (pimd_classviz.py v1.32,
+pimd_features.py v6): `sniff_format()` now detects a `target_id`/
+`distance_mm`-schema file and raises `SystemExit` immediately, naming the
+file and stating this tool doesn't support it yet. Without this, such a
+file still passes the existing 'long'-format check (`pulse_us`/
+`threshold_v`/`delta_mV` are unchanged column names) and only fails much
+later with an opaque `KeyError` inside `load_long()`'s
+`groupby(['session','target','distance_cm'])`, since those two columns no
+longer exist. Deliberately **not** a full migration — a scope decision,
+not an oversight: this tool's canary-consistency (`CANARY-START`/`END`
+suffix matching on the target name) and repeat-consistency
+(`REPEAT_MARK_RE`/`(rpt)` suffix, same column) both encode metadata into
+the free-text target string, which the new schema replaces with a stable
+`target_id` plus a separate structured `repeat_idx` column — re-homing
+those checks onto the new columns is a real but bounded follow-up task,
+deferred rather than bundled into this change. Old `target`/
+`distance_cm`-schema files are completely unaffected; every existing
+check still runs exactly as before (verified: a hand-built old-schema
+fixture produces the same check table/exit behavior pre- and post-change).
+`_on_sig_open_for_edit_clicked()` in `pimd_classviz.py` already wraps its
+`sniff_format()` call in a `try/except SystemExit` and surfaces the
+message in the status bar, so this fix also improves that call site for
+free, with no code change needed there. (2026-07-14)
+
+---
+
+### src/pimd_classviz.py — v1.32 — structured target-metadata capture regime (registry-backed Analysis/Training capture)
+
+Replaces the Analysis tab's free-text target field + distance_cm spinbox
+with a registry-backed target combo (`pimd_targets.py`) plus structured
+placement (distance_mm/long_axis/face_normal/offset_x_mm/offset_y_mm/
+medium/repeat_idx/notes), built once by a new shared
+`_build_target_placement_widget_set()` and reused both inline (Analysis
+tab) and inside a new Training-tab "Placement…" dialog — one
+implementation, not two. New `_load_targets_registry()` covers a
+missing/broken registry: missing file → air-only with a status-bar
+message; load errors → a dialog plus only the non-erroring targets
+selectable; warnings-only → status-bar summary, fully populated. A
+"Reload targets" button re-runs it on demand.
+`gui_signatures_*.csv`'s column set moves to `pimd_features.py` v6's new
+`CORPUS_HEADER` end-to-end (`target`/`distance_cm` dropped, not aliased)
+and is now written via `csv.writer(QUOTE_MINIMAL)` instead of hand
+comma-joining, since `notes`/`short_name` are free text and will contain
+commas — `_scan_editable_signature_file()`'s grouping key also moves from
+`(session, target, distance)` to `(session, capture_id)`, and the old
+visit-count `(rpt)`-suffix scheme is replaced by a `repeat_idx`
+auto-increment keyed on the full placement tuple (still user-editable).
+A new `# mark_target:` session-dump comment line is written alongside the
+existing `# mark:` line (byte-identical, untouched — zero risk to
+`pimd_features.py`'s existing consumers) for both the Training tab's
+row-advance marks and the Analysis tab's session-mark button, carrying
+the same structured fields `pimd_features.py` v6 now parses. Training-tab
+table: "Target" column becomes "Target ID" (validated against the loaded
+registry, `_validate_training_table()` red-flags unknown ids), "Distance"
+becomes mm; a new per-row `_training_row_placement` dict (keyed by a
+stable token surviving Add/Remove Row, not row index) holds the remaining
+placement fields, edited via the new Placement dialog. Training-list JSON
+rows without `target_id` are loudly rejected on load, not migrated — the
+4 existing `learn-v2-*.json` lists (old `target`/`distance_cm` schema)
+need manual re-authoring against the registry as a follow-up.
+New session-level `Supply` combo (battery/usb, top bar, DESIGN §12) feeds
+both capture paths and is embedded in session-dump headers
+(`# supply:`). `profile_sha8` (first 8 hex chars of SHA-256 of the
+literal loaded profile JSON bytes) is computed once per profile load
+(`_set_profile_dims`, now also caching the raw bytes via
+`_load_profile_file`'s new `(profile, raw_bytes)` return) and threaded
+through both capture paths and into session-dump headers
+(`# profile_sha8:`); the built-in `_default_profile()` fallback (no file
+on disk) uses a documented canonical-JSON surrogate since there's nothing
+to hash literally. `fw_version` is parsed read-only from the existing raw
+V-identify reply (`_parsed_fw_version()`), no protocol change. Settings
+persistence of last-used `target_id` + placement is added, reversing the
+v1.11-era "don't persist target/distance" decision — safe now because the
+registry-validated combo makes a dangling `target_id` detectable (a dict
+lookup against the freshly-loaded registry) and falls back to `air`
+silently on a miss, rather than restoring stale free text.
+Verified headless (`QT_QPA_PLATFORM=offscreen`): MainWindow construction,
+registry load/degrade paths, a full Analysis-tab save (registry join,
+quoted-comma notes round-trip through `_scan_editable_signature_file`,
+`repeat_idx` auto-increment across two saves, delete), Training-tab
+validation (unknown target_id rejected, missing air row rejected),
+mark-target dict construction, list save/load round-trip, legacy-schema
+list loud rejection, the Placement dialog's read-back into both the table
+and the stored dict, and settings persistence including the
+stale-target-falls-back-to-air path. Not verified (needs a physical
+board or a mocked serial-frame injector): the live settledness-gated
+capture flow itself and `fw_version` from a real `V` reply.
+(2026-07-14)
+
+---
+
+### src/pimd_features.py — v6 — structured target-metadata capture regime (registry join + geometry guard rewrite)
+
+Replaces the free-text `target`/`distance_cm` corpus columns with a
+registry-backed `target_id` plus structured placement
+(distance_mm/long_axis/face_normal/offset_x_mm/offset_y_mm/medium/
+repeat_idx/notes) and capture provenance
+(profile_name/profile_sha8/fw_version/tool_version/supply) — see
+CORPUS_HEADER/JOINED_CORPUS_HEADER in the module docstring for the exact
+column list. `Plateau` is redesigned around target_id/placement instead of a
+free-text label; a plateau with no resolvable target_id (a no-marks
+change-point segment, or an old-style '@distance' mark with no structured
+`mark_target:` companion line) is loudly warned and excluded from output —
+there is no free-text → target_id migration path, by design. New
+`mark_target:` comment-line parsing is additive alongside the existing
+`mark:` line (untouched, so pre-v1.32 session dumps stay readable);
+`segment_from_marks()` nearest-timestamp-matches the two and retires the old
+visit-count `(rpt)`-suffix scheme in favor of the structured `repeat_idx`
+column. The profile-geometry gate is no longer a `--profile` reference-file
+comparison that `[SKIP]`s mismatches (`load_reference_profile`/
+`validate_profile`/`DEFAULT_PROFILE`/`--profile` removed) — every input
+file's `(profile_name, profile_sha8)` is now grouped, and a corpus build
+spanning more than one group is a hard error naming every offending file.
+`profile_sha8` is SHA-256 of the profile JSON bytes as loaded, truncated to
+8 hex chars; classviz computes and embeds it directly (a new
+`# profile_sha8:` session-dump header line, or a literal gui_signatures
+column) since only classviz has the literal loaded bytes — a session dump's
+embedded `# profile_json:` text is a re-serialization that would hash
+differently, so re-hashing it here is only a fallback for dumps predating
+that line. New direct-ingest path for classviz's `gui_signatures_*.csv`
+files (already at full per-cell granularity — no segmentation math, just
+registry join); a pre-v1.32 file (`target`/`distance_cm` columns) is a hard,
+clearly-worded error, no migration code. Unknown `target_id` is a hard
+error naming the file and id; registry errors abort the whole run before
+any file is processed. Row writing switches from hand `','.join()` with a
+comma→semicolon replace to `csv.writer(quoting=QUOTE_MINIMAL)`, since
+`notes`/`short_name` are free text and will contain commas — an intentional
+on-disk convention change. No-marks change-point sessions can no longer
+produce named corpus rows (a `segment_NN` placeholder was never a valid
+registry `target_id`) — flagged as a real, forced consequence of the schema
+redesign, not a bug. Verified against synthetic session-dump and
+gui_signatures fixtures: registry join, quoted-notes round-trip, the
+geometry guard (two sessions with different profile_sha8 correctly
+refused), and the unknown-target_id and legacy-schema hard errors all fire
+correctly; `pimd_corpus_check.py` is deliberately left unmigrated (see its
+own changelog entry) — building a corpus from new-schema inputs works, but
+`pimd_corpus_check.py` won't yet accept the result. (2026-07-14)
+
+---
+
+### src/pimd_targets.py — new — shared target registry loader/validator (v1)
+
+New module: loads and validates `data/training_lists/targets.csv` (23
+human-authored target objects), shared by `pimd_classviz.py` and
+`pimd_features.py` as the single source of target physical metadata. Reads
+and validates only — never writes the registry, which is human-owned data.
+Errors: missing/misordered required column, empty/duplicate `target_id`,
+`target_id` not matching `^[a-z0-9_]+$`, unparseable numeric, enum value
+outside the documented sets. Warnings: dims not sorted
+(`dim_a >= dim_b >= dim_c`), `wall_thickness_mm` present on a shape outside
+the expected hollow-section set, `closed_loop=y` on a non-conductive
+material, and a mass-plausibility check (`mass_g` vs. `1.05 ×
+density × bounding-box volume`, converting mm³→cm³ before applying the
+g/cm³ density table). CLI (`python pimd_targets.py [--registry PATH]`)
+prints the full target table plus every issue found, exit 1 on any error,
+0 on warnings-only. Verified against the real registry: correctly surfaces
+`brass_block_01`'s dims-unsorted and mass-implausibility warnings and
+`ferrite_toroid_01`'s closed_loop-on-non-conductive warning (plus several
+legitimate bonus warnings on `cu_crimps_01`/`shackle_01`/`magnet_nd_01`),
+0 errors, exit 0; a hand-crafted malformed registry (duplicate id, bad
+regex, missing column, bad enum, unparseable numeric) correctly surfaces
+all 5 planted errors in one pass; a missing `--registry` path produces a
+clean error message and exit 1. (2026-07-14)
+
+---
+
 ### src/data/profiles/cal_63_air_v2.json — new — locked; fresh soaked recal under fw v4.26
 
 New locked operating profile from the 2026-07-14 delay recalibration (fully
@@ -158,6 +326,40 @@ Verified with an offscreen-Qt simulation: gate holds under 5 mV noise, opens
 at 0.3 mV, an injected 500 mV glitch frame is excluded while the window
 still reaches N clean frames, the >20 % warning fires, and cancel resets
 state. (2026-07-13)
+
+---
+
+### src/pimd_targets.py — new — v1: shared target-registry loader/validator
+
+New module, first of a three-file change replacing free-text `target`/
+`distance_cm` capture metadata with a structured `target_id` + placement
+regime (mission: rebuild the post-enclosure ML corpus from zero against
+`src/data/training_lists/targets.csv`, the new human-maintained registry of
+23 physical target objects). `load_targets()` parses the registry with the
+`csv` module (not a hand `split(',')` — the file has a quoted comment line
+containing a literal comma) and validates every row, collecting every issue
+rather than stopping at the first: hard errors for missing/duplicate/
+malformed `target_id`, unparseable numerics, and enum violations; warnings
+for unsorted dims, `wall_thickness_mm` on an unexpected shape, `closed_loop`
+on a non-conductive material, and mass implausible for the material's
+density vs. the bounding box. Verified against the real registry: 0 errors,
+7 warnings, including the three the task explicitly called for
+(`brass_block_01` dims-unsorted + mass, `ferrite_toroid_01` closed_loop on
+ferrite) plus four more genuine ones the generic rules also catch
+(`cu_crimps_01`'s wall_thickness/mass on a `collection` shape,
+`shackle_01`'s wall_thickness on an `irregular` shape, `magnet_nd_01`'s mass
+narrowly exceeding its bounding-box limit). Also exercised against
+hand-crafted malformed CSVs (bad id regex, duplicate id, empty id, bad enum,
+short row, unparseable numeric) to confirm every error branch fires
+correctly — an early cut treated any row with a blank first field as a
+blank line, which silently ate the "empty target_id" error case entirely;
+fixed to only skip rows where every field is blank. CLI:
+`python pimd_targets.py [--registry PATH]`, prints a target table + all
+issues, exit 1 on any error. Registry path note: the task brief named
+`src/data/targets.csv`; the real, human-created file is at
+`src/data/training_lists/targets.csv` (confirmed via `git status`) — this
+and the other two files in the change use that real path as the shared
+default. (2026-07-14)
 
 ---
 
