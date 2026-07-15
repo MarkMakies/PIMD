@@ -8,6 +8,7 @@ __pycache__/
 
 # Private
 REDO.md
+TODO.md
 assets
 
 # ML chat-handover bundles (working docs, not repo source)
@@ -28,3 +29,6 @@ src/data/delaycal*
 src/data/frames*
 src/data/P*
 src/data/stats*
+
+# Corpus captures — not tracked for now (rebuild in progress, 2026-07-15)
+src/data/corpora/

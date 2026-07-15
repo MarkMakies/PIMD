@@ -1,3 +1,25 @@
+### References/ — asset reorganisation committed (2026-07-13/15 epoch)
+
+All reference images now tracked in `References/` (the former `assets/`
+directory is gone). Renamed: `scope-baseline.jpeg` →
+`scope-pulse-baseline.jpeg` (same image; §15 row updated at Doc-rev 1.8).
+Removed: `delaycal-screenshot.JPEG`, `profile8b-air.jpg` (previous-epoch;
+the remaining profile8b captures stay on disk but their §15 rows were
+dropped at Doc-rev 1.8). Added, not yet cited in DESIGN.md:
+`new-training-data.jpg`, `training-results-v1a.jpg` / `v1b.png` / `v1c.png`,
+`training-targets-v3.JPEG`, `warmup-with-8ns-steps.jpg`. (2026-07-15)
+
+---
+
+### .gitignore — TODO.md private; src/data/corpora/ untracked for now
+
+`TODO.md` joins REDO.md under # Private. `src/data/corpora/` (classviz
+signature captures) stays untracked while the post-enclosure corpus rebuild
+is in progress — capture files are working data until a corpus is accepted.
+(2026-07-15)
+
+---
+
 ### USAGE.md — v1.1 — delaycal version references 1.24 → 1.25
 
 Pipeline diagram and §4 heading follow the delaycal APP_VERSION re-sync.
