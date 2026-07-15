@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) · **Firmware:** v4.24 · **PC tools:** gui v4.13 · classviz v1.30 · delaycal v1.24 · **Coil:** v4 · **Operating profile:** cal_72_air_v3 (locked 2026-07-13)
-**Last bench update:** 2026-07-13 (shielded enclosure installed; fw v4.24 boundary-settling fix verified; cal_72_air_v3 locked)
-**Doc rev:** 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only). (Previous: 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.) Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) · **Firmware:** v4.26 · **PC tools:** gui v4.13 · classviz v1.32 · delaycal v1.24 · features v6 · targets v1 · **Coil:** v4 · **Operating profile:** cal_63_air_v2 (locked 2026-07-14)
+**Last bench update:** 2026-07-14 (fw v4.26 CC-write fix A/B-verified; soaked recal → cal_63_air_v2 locked)
+**Doc rev:** 1.8 (2026-07-15) — consolidation pass: fw v4.25 outlier-gate latch fix + v4.26 post-emit CC-write race fix, both bench-verified (§8, §17.8); 6 µs band dropped → 63-cell profiles, soaked recal locked as **cal_63_air_v2** (§10); threshold-noise-zone upper edge located ≈ 4.67 V on the 100 µs band, thermal operating-point drift mapped (§14.7, §17.8); structured target-metadata capture regime landed — `targets.csv` registry + `pimd_targets.py` v1, classviz v1.31→v1.32, features v6 (§15); `USAGE.md` added, `docs/` removed; §15 asset rows: scope baseline renamed `scope-pulse-baseline.jpeg`, four previous-epoch profile8b rows dropped. (Previous: 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only); 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -36,7 +36,9 @@ enclosure**, and fw v4.24 changed Mode 2 boundary-settling timing. Together thes
 most previously measured quantitative values (noise floors, drift rates, delay tables,
 target-session numbers). §3 and §17.1–17.6 are retained as flagged history — re-measure
 before relying on any pre-2026-07-13 figure. The ML signature corpus is to be rebuilt on
-the new hardware state.
+the new hardware state — the capture tooling for that rebuild landed 2026-07-14
+(`targets.csv` registry, classviz v1.32 structured capture, features v6; §15) and capture
+has begun under `cal_63_air_v2`.
 
 ---
 
@@ -250,6 +252,21 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   600 µs, 20 kHz: 750 µs vs the ~1 ms+ the band-to-band energy-step transient needs) —
   root cause of the first-heatmap-column noise, bench-verified fixed (§17.7). Sweep cost
   ≈ +12 ms on the 72-cell profile (~289 → ~301 ms refresh).
+- **Raw-read outlier gate is floored** *(fw v4.25, 2026-07-14)*: the v4.21 plausibility
+  gate now compares against `abs(mean_raw)` with an absolute floor
+  `OUTLIER_GATE_MIN = 164` raw14 counts (≈ 100 mV). Previously a near-zero or negative
+  rolling mean made the threshold ≤ 0, every sample was rejected and the substituted mean
+  froze the cell at its warm-up value forever — root cause of the "last cell flat at zero"
+  seen on the deepest-decay cell (§17.8).
+- **IRQs stay disabled through the freq/CC writes** *(fw v4.26, 2026-07-14)*:
+  `read_raw_bytes_hold()` extends the v4.21 critical section from the BUSY-synced SPI read
+  through the PWM freq/CC register writes (~2–6 µs on top of the ≤ 36 µs blackout), and
+  rolling-buffer bookkeeping moved after the hardware writes. Closes the race where the
+  W-record `print()` at sweep index 0 left USB-CDC IRQ bursts queued to fire between the
+  read and cell 2's `duty_u16` write — the RP2040 CC register is not double-buffered, so a
+  late write left one conversion sampling at the previous cell's compare point, poisoning
+  that cell's rolling average every sweep (index-locked σ anomaly, bench-verified fixed —
+  §17.8).
 - **SPI map:** SPI0 raw (SCKB GPIO2 / SDOB GPIO0 / BUSY GPIO15); SPI1 filtered (SCKA GPIO10 /
   SDOA GPIO8 / DRL GPIO9); SEL0 = GPIO12.
 
@@ -291,11 +308,46 @@ profile, so any future ML classifier is trained per profile and the table is the
 firmware↔ML contract. **Frames from different profile geometries must never be mixed in
 one dataset.**
 
-### Operating profile — `cal_72_air_v3` (locked 2026-07-13)
+### Operating profile — `cal_63_air_v2` (locked 2026-07-14)
+
+**7 bands × 9 delays = 63 cells**, averages 32 per cell, raw path (SDOB). This is
+`cal_72_air_v3`'s band plan and top-dense threshold ladder (all design principles below
+carry over) with two changes:
+
+- **The 6 µs / 50 kHz band is dropped** (first as `cal_63_air_v1`, 2026-07-14): bench
+  judgment — it carried no target information not already present in the other bands and
+  was notoriously noisy (its 20 µs period gave the tightest CC-write budget of all bands,
+  §17.8; likely a contributor to that reputation). The remaining 7 bands were
+  byte-identical to v3.
+- **Delays re-anchored fully warmed under fw v4.26** (v1 → v2, same cell geometry):
+  shifts of −56…+16 ns vs v1, heavy bands earliest — the thermal signature (decays arrive
+  earlier warm). This retired the drift that had pushed the 100 µs / 4.70 V cell onto the
+  ≈ 4.67 V upper edge of the §17.7 threshold noise zone (bench-confirmed fixed, §17.8).
+
+**Treat v2 as a new calibration epoch for corpus purposes** — same geometry as v1 but
+different delays; frames must never be mixed across profiles (contract above).
+
+| Band | Freq (kHz) | Pulse (µs) | Duty | Band share of sweep |
+|---|---|---|---|---|
+| 1 | 25.0 | 9.00 | 22.5 % | 4.1 % |
+| 2 | 20.0 | 13.44 | 26.9 % | 5.1 % |
+| 3 | 15.625 | 20.00 | 31.25 % | 6.5 % |
+| 4 | 10.0 | 30.00 | 30.0 % | 10.2 % |
+| 5 | 6.25 | 45.00 | 28.1 % | 16.3 % |
+| 6 | 4.0 | 67.20 | 26.9 % | 25.4 % |
+| 7 | 3.125 | 100.00 | 31.25 % | 32.5 % |
+
+Full-sweep refresh slightly under v3's ≈ 301 ms (one 5.8 ms band and one boundary-settle
+fewer). Full delay table lives in `src/data/profiles/cal_63_air_v2.json`;
+`cal_63_air_v1.json` (cold-anchored delays) and `cal_72_air_v3.json` are retained as
+superseded locked profiles.
+
+### Superseded — `cal_72_air_v3` (locked 2026-07-13)
 
 8 bands × 9 delays = 72 cells, **averages 32** per cell (raw floor ≈ 1400 µV / √32 ≈ 250 µV),
 raw path (SDOB). Calibrated post-enclosure with fw v4.24 (delaycal export
-`cal_20260713_210057`, renamed). Design principles:
+`cal_20260713_210057`, renamed). Superseded by `cal_63_air_v2` (above); the design
+principles established here still govern the operating profile:
 
 - **Pulse widths geometric ×≈1.5** (6 → 100 µs). Pulse width is a target-time-constant-selective
   excitation axis; constant-ratio spacing gives equal discrimination information per band and
@@ -312,8 +364,9 @@ raw path (SDOB). Calibrated post-enclosure with fw v4.24 (delaycal export
   zone, not an inherent top-of-curve problem). Targets deliberately straddle the measured
   **~4.45–4.65 V noise keep-out zone** (§17.7; mechanism unknown, §14) — 4.7 above it,
   4.4 below it.
-- **Supersedes `cal_72_air_v2`** (locked 2026-07-03, ×0.766 thresholds from 4.2 V — see
-  `PROFILE_cal_72_air_v2.md`). Frames are **not comparable** across the two (different
+- **Supersedes `cal_72_air_v2`** (locked 2026-07-03, ×0.766 thresholds from 4.2 V; its
+  standalone profile doc was removed with the pre-v4.26 data — the JSON remains in
+  `src/data/profiles/`). Frames are **not comparable** across the two (different
   threshold geometry, different hardware epoch; the profile is the firmware↔ML contract).
 
 | Band | Freq (kHz) | Pulse (µs) | Duty | Band share of sweep |
@@ -381,7 +434,10 @@ flash raises the noise floor ~10×.
 
 1. **Thermal drift.** Wider pulses heat the TX damping/gate resistors; the drive circuit
    drifts and the sensitive RX side drifts with it. *(Pre-enclosure numbers — re-measure,
-   the enclosure may have changed thermal behaviour.)*
+   the enclosure may have changed thermal behaviour.)* Post-enclosure signature (§17.8,
+   2026-07-14): heavy bands drift −20…−31 mV below their calibrated operating point,
+   monotonic with pulse width; light bands ≈ +9 mV high; warm recalibration moves delays
+   −56…+16 ns. Mitigation: calibrate fully soaked (cal_63_air_v2).
 2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path ~50 % noisier than USB;
    unresolved. *(Re-measure post-enclosure — shielding may have changed the picture.)*
 3. **General supply noise floor** (battery vs USB, flash penalty — partially mitigated).
@@ -400,7 +456,14 @@ flash raises the noise floor ~10×.
    (4.700 → 4.400 V, 37.5 mV steps) shows column σ elevated across roughly 4.45–4.65 V in
    nearly every band (up to ~2.2 mV) while both ends are clean (§17.7). Values above
    (4.7–4.9) and below (≤ 4.4) behave normally, so the zone is excluded from target lists
-   (§10) — but why that band of the decay is noisy is not understood.
+   (§10) — but why that band of the decay is noisy is not understood. 2026-07-14 (§17.8):
+   the zone's **upper edge is sharp and sits near ≈ 4.67 V** on the 100 µs band — a
+   4 mV operating-point shift (4.673 → 4.669 V) took the event rate 1 → 10 per session.
+   Events are quantized two-state (single samples of ±64 mV), suggesting a discrete
+   (ringing-phase-like) mechanism, not broadband. Follow-ups: fine-map 4.65–4.70 V on the
+   heavy bands; if the edge crowds 4.70 V warm, move the third threshold up (e.g. 4.75 V)
+   in the next profile rev. Watch item: ch9 (13.44 µs band, first cell) shows ~6 small
+   quantized events per session — band-head related, minor.
 8. **Post-enclosure re-measurement backlog.** Noise floors, drift rates, the settled
    top-of-decay level (~4.87–4.89 V observed on heavy bands — bears on the delaycal
    signal-detect ceiling, now 5.0 V), and the §17.4 delay-zone map all predate the
@@ -412,23 +475,24 @@ flash raises the noise floor ~10×.
 
 | File | Role |
 |------|------|
-| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.24**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23); time-floored Mode 2 boundary settling, SETTLE_FLOOR_US 3000 (v4.24) |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.26**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23); time-floored Mode 2 boundary settling, SETTLE_FLOOR_US 3000 (v4.24); outlier gate on abs(mean) with OUTLIER_GATE_MIN floor — no more latched cells (v4.25); IRQ hold through freq/CC writes via `read_raw_bytes_hold()` — CC-write race closed (v4.26) |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
-| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.30**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Training Session tab** (guided, marked capture runs); **Analysis tab** (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale); **Std Dev (rolling N) heatmap mode** (live noise monitor); live rate/burst readout; settings persistence |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.32**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Training Session tab** (guided, marked capture runs); **Analysis tab** (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale); **Std Dev (rolling N) heatmap mode** (live noise monitor); settledness-gated, glitch-excluding signature captures with cancel (v1.31); **registry-backed structured target-metadata capture** — target combo + placement fields from `pimd_targets.py`, `# mark_target:` session-dump lines, capture provenance (profile_sha8 / fw_version / supply), corpus CSVs to `src/data/corpora/` (v1.32); settings persistence |
 | `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.24**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); 3-d.p. voltage headers; profile export/import; thermal monitoring; zigzag auto-nudge (parallel or sequential) with ceiling latch + lock-on-pass; activity log; settings persistence. **Operational note:** signal-detect ceiling must be 5.0 V post-enclosure (§3 epoch note) |
-| `src/pimd_features.py` | Session-CSV → training-corpus feature extractor (**v5**, offline CLI). Corpus pipeline tool — previous-epoch corpus findings dropped; to be re-run on post-enclosure captures |
+| `src/pimd_features.py` | Session-CSV / gui_signatures-CSV → training-corpus builder (**v6**, offline CLI). Registry join (`target_id` + structured placement replace free text), hard geometry guard — one `(profile_name, profile_sha8)` per corpus build; direct-ingest path for classviz corpus CSVs; pre-v1.32 free-text inputs loudly rejected, no migration by design |
+| `src/pimd_targets.py` | Shared target-registry loader/validator (**v1**, CLI + library). Reads `src/data/training_lists/targets.csv`, collects all errors/warnings (ids, enums, numerics, dims order, mass plausibility); never writes the registry. Used by classviz (capture-time) and features (build-time) |
+| `src/data/training_lists/targets.csv` | Human-authored registry of 23 physical target objects — single source of target physical metadata (id, material, shape, dims, mass, …). Human-owned data: tooling reads and validates only |
+| `src/data/profiles/` | Locked calibration profiles (firmware↔ML contract, §10): **`cal_63_air_v2.json` — operating**; `cal_63_air_v1.json`, `cal_72_air_v3.json`, `cal_72_air_v2.json` superseded, retained |
+| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema) — post-enclosure corpus rebuild in progress |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` (sliders/QLineEdit fixed to match code, 2026-07-02) |
 | `References/schematic-v604.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
-| `References/scope-baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs 
+| `References/scope-pulse-baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs 
 | `References/GUI-target-example.jpg` | App baseline, Mode 1 v4.07, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
 | `References/GUI-steady-state-256-1024.jpg` | SoC steady-state reference capture — settled noise floor and thermal drift; Mode 1 at SoC conditions, first half DS 256 / second half DS 1024 |
 | `References/GUI-noise-comp.jpg` | GUI noise comparison — DS 256 vs DS 1024 side-by-side, Mode 1 at SoC conditions |
 | `References/early-discrimination-tests.JPEG` | Early discrimination test captures |
-| `References/profile8b-air.jpg` | Profile 8b heatmap — air / no target (72-cell baseline) |
-| `References/profile8b-copper-pipe.jpg` | Profile 8b heatmap — copper pipe target |
-| `References/profile8b-spanner.jpg` | Profile 8b heatmap — spanner target |
-| `References/profile8b-spanner-copper.jpg` | Profile 8b heatmap — spanner + copper pipe combined |
+| `USAGE.md` | Per-app usage guide — intent, operation and pipeline flow for the firmware and each PC tool (replaces the former `docs/` cheat sheets) |
 | `CHANGELOG.md` | Running change log — the source this DESIGN.md is consolidated from (logging conventions in `CLAUDE.md`); archive entries for previous consolidation passes are preserved below the marker line |
 | `DESIGN.md` | **This file** — project reference (specs, design, measured values); a curated snapshot consolidated from `CHANGELOG.md` |
 | `CLAUDE.md` | AI-agent working brief — how to behave when editing this repo (mindset, conventions, don'ts). Not project facts |
@@ -626,6 +690,40 @@ air floor. Key findings:
   5.0 V** (no code change; §3 epoch note, §15 delaycal row).
 - **cal_72_air_v3 locked** (§10): same band plan as v2, thresholds moved to the top-dense
   ladder 4.9/4.8/4.7/4.4/4.2/3.8/2.4/1.5/0.5 V straddling the keep-out zone.
+
+### 17.8 Acquisition-fix pair, noise-zone edge & cal_63 recal
+
+*2026-07-14 · fw v4.24 → v4.26 · classviz v1.31 → v1.32 · cal_63_air_v1 → v2 locked*
+
+- **fw v4.25 — latched-cell fix.** The deepest-decay cell (ch72 of cal_72_air_v3, 100 µs /
+  11.264 µs) sat flat at exactly zero regardless of target: the v4.21 outlier gate's
+  threshold floored to ≤ 0 for near-zero/negative rolling means, rejecting every sample
+  and freezing the cell at its warm-up value. Gate moved to `abs(mean)` + absolute floor
+  (§8); cell tracks targets again.
+- **6 µs band dropped → `cal_63_air_v1`** (63 cells): no unique target information,
+  notoriously noisy; other 7 bands byte-identical to v3 (§10).
+- **fw v4.26 — CC-write race closed, A/B verified.** The index-locked σ anomaly (band 1,
+  cell 2 — ~8× neighbours' σ, followed sweep position when the band plan changed) was
+  root-caused to post-emit USB-CDC IRQ bursts firing between the raw read and the CC
+  write (§8). A/B under cal_63_air_v1 (v4.25: 114 frames / v4.26: 134 frames, ~10 min
+  apart): **ch1 σ 3050 → 284 µV**; discrete corruption events 9 → 1 per session, the
+  residual matching the low-rate ~±13 mV background seen on other channels under both
+  firmwares. Occasional live flicker at that cell is this background — an order of
+  magnitude smaller and rarer than before.
+- **Noise-zone edge located.** Same A/B: ch56 (100 µs band, 4.70 V column) σ 605 →
+  2693 µV with quantized ±64 mV single-sample events, identical size under both firmwares
+  — a pre-existing bimodal phenomenon whose *rate* changed. Cause: thermal operating-point
+  drift (heavy bands −20…−31 mV, monotonic with pulse width; light bands +9 mV) carried
+  the cell from 4.673 to 4.669 V, across the §17.7 zone's **sharp upper edge ≈ 4.67 V**
+  (event rate 1 → 10 per session for a 4 mV shift). Two-state character suggests a
+  discrete mechanism (§14.7). Follow-ups in §14.7.
+- **`cal_63_air_v2` locked**: delaycal re-run fully soaked under v4.26; delays −56…+16 ns
+  vs v1 (heavy bands earliest — thermal signature). Retires the 4.70 V drift;
+  bench-confirmed. New calibration epoch for corpus purposes (§10).
+- **Corpus tooling landed** (2026-07-14): `targets.csv` registry (23 objects) +
+  `pimd_targets.py` v1, classviz v1.32 structured capture, features v6 (§15). First test
+  corpus captured to `src/data/corpora/`; the post-enclosure corpus rebuild ("audit
+  first, train second") is under way.
 
 ## 18. Change Log Consolidation Pass.
 

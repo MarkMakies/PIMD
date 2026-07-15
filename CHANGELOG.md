@@ -1,3 +1,37 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-07-15
+
+### USAGE.md — v1 — new single-file usage guide; docs/ directory removed
+
+New top-level USAGE.md: intent, operation and pipeline flow for every app —
+overview/pipeline, pimd_mcu (fw v4.26), pimd_gui (v4.13), pimd_delaycal
+(v1.24), pimd_classviz (v1.32), and the corpus pipeline (pimd_features v6 +
+pimd_targets v1) — one page per app, versions taken from current source
+headers. Replaces the five docs/ files (PIMD.md and the four per-tool cheat
+sheets), which had drifted stale (mcu doc said v4.23, classviz v1.15,
+delaycal v1.19, and the classviz sheet still described the removed Profile
+Builder tab); `git rm -r docs/`. Facts point to DESIGN.md rather than
+duplicating measured values. (2026-07-15)
+
+---
+
+### README.md — docs/ references repointed to USAGE.md
+
+Repository-layout block, protocol note (now points at DESIGN.md §9),
+Documentation list and the CC BY-SA licence scope updated from the removed
+docs/ directory to USAGE.md. (2026-07-15)
+
+---
+
+### .gitignore — private-notes ignore renamed MM-NOTES.md → REDO.md
+
+The private working-notes file was renamed by Mark; the ignore entry follows.
+The `assets` entry is retained (directory currently deleted, may be
+recreated). (2026-07-15)
+
+---
+
 ### src/pimd_corpus_check.py — v1.4 — loud rejection of the v1.32+ target-registry schema
 
 Companion to the target-metadata capture regime (pimd_classviz.py v1.32,
@@ -362,8 +396,6 @@ and the other two files in the change use that real path as the shared
 default. (2026-07-14)
 
 ---
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-13
 
