@@ -14,8 +14,9 @@ assets
 ML/
 
 # Previous-epoch ML tools — kept locally, not repo source (2026-07-13 epoch reset)
+# (pimd_corpus_check.py re-tracked 2026-07-15 — v1.4 is maintained against the
+#  current schema regime and its re-home onto the new columns is planned work)
 src/pimd_classify.py
-src/pimd_corpus_check.py
 src/pimd_v2_findings.py
 
 src/data/classviz_settings.json

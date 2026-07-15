@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.24
+# PIMD Delay Calibration v1.25
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -20,6 +20,9 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
+# v1.25 APP_VERSION constant re-synced with this header (was stuck at '1.19'
+#       while v1.20–v1.24 bumped the header only — the window title has been
+#       reporting v1.19 since). No functional change.
 # v1.24 Auto Nudge zigzag now respects the signal-detect ceiling (sp_signal_v,
 #       default 4.9 V): once a channel's monitored voltage reaches/exceeds it
 #       (no real signal — see v1.15), _auto_check_ceiling() latches
@@ -194,7 +197,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.19'
+APP_VERSION = '1.25'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),

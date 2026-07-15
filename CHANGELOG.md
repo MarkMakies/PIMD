@@ -1,3 +1,33 @@
+### USAGE.md — v1.1 — delaycal version references 1.24 → 1.25
+
+Pipeline diagram and §4 heading follow the delaycal APP_VERSION re-sync.
+(2026-07-15)
+
+---
+
+### src/pimd_corpus_check.py — v1.4 — re-tracked in the repo (.gitignore entry removed)
+
+Untracked 2026-07-13 as a previous-epoch ML tool alongside pimd_classify.py
+and pimd_v2_findings.py, but unlike those two it has been maintained since:
+v1.4 (2026-07-14) is a deliberate companion to the v1.32 target-registry
+schema change, and re-homing its consistency checks onto the new
+target_id/repeat_idx columns is planned work (bounded follow-up). A tool
+that is current-pipeline and documented in this changelog belongs in the
+repo. No code change — v1.4 content as-is; .gitignore comment notes the
+re-track. pimd_classify.py and pimd_v2_findings.py remain local-only.
+(2026-07-15)
+
+---
+
+### src/pimd_delaycal.py — v1.25 — APP_VERSION constant re-synced with header
+
+`APP_VERSION` was stuck at `'1.19'` while v1.20–v1.24 bumped the header
+changelog only, so the window title has been reporting v1.19 since. Constant
+now matches the header (bumped to 1.25 for this edit per convention). No
+functional change. (2026-07-15)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-15

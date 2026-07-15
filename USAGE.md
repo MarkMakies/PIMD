@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1
+# PIMD — Usage Guide (USAGE.md) v1.1
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,8 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.1 2026-07-15 delaycal v1.24 → v1.25 (APP_VERSION constant re-sync, no
+                functional change).
 v1  2026-07-15  Initial version. Replaces the docs/ directory (PIMD.md and the four
                 per-tool cheat sheets), consolidated into one file, one page per app,
                 versions corrected to current source (fw v4.26, classviz v1.32,
@@ -31,7 +33,7 @@ The toolchain forms one pipeline:
 ```
 mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       │  USB-serial, ASCII records (DESIGN §9)
-      ├─► src/pimd_delaycal.py (v1.24)      — calibrates sample delays,
+      ├─► src/pimd_delaycal.py (v1.25)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
       └─► src/pimd_classviz.py (v1.32)      — Mode 2 heatmap; loads & runs saved
@@ -117,7 +119,7 @@ UI fields display µs but the wire protocol is ns (conversion internal). Setting
 
 ---
 
-## 4. pimd_delaycal — delay calibration sweeper (v1.24)
+## 4. pimd_delaycal — delay calibration sweeper (v1.25)
 
 **Intent.** Produces the calibrated profiles everything else depends on. For each
 configured (freq, pulse) pair it finds the sample delay at which the decay crosses
