@@ -7,7 +7,7 @@ __pycache__/
 .claude
 
 # Private
-MM-NOTES.md
+REDO.md
 assets
 
 # ML chat-handover bundles (working docs, not repo source)

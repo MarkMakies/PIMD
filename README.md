@@ -60,8 +60,7 @@ DESIGN.md                  Full engineering reference (hardware, firmware, proto
 CHANGELOG.md               Project change log
 CLAUDE.md                  Contributor / agent conventions (version bumps, changelog discipline)
 
-docs/                      Per-tool cheat sheets + platform summary
-  pimd_gui.md  pimd_classviz.md  pimd_delaycal.md  pimd_mcu.md  PIMD.md
+USAGE.md                   Per-app usage guide — intent, operation and pipeline flow
 
 mcu/                       MicroPython firmware for the RP2040-Zero
   pimd_mcu.py  main.py
@@ -116,7 +115,7 @@ A32                            one 32-sample boxcar average (R record)
 ```
 
 > Protocol note (firmware v4.23+): the `*` command takes **freq in Hz, pulse/delay in ns**; the `D`
-> dynamic-profile command takes **µs**. See `docs/pimd_mcu.md` for the full contract.
+> dynamic-profile command takes **µs**. See `DESIGN.md` §9 for the full contract.
 
 ## Hardware
 
@@ -139,7 +138,7 @@ See **DESIGN.md §14** for the full open-problems list.
 ## Documentation
 
 - **[DESIGN.md](DESIGN.md)** — the complete engineering reference: measured operating envelope, coils, drive and receive chains, timing, serial protocol, power, invariants and curated test log. Self-contained; a new reader (human or agent) can pick up the project cold from it.
-- **[docs/](docs/)** — concise cheat sheets for each tool and the firmware, plus the platform summary.
+- **[USAGE.md](USAGE.md)** — per-app usage guide: intent, operation and pipeline flow for the firmware and each PC tool.
 - **Build diary** — the full chronological story, with photos and dead-ends: <https://makies.com.au/pulse-induction-metal-detector/>
 - **Video** — <https://www.youtube.com/@markmakies>
 
@@ -148,7 +147,7 @@ See **DESIGN.md §14** for the full open-problems list.
 This project uses two licences, matched to the kind of work:
 
 - **Code** (`src/`, `mcu/`) — **GNU GPL v3.0-or-later**. See [`LICENSE`](LICENSE).
-- **Hardware and documentation** (`Electronics/`, `docs/`, `DESIGN.md`, schematics, images) — **Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)**. See [`LICENSE-docs`](LICENSE-docs).
+- **Hardware and documentation** (`Electronics/`, `USAGE.md`, `DESIGN.md`, schematics, images) — **Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)**. See [`LICENSE-docs`](LICENSE-docs).
 
 Pulse Induction Metal Detector © 2022–2026 Mark Makies.
 
