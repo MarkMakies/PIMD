@@ -1,3 +1,17 @@
+### DESIGN.md — 1.8.2 — §15 rows for all seven previously uncited References/ images
+
+Human-directed §15 addition (read-only rule suspended for this task per
+Mark's instruction): `pcb-coil-baseline.JPEG` (pre-enclosure board-on-coil
+bench setup), `warmup-with-8ns-steps.jpg` (Mode 1 warm-up with 8 ns-grid
+delay steps ≈ 5 mV apart), `new-training-data.jpg` (classviz v1.32
+Analysis tab, first structured-regime capture session under cal_63_air_v1),
+`training-targets-v3.JPEG` (physical target set behind targets.csv), and
+`training-results-v1a/b/c` (previous-epoch cal_72_air_v2 17-target family/
+staircase/cosine-similarity analyses, flagged historical). Captions written
+from viewing the images, not guessed from filenames. (2026-07-15)
+
+---
+
 ### References/ — asset reorganisation committed (2026-07-13/15 epoch)
 
 All reference images now tracked in `References/` (the former `assets/`
