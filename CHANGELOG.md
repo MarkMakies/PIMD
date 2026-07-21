@@ -1,3 +1,63 @@
+### src/pimd_classviz.py — v1.33 — continuous training capture (Training group, space-bar air/target toggle)
+
+Reworks the Analysis tab's signature capture per Mark's bench feedback: the
+three capture buttons (Air before / Target / Air after, v1.26–v1.32) are
+replaced by a dedicated **Training** QGroupBox beside Signatures (which
+keeps the file row, placement metadata, readout and Save/Delete). Start
+Training begins a continuous session alternating AIR and TARGET phases,
+driven by a single Acquire button that the Space bar mirrors while the
+Analysis tab is visible (the app-wide eventFilter now dispatches: active
+Analysis training + Analysis tab visible → Acquire, otherwise the Training
+Session tab's step-advance, unchanged; starting either session while the
+other runs is refused). A colored status label steps yellow SETTLING →
+green COLLECTING → blue READY, reusing the v1.31 settle-gate metric
+verbatim; in READY the capture window is a rolling deque so Acquire always
+commits the freshest N clean frames, and losing settledness mid-window
+clears the whole window back to SETTLING (a disturbance contaminates the
+window — same philosophy as the gate itself). Each committed air anchor
+closes the pending target (air_after → stats snapshot → readout/Save) and
+immediately shifts to become air_before for the next target, so the
+operator just alternates place/remove target and taps Space — the app
+works out the before/after airs; the shift happens at acquire-time with a
+stats snapshot (not at save-time) because Save reads only the cached stats
++ placement widgets, making the flow race-free if the next target is
+acquired before Save is pressed. Save no longer resets a running session;
+Stop preserves an unsaved capture's readout so it can still be saved.
+Stats math (`_compute_sig_stats`), glitch exclusion (incl. the >20 %
+warning), the channel-count guard (DESIGN §11) and the CSV save path are
+untouched. Also: the Supply combo becomes battery/psu ('usb' removed —
+bench practice has moved off USB power; a persisted 'usb' setting silently
+falls back to battery), and the Repeat # spinbox + label tooltip now
+explains it is provenance-only metadata (same-placement disambiguator,
+auto-suggested count+1, not used in matching). Verified headless
+(QT_QPA_PLATFORM=offscreen) with injected frames: full air → target → air
+cycle produces correct stats and the slot shift, settle-loss clears the
+window, Start refusal without an editable file, Stop preserves unsaved
+stats, gating and Space dispatch behave. Not verified on hardware: live
+settle behaviour under real noise. (2026-07-21)
+
+---
+
+### src/pimd_features.py — v7 — doc-only: supply vocabulary battery|psu
+
+Companion to classviz v1.33 dropping the 'usb' supply option: the module
+docstring's `supply` column description now reads `battery|psu` and notes
+the column stays free text, so older corpora with `supply=usb` remain
+readable — no validation or behaviour change. TOOL_VERSION re-synced to v7.
+(2026-07-21)
+
+---
+
+### USAGE.md — v1.2 — §5 rewritten for classviz v1.33's Training group
+
+Pipeline diagram and §5/§6 headings follow classviz v1.32 → v1.33 and
+features v6 → v7; the Analysis-tab bullet now describes the continuous
+Training workflow (Start Training, space-bar Acquire, yellow/green/blue
+status ladder, shared air anchors) and the battery|psu supply vocabulary.
+(2026-07-21)
+
+---
+
 ### DESIGN.md — 1.8.2 — §15 rows for all seven previously uncited References/ images
 
 Human-directed §15 addition (read-only rule suspended for this task per
