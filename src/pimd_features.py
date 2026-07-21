@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v6
+# PIMD Feature Extractor (pimd_features.py) v7
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -13,6 +13,11 @@
 # corpus build never spans more than one profile geometry (DESIGN §10/§11),
 # and emits one row per (capture, cell) -- see the module docstring below for
 # the exact column list.
+#
+# v7 Doc-only: `supply` provenance vocabulary is now battery|psu (classviz
+#    v1.33 dropped the 'usb' option; bench practice has moved off USB power).
+#    The column remains free text -- no validation change, older corpora with
+#    supply=usb stay readable as-is.
 #
 # v6 Structured target-metadata capture regime. Replaces the free-text
 #    `target`/`distance_cm` columns with a registry-backed `target_id` plus
@@ -211,7 +216,7 @@ gui_signatures_*.csv, one row per (capture, cell)):
   profile_sha8     -- first 8 hex chars of SHA-256 of the profile JSON bytes as loaded
   fw_version       -- parsed from the board's V-identify reply
   tool_version     -- capturing tool's version string
-  supply           -- battery|usb
+  supply           -- battery|psu (free text; older corpora may contain 'usb')
 
 JOINED_CORPUS_HEADER = CORPUS_HEADER plus, from a registry join on target_id
 (blank for 'air'; pimd_features.py's own --out corpus build only):
@@ -243,7 +248,7 @@ import matplotlib.pyplot as plt
 import pimd_targets
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TOOL_VERSION = 'pimd_features.py v6'
+TOOL_VERSION = 'pimd_features.py v7'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling
