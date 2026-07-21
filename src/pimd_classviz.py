@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.32
+# PIMD Signature Visualiser (ClassViz) v1.33
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -16,6 +16,30 @@
 #
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
 # Board firmware: pimd_mcu.py v4.23+
+#
+# v1.33 Continuous training capture. The Analysis tab's three-button
+#       air-before/target/air-after quick-capture is replaced by a dedicated
+#       'Training' group (own QGroupBox beside Signatures, which keeps the
+#       file/metadata/readout/save rows): Start Training begins a continuous
+#       session alternating AIR and TARGET phases, driven by one Acquire
+#       button that the Space bar mirrors while the Analysis tab is visible
+#       (eventFilter dispatch; the Training Session tab's Space step-advance
+#       is unchanged elsewhere, and starting one session while the other
+#       runs is refused). Colored status label: yellow SETTLING (v1.31
+#       settle-gate metric, unchanged) -> green COLLECTING -> blue READY;
+#       in READY the window is a rolling deque so Acquire commits the
+#       freshest N clean frames, and losing settledness mid-window clears
+#       the whole window back to SETTLING. Each committed air anchor closes
+#       the pending target (air_after -> stats snapshot -> readout/Save) and
+#       immediately becomes air_before for the next target, so the operator
+#       just alternates place/remove target and taps Space; Save no longer
+#       resets a running session. Stats math, glitch exclusion (incl. the
+#       >20% warning), channel-count guard and the Save/CSV path are
+#       untouched. Also: Supply combo is now battery/psu ('usb' removed --
+#       bench practice has moved off USB power; a persisted 'usb' setting
+#       falls back to battery), and the Repeat # spinbox+label tooltip now
+#       explains it's provenance-only metadata (same-placement
+#       disambiguator, auto-suggested count+1, not used in matching).
 #
 # v1.32 Structured target-metadata capture regime. The Analysis tab's
 #       free-text target field + distance_cm spinbox are replaced by a
@@ -515,7 +539,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.32'
+APP_VERSION = '1.33'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -531,7 +555,7 @@ SESSIONS_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'd
 TRAINING_LISTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'training_lists')
 CORPORA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'corpora')
 TARGETS_REGISTRY_PATH = pimd_targets.DEFAULT_REGISTRY_PATH   # single source of truth
-SUPPLY_CHOICES = ['battery', 'usb']
+SUPPLY_CHOICES = ['battery', 'psu']
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
 
@@ -618,6 +642,7 @@ class MainWindow(QMainWindow):
     MY_GREEN  = 'background-color: rgb(143, 240, 164);'
     MY_YELLOW = 'background-color: rgb(249, 240, 107);'
     MY_RED    = 'background-color: rgb(246,  97,  81);'
+    MY_BLUE   = 'background-color: rgb(153, 193, 241);'
 
     def __init__(self):
         super().__init__()
@@ -731,14 +756,17 @@ class MainWindow(QMainWindow):
         self._targets        = {}    # dict[target_id -> pimd_targets.Target]
         self._target_issues   = []
 
-        # Analysis tab — signature capture (air-before / target / air-after).
-        # A second, independent capture channel from _capturing/_capture_buf
-        # (which stay hard-wired to the Heatmap tab's "Capture baseline").
+        # Analysis tab — continuous training capture (v1.33). A second,
+        # independent capture channel from _capturing/_capture_buf (which stay
+        # hard-wired to the Heatmap tab's "Capture baseline"). One session
+        # alternates AIR/TARGET phases; each committed air anchor is both
+        # air_after for the previous target and air_before for the next.
         self._sig_capture_n    = pimd_features.MIN_CENTRAL_FRAMES
-        self._sig_capturing    = False
-        self._sig_capture_slot = None   # 'air_before' | 'target' | 'air_after'
-        self._sig_capture_buf  = []     # list[(ts, raw_uV_ndarray)] while self._sig_capturing
-        self._sig_wait_settle  = False  # True between button press and settledness gate opening (v1.31)
+        self._analysis_training_active = False
+        self._sig_train_phase  = 'air'       # 'air' | 'target'
+        self._sig_train_status = 'settling'  # 'settling' | 'collecting' | 'ready'
+        self._sig_train_buf    = None        # deque(maxlen=N) of (ts, raw_uV.copy()); rolls in 'ready'
+        self._sig_train_last_style = None    # stylesheet churn guard for the status label
         self._sig_glitch_skipped = 0    # glitch frames excluded from the current window (v1.31)
         self._sig_air_before   = None   # {'t_seconds':(n,), 'frames_mV':(n,n_channels), 'n_frames':int}
         self._sig_air_after    = None   # same shape, optional
@@ -931,7 +959,7 @@ class MainWindow(QMainWindow):
             self._n_bands, self._n_cells))
         row1.addWidget(self.header_label, stretch=1)
 
-        # Session-level supply (DESIGN §12 — battery/USB noise floor differs
+        # Session-level supply (DESIGN §12 — battery/PSU noise floor differs
         # and can't be auto-detected). Not per-capture: shared by the
         # Analysis-tab quick-capture save path and the Training/Analysis
         # session mark-writing path.
@@ -951,7 +979,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
         self.tabs.addTab(self._build_stats_tab(),   'Stats')
         self.tabs.addTab(self._build_training_session_tab(), 'Training Session')
-        self.tabs.addTab(self._build_analysis_tab(), 'Analysis')
+        self._analysis_tab_index = self.tabs.addTab(self._build_analysis_tab(), 'Analysis')
         layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
@@ -1825,6 +1853,7 @@ class MainWindow(QMainWindow):
         top_v.addLayout(self._build_analysis_ctrl_row_a())
         left_v.addWidget(top_box)
         left_v.addWidget(self._build_analysis_signatures_group())
+        left_v.addWidget(self._build_analysis_training_group())
         left_v.addWidget(self._build_analysis_heatmap_group(), stretch=1)
 
         # Right column: row1 (strips | chart2 side by side) + 8-grid + 9-grid.
@@ -1882,13 +1911,7 @@ class MainWindow(QMainWindow):
         self._build_sig_row2_capture_inputs(v)
         self._build_sig_row3_readout_save(v)
         self._build_sig_row4_session(v)
-        self._sig_capture_buttons = {
-            'air_before': self.pb_sig_air_before,
-            'target':     self.pb_sig_target,
-            'air_after':  self.pb_sig_air_after,
-        }
         self._update_sig_mode_label()
-        self._update_sig_capture_gating()
         self._update_sig_session_status_label()
         return box
 
@@ -1998,13 +2021,19 @@ class MainWindow(QMainWindow):
         setattr(self, '{0}_offset_y_mm'.format(prefix), offset_y_mm)
         row_c.addWidget(offset_y_mm)
 
-        row_c.addWidget(QLabel('Repeat #:'))
+        repeat_tip = (
+            'Provenance metadata only — distinguishes repeated captures of the '
+            'same placement tuple (target, distance, axes, offsets, medium) so '
+            'they don\'t collide as one signature in the corpus CSV. '
+            'Auto-suggested as count+1 from the open file\'s existing captures; '
+            'editable. Not used in any matching/classification math.')
+        lbl_repeat = QLabel('Repeat #:')
+        lbl_repeat.setToolTip(repeat_tip)
+        row_c.addWidget(lbl_repeat)
         repeat_idx = QSpinBox()
         repeat_idx.setRange(1, 999)
         repeat_idx.setValue(1)
-        repeat_idx.setToolTip(
-            'Auto-increments when the same (target, distance, axis, offset, medium) '
-            'tuple is captured again in this session; editable.')
+        repeat_idx.setToolTip(repeat_tip)
         setattr(self, '{0}_repeat_idx'.format(prefix), repeat_idx)
         row_c.addWidget(repeat_idx)
         layout.addLayout(row_c)
@@ -2127,11 +2156,42 @@ class MainWindow(QMainWindow):
         row_reload.addStretch(1)
         v.addLayout(row_reload)
 
+    def _build_analysis_training_group(self):
+        """Training group (v1.33) — continuous space-bar-driven air/target
+        toggle. Replaces the v1.31/1.32 three-button air-before/target/
+        air-after quick-capture; the settle gate, glitch exclusion and stats
+        math are unchanged, only the operator flow is new."""
+        box = QGroupBox('Training')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+
+        row_a = QHBoxLayout()
+        self.pb_sig_train_start = QPushButton('Start Training')
+        self.pb_sig_train_start.setCheckable(True)
+        self.pb_sig_train_start.toggled.connect(self._on_sig_train_start_toggled)
+        row_a.addWidget(self.pb_sig_train_start)
+
+        self.pb_sig_train_acquire = QPushButton('Acquire (Space)')
+        self.pb_sig_train_acquire.clicked.connect(self._on_sig_train_acquire)
+        self.pb_sig_train_acquire.setToolTip(
+            'Commits the freshest N clean settled frames as the current '
+            'phase\'s capture. Only acts when the indicator is blue (READY). '
+            'The Space bar does the same while the Analysis tab is visible.')
+        row_a.addWidget(self.pb_sig_train_acquire)
+
+        self.lbl_sig_train_status = QLabel('Idle — press Start Training')
+        row_a.addWidget(self.lbl_sig_train_status, stretch=1)
+        v.addLayout(row_a)
+
         row_b = QHBoxLayout()
         row_b.addWidget(QLabel('Frames:'))
         self.sp_sig_capture_n = QSpinBox()
         self.sp_sig_capture_n.setRange(10, 2000)
         self.sp_sig_capture_n.setValue(self._sig_capture_n)
+        self.sp_sig_capture_n.setToolTip(
+            'Frames per capture window. Applied at the next phase change or '
+            'settle-loss restart, not mid-window.')
         row_b.addWidget(self.sp_sig_capture_n)
 
         row_b.addWidget(QLabel('Settle ≤ (mV):'))
@@ -2141,26 +2201,19 @@ class MainWindow(QMainWindow):
         self.sp_sig_settle_mv.setSingleStep(0.1)
         self.sp_sig_settle_mv.setValue(1.0)
         self.sp_sig_settle_mv.setToolTip(
-            'Settledness gate: after a capture button is pressed, collection only '
-            'starts once the mean per-channel rolling std dev (over the Stats tab\'s '
-            '"Std dev N" window — same metric as the Training tab\'s Settledness) is '
-            'at or below this, so target/air transitions and the firmware\'s ~10 s '
-            'rolling-average ramp can\'t enter the window. Raise to 50 to disable.')
+            'Settledness gate: collection only runs while the mean per-channel '
+            'rolling std dev (over the Stats tab\'s "Std dev N" window — same '
+            'metric as the Training tab\'s Settledness) is at or below this, so '
+            'target/air transitions and the firmware\'s ~10 s rolling-average '
+            'ramp can\'t enter the window. Raise to 50 to disable.')
         row_b.addWidget(self.sp_sig_settle_mv)
 
-        self.pb_sig_air_before = QPushButton(self._SIG_CAPTURE_LABELS['air_before'])
-        self.pb_sig_air_before.clicked.connect(lambda: self._start_sig_capture('air_before'))
-        row_b.addWidget(self.pb_sig_air_before)
-
-        self.pb_sig_target = QPushButton(self._SIG_CAPTURE_LABELS['target'])
-        self.pb_sig_target.clicked.connect(lambda: self._start_sig_capture('target'))
-        row_b.addWidget(self.pb_sig_target)
-
-        self.pb_sig_air_after = QPushButton(self._SIG_CAPTURE_LABELS['air_after'])
-        self.pb_sig_air_after.clicked.connect(lambda: self._start_sig_capture('air_after'))
-        row_b.addWidget(self.pb_sig_air_after)
-        row_b.addStretch(1)
+        self.lbl_sig_train_phase = QLabel('')
+        row_b.addWidget(self.lbl_sig_train_phase, stretch=1)
         v.addLayout(row_b)
+
+        self._update_sig_capture_gating()
+        return box
 
     def _build_sig_row3_readout_save(self, v):
         row_a = QHBoxLayout()
@@ -3028,75 +3081,183 @@ class MainWindow(QMainWindow):
 
     # -- Signature capture (air-before / target / air-after) ----------------
 
-    _SIG_CAPTURE_LABELS = {
-        'air_before': 'Capture Air (before)',
-        'target':     'Capture Target',
-        'air_after':  'Capture Air (after)',
-    }
+    # -- Training state machine (v1.33) ---------------------------------
+    # One continuous session alternates AIR/TARGET capture phases; each
+    # committed air anchor closes the previous target (air_after) and opens
+    # the next (air_before). Status ladder within a phase: 'settling'
+    # (yellow) -> 'collecting' (green) -> 'ready' (blue; the deque keeps
+    # rolling so Acquire commits the freshest N clean frames). Settle loss
+    # mid-window clears the buffer back to 'settling' -- a disturbance
+    # contaminates the whole window (same philosophy as the v1.31 gate).
 
-    def _start_sig_capture(self, slot):
-        if self._sig_capturing:
-            # Clicking the active slot's button cancels its capture (v1.31);
-            # clicks on other slots are ignored while one is running.
-            if slot == self._sig_capture_slot:
-                self._cancel_sig_capture()
+    def _on_sig_train_start_toggled(self, checked):
+        if not checked:
+            # Stop: keep any unsaved stats/readout so Save still works.
+            self._reset_sig_capture_state(preserve_stats=True)
             return
-        self._sig_capture_n      = self.sp_sig_capture_n.value()
-        self._sig_capture_slot   = slot
-        self._sig_capture_buf    = []
-        self._sig_capturing      = True
-        self._sig_wait_settle    = True   # settledness gate opens collection (v1.31)
-        self._sig_glitch_skipped = 0
-        btn = self._sig_capture_buttons[slot]
-        btn.setText('Settling…')
-        btn.setStyleSheet(self.MY_YELLOW)
-
-    def _cancel_sig_capture(self):
-        slot = self._sig_capture_slot
-        self._sig_capturing    = False
-        self._sig_wait_settle  = False
-        self._sig_capture_slot = None
-        self._sig_capture_buf  = []
-        if slot is not None:
-            btn = self._sig_capture_buttons[slot]
-            btn.setText(self._SIG_CAPTURE_LABELS[slot])
-            btn.setStyleSheet('')
-        self._update_sig_capture_gating()
-
-    def _finalise_sig_capture(self):
-        ts_arr  = np.array([ts for ts, _ in self._sig_capture_buf], dtype=float)
-        raw_arr = np.array([r for _, r in self._sig_capture_buf], dtype=float)
-        entry = {'t_seconds': ts_arr, 'frames_mV': raw_arr / 1000.0, 'n_frames': len(ts_arr)}
-        slot = self._sig_capture_slot
-        if slot == 'air_before':
-            self._sig_air_before = entry
-        elif slot == 'air_after':
-            self._sig_air_after = entry
-        else:
-            self._sig_target = entry
-        btn = self._sig_capture_buttons[slot]
-        btn.setText(self._SIG_CAPTURE_LABELS[slot])
-        btn.setStyleSheet('')
-        self._sig_capturing    = False
-        self._sig_capture_slot = None
-        self._sig_capture_buf  = []
-        if self._sig_glitch_skipped > 0.2 * self._sig_capture_n:
-            self.statusBar().showMessage(
-                '⚠ signature capture ({0}): {1} glitch frame(s) excluded while '
-                'filling the {2}-frame window — check for interference'.format(
-                    slot, self._sig_glitch_skipped, self._sig_capture_n))
-        self._update_sig_readout()
-        self._update_sig_capture_gating()
-
-    def _reset_sig_capture_state(self):
+        refuse = None
+        if self._editable_sig_path is None:
+            refuse = 'Training: open a signature file first (New file… / Open for editing…)'
+        elif self._training_current_row is not None:
+            refuse = 'Training: a guided Training Session is running — stop it first'
+        if refuse is not None:
+            self.pb_sig_train_start.blockSignals(True)
+            self.pb_sig_train_start.setChecked(False)
+            self.pb_sig_train_start.blockSignals(False)
+            self.statusBar().showMessage(refuse)
+            return
         self._sig_air_before = None
         self._sig_air_after  = None
         self._sig_target     = None
         self._sig_last_stats = None
-        for slot, btn in getattr(self, '_sig_capture_buttons', {}).items():
-            btn.setText(self._SIG_CAPTURE_LABELS[slot])
-            btn.setStyleSheet('')
         self._update_sig_readout()
+        self._analysis_training_active = True
+        self._sig_train_phase = 'air'
+        self.pb_sig_train_start.setText('Stop Training')
+        self._sig_train_restart_buffer()
+        self._update_sig_capture_gating()
+
+    def _on_sig_train_acquire(self):
+        """Commits the freshest N clean settled frames as the current phase's
+        capture. Bound to the Acquire button and (via eventFilter) Space."""
+        if not self._analysis_training_active:
+            return
+        if self._sig_train_status != 'ready':
+            self.statusBar().showMessage(
+                'Training: not ready — wait for the blue READY state')
+            return
+        buf = self._sig_train_buf
+        ts_arr  = np.array([ts for ts, _ in buf], dtype=float)
+        raw_arr = np.array([r for _, r in buf], dtype=float)
+        entry = {'t_seconds': ts_arr, 'frames_mV': raw_arr / 1000.0, 'n_frames': len(ts_arr)}
+        if self._sig_glitch_skipped > 0.2 * buf.maxlen:
+            self.statusBar().showMessage(
+                '⚠ training acquire ({0}): {1} glitch frame(s) excluded while '
+                'filling the {2}-frame window — check for interference'.format(
+                    self._sig_train_phase, self._sig_glitch_skipped, buf.maxlen))
+        if self._sig_train_phase == 'air':
+            if self._sig_target is not None:
+                # This air closes the pending target: compute + display a
+                # stats *snapshot*, then immediately shift the slots so the
+                # same anchor opens the next target. Save reads only
+                # _sig_last_stats + placement widgets, so shifting here (not
+                # at save time) is race-free even if the operator acquires
+                # the next target before pressing Save.
+                self._sig_air_after = entry
+                had_unsaved = self._sig_last_stats is not None
+                stats = self._compute_sig_stats()
+                self._sig_last_stats = stats
+                self._set_sig_readout_from_stats(stats)
+                self._sig_air_before = entry
+                self._sig_target     = None
+                self._sig_air_after  = None
+                if had_unsaved:
+                    self.statusBar().showMessage(
+                        'Training: previous unsaved capture replaced')
+            else:
+                self._sig_air_before = entry
+            self._sig_train_phase = 'target'
+        else:
+            self._sig_target = entry
+            self._sig_train_phase = 'air'
+        self._sig_train_restart_buffer()
+        self._update_sig_capture_gating()
+
+    def _sig_train_restart_buffer(self):
+        """New capture window: fresh deque (picks up a changed Frames value),
+        zeroed glitch counter, back to the settling gate."""
+        self._sig_capture_n = self.sp_sig_capture_n.value()
+        self._sig_train_buf = deque(maxlen=self._sig_capture_n)
+        self._sig_glitch_skipped = 0
+        self._sig_train_status = 'settling'
+        self._update_sig_train_indicator()
+
+    def _current_settle_mv(self):
+        """Mean per-channel rolling std in mV over the Stats tab's window --
+        the v1.31 settle-gate metric, unchanged. None if <2 frames buffered
+        (treated as not settled)."""
+        n_win  = self.sp_stats_window.value()
+        recent = list(self._rolling_buf)[-n_win:]
+        if len(recent) < 2:
+            return None
+        mat = np.array([arr for _, arr in recent], dtype=float)
+        return float(mat.std(0).mean()) / 1000.0
+
+    def _sig_train_ingest(self, now, raw, glitch_mask):
+        """Per-frame training logic, called from process_packet."""
+        settle_mv = self._current_settle_mv()
+        settled = settle_mv is not None and settle_mv <= self.sp_sig_settle_mv.value()
+        if not settled:
+            if self._sig_train_status != 'settling':
+                # Settle lost mid-window: the whole window is contaminated.
+                self._sig_train_buf.clear()
+                self._sig_glitch_skipped = 0
+                self._sig_train_status = 'settling'
+            self._update_sig_train_indicator(settle_mv)
+            return
+        if glitch_mask.any():
+            # mirrors pimd_features.drop_flagged: glitch frames never enter
+            # a capture window
+            self._sig_glitch_skipped += 1
+        else:
+            self._sig_train_buf.append((now, raw.copy()))
+        full = len(self._sig_train_buf) >= self._sig_train_buf.maxlen
+        self._sig_train_status = 'ready' if full else 'collecting'
+        self._update_sig_train_indicator(settle_mv)
+
+    def _update_sig_train_indicator(self, settle_mv=None):
+        """Renders the colored status label + phase instruction. Stylesheet
+        is only touched on state change; text may update every frame."""
+        if not self._analysis_training_active:
+            self.lbl_sig_train_status.setText('Idle — press Start Training')
+            self.lbl_sig_train_phase.setText('')
+            style = ''
+        elif self._sig_train_status == 'settling':
+            self.lbl_sig_train_status.setText(
+                'SETTLING' + ('' if settle_mv is None else ' {0:.3f} mV'.format(settle_mv)))
+            style = self.MY_YELLOW
+        elif self._sig_train_status == 'collecting':
+            self.lbl_sig_train_status.setText('COLLECTING {0}/{1}'.format(
+                len(self._sig_train_buf), self._sig_train_buf.maxlen))
+            style = self.MY_GREEN
+        else:
+            self.lbl_sig_train_status.setText(
+                'READY — Space to acquire ({0})'.format(self._sig_train_phase))
+            style = self.MY_BLUE
+        if style != self._sig_train_last_style:
+            self.lbl_sig_train_status.setStyleSheet(style)
+            self._sig_train_last_style = style
+        if self._analysis_training_active:
+            if self._sig_train_phase == 'target':
+                instr = 'Place target now — edit metadata while it settles'
+            elif self._sig_target is not None:
+                instr = 'Remove target now — next air acquire closes the signature'
+            else:
+                instr = 'Keep coil clear — leading air capture'
+            self.lbl_sig_train_phase.setText(instr)
+
+    def _reset_sig_capture_state(self, preserve_stats=False):
+        """Ends any training session and clears the capture slots. With
+        preserve_stats, the last computed signature (readout + Save) survives
+        a Stop so an unsaved capture can still be saved."""
+        self._analysis_training_active = False
+        self._sig_train_phase    = 'air'
+        self._sig_train_status   = 'settling'
+        self._sig_train_buf      = None
+        self._sig_glitch_skipped = 0
+        self._sig_air_before = None
+        self._sig_air_after  = None
+        self._sig_target     = None
+        pb = getattr(self, 'pb_sig_train_start', None)
+        if pb is not None:
+            pb.blockSignals(True)
+            pb.setChecked(False)
+            pb.blockSignals(False)
+            pb.setText('Start Training')
+            self._update_sig_train_indicator()
+        if not preserve_stats:
+            self._sig_last_stats = None
+            self._update_sig_readout()
         self._update_sig_capture_gating()
 
     def _compute_sig_stats(self):
@@ -3143,7 +3304,13 @@ class MainWindow(QMainWindow):
                     out_of_range=(center_t < anchor_ts[0] or center_t > anchor_ts[-1]))
 
     def _update_sig_readout(self):
-        self._sig_last_stats = stats = self._compute_sig_stats()
+        self._sig_last_stats = self._compute_sig_stats()
+        self._set_sig_readout_from_stats(self._sig_last_stats)
+
+    def _set_sig_readout_from_stats(self, stats):
+        """Renders the readout label from a stats dict (or None). Split from
+        _update_sig_readout so the training air-acquire can display a stats
+        snapshot after the slots have already been shifted (v1.33)."""
         if stats is None:
             self.lbl_sig_readout.setText('Amp: —  Mean|Δ|: —  Splithalf: —  SNR: —  Quality: —')
             self.lbl_sig_readout.setStyleSheet('')
@@ -3161,6 +3328,8 @@ class MainWindow(QMainWindow):
             self.lbl_sig_readout.setStyleSheet('' if stats['quality'] == 'ok' else self.MY_YELLOW)
 
     def _update_sig_capture_gating(self):
+        if not hasattr(self, 'pb_sig_train_acquire'):
+            return   # mid-build: the Training group runs this again once complete
         has_file = self._editable_sig_path is not None
         self.sig_target.setEnabled(has_file)
         self.sig_distance_mm.setEnabled(has_file)
@@ -3173,9 +3342,8 @@ class MainWindow(QMainWindow):
         self.sig_notes.setEnabled(has_file)
         self.sp_sig_capture_n.setEnabled(has_file)
         self.sp_sig_settle_mv.setEnabled(has_file)
-        self.pb_sig_air_before.setEnabled(has_file and not self._sig_capturing)
-        self.pb_sig_target.setEnabled(has_file and not self._sig_capturing and self._sig_air_before is not None)
-        self.pb_sig_air_after.setEnabled(has_file and not self._sig_capturing and self._sig_target is not None)
+        self.pb_sig_train_start.setEnabled(has_file)
+        self.pb_sig_train_acquire.setEnabled(self._analysis_training_active)
         stats = self._sig_last_stats
         self.pb_sig_save.setEnabled(
             has_file and stats is not None and 'error' not in stats
@@ -3370,7 +3538,14 @@ class MainWindow(QMainWindow):
             for row in rows:
                 writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
         self._reload_editable_signature_list()
-        self._reset_sig_capture_state()
+        if self._analysis_training_active:
+            # Keep the training session running: the slots were already
+            # shifted at air-acquire, so recomputing correctly yields dashes
+            # (and Save disabled) until the next signature completes.
+            self._update_sig_readout()
+            self._update_sig_capture_gating()
+        else:
+            self._reset_sig_capture_state()
         self.statusBar().showMessage(
             "Saved '{0}' ({1} rows) to {2}".format(capture_id, len(rows), self._editable_sig_path))
 
@@ -3619,35 +3794,10 @@ class MainWindow(QMainWindow):
             if n >= self._capture_n:
                 self._finalise_capture()
 
-        # Analysis tab signature capture -- independent of the baseline
+        # Analysis tab training capture -- independent of the baseline
         # capture above (self._capturing/_capture_buf stay Heatmap-tab-only).
-        if self._sig_capturing:
-            btn = self._sig_capture_buttons[self._sig_capture_slot]
-            if self._sig_wait_settle:
-                # Settledness gate (v1.31, mirrors pimd_features' settle trim):
-                # hold the window closed until the rolling std is below the
-                # threshold, so the firmware's 32-deep rolling-average ramp
-                # after a target change can't inflate splithalf_floor.
-                n_win  = self.sp_stats_window.value()
-                recent = list(self._rolling_buf)[-n_win:]
-                if len(recent) >= 2:
-                    mat = np.array([arr for _, arr in recent], dtype=float)
-                    settle_mv = float(mat.std(0).mean()) / 1000.0
-                    if settle_mv <= self.sp_sig_settle_mv.value():
-                        self._sig_wait_settle = False
-                    else:
-                        btn.setText('Settling… {0:.3f} mV'.format(settle_mv))
-            if not self._sig_wait_settle:
-                if glitch_mask.any():
-                    # mirrors pimd_features.drop_flagged: glitch frames never
-                    # enter a capture window; keep filling until N clean frames
-                    self._sig_glitch_skipped += 1
-                else:
-                    self._sig_capture_buf.append((now, raw.copy()))
-                n = len(self._sig_capture_buf)
-                btn.setText('Capturing {0}/{1}…'.format(n, self._sig_capture_n))
-                if n >= self._sig_capture_n:
-                    self._finalise_sig_capture()
+        if self._analysis_training_active:
+            self._sig_train_ingest(now, raw, glitch_mask)
 
         if self._continuous_log:
             raw_nxn = raw.reshape(self._n_bands, self._n_cells)
@@ -4394,18 +4544,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
         """App-wide filter (installed on the QApplication instance) so the
-        Training Session tab's Space-bar step-advance works regardless of
-        focus, and is swallowed before widgets that already consume Space
-        (e.g. QPushButton's Space-to-click). Suppressed whenever a text-entry
-        widget has focus (including a QTableWidget cell mid-edit, which uses
-        an embedded QLineEdit)."""
+        Space-bar actions work regardless of focus, and are swallowed before
+        widgets that already consume Space (e.g. QPushButton's
+        Space-to-click). Suppressed whenever a text-entry widget has focus
+        (including a QTableWidget cell mid-edit, which uses an embedded
+        QLineEdit). Dispatch (v1.33): an active Analysis-tab training session
+        gets Space as Acquire while that tab is visible; otherwise Space
+        stays the Training Session tab's step-advance."""
         if event.type() == QEvent.Type.KeyPress:
             if isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox)):
                 return super().eventFilter(obj, event)
             if event.isAutoRepeat():
                 return True   # swallow held-key repeats
             if event.key() == Qt.Key.Key_Space:
-                self._on_training_space()
+                if self._analysis_training_active and \
+                        self.tabs.currentIndex() == self._analysis_tab_index:
+                    self._on_sig_train_acquire()
+                else:
+                    self._on_training_space()
                 return True
         return super().eventFilter(obj, event)
 
