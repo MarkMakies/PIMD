@@ -5,95 +5,21 @@
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop
 #
-# v4.13 Settings persistence: port, freq, pulse, delay, downsample factor,
-#       avg_n, Boxcar/Raw-Avg toggle state, V/div and H/div button-group
-#       selection, and window geometry (size + position) are saved to
-#       data/gui_settings.json on close and restored at startup.
-#       _load_settings() is called at the end of my_init() so it overrides
-#       apply_soc_defaults(); _save_settings() is the first call in
-#       closeEvent() so geometry is captured before the window is hidden.
-# v4.12 (a) A<n> serial backlog fix: closeEvent and start_stop stop path now
-#       call serial.clear(Direction.Output) before sending 'E', discarding any
-#       queued A<n> commands accumulated in the write buffer. waitForBytesWritten
-#       increased from 200 ms to 500 ms. Root cause: at slow rates (e.g. 6250 Hz /
-#       DS 256) the firmware takes ~245 ms per A256, barely within the 250 ms poll
-#       timer — any latency caused a growing backlog, delaying 'E' by 20–30 s.
-#       (b) User-controlled Avg n field (default 64) added to the left sidebar
-#       between the Boxcar and Raw Avg toggles. Orange highlight if n > freq/30,
-#       meaning A<n> would exceed 80 % of the 250 ms poll timer. Warning also
-#       re-evaluated on every frequency change.
-#       (c) App no longer auto-connects on startup — consistent with pimd_classviz
-#       and pimd_delaycal (user presses ENT / Connect explicitly).
-#       (d) 10 uV, 20 uV, 50 uV and 100 uV V/div options removed from the left
-#       sidebar to free space for the new Avg n field; minimum V/div is now 200 uV.
-#       v_div arrow-key clamp updated accordingly (−11 instead of −15).
-# v4.11 serial protocol updated to match MCU v4.23: * command now sends
-#       freq in Hz (integer) and pulse/delay in ns (integer); * record parsing
-#       updated accordingly. Title standardised to 'PIMD GUI v<N> by Mark Makies'.
-# v4.10 read_from_serial: drain all buffered lines first, then dispatch — only
-#       the last * packet per readyRead call gets the full chart/UI update; earlier
-#       ones still write to file (skip_display=True path). Eliminates progressive
-#       display lag when the event loop can't keep up with 39 SPS chart redraws.
-#       process_packet: add skip_display=False parameter; early-return after file
-#       write when skip_display is True. start_stop / closeEvent / setup_file_logging:
-#       set self.file = None after close() — fixes "File write error, probably last
-#       packet after stop" spam (closed file object is truthy; if self.file: passed
-#       even after close, causing ValueError on write).
-# v4.08 (a) lFreq/lPulse/lSample QLineEdit for direct precision entry: freq in
-#       exact Hz (integer), pulse/delay to 3 dp in µs; orange highlight when
-#       not on the 8 ns PWM grid or not a clean 125 MHz divisor. QLineEdit is
-#       authoritative for the * command; sliders for coarse adjustment.
-#       (b) Frequency slider re-ranged 0–17: each position is one of 18 clean
-#       125 MHz divisors from 1–50 kHz (CLEAN_FREQS_KHZ list). Pulse/delay
-#       sliders re-ranged in 8 ns counts (1 unit = 8 ns = 0.008 µs): slPulse
-#       625–5000 (5–40 µs), slSample 625–3750 (5–30 µs). All slider positions
-#       are inherently on-grid; +/- buttons step by one unit.
-#       (c) Boxcar and Raw Avg buttons default ON.
-#       (d) read_from_serial drains buffer in a while-canReadLine loop (was
-#       single-line read → event-storm at high SPS → progressive UI freeze).
-#       (e) closeEvent added: sends E, flushes serial, closes port and log file.
-#       Removes fragile aboutToQuit lambda; F12 triggers closeEvent via self.close().
-# v4.09 quit_app: QApplication.instance().exit() → self.close() so F12 actually
-#       triggers closeEvent (QApplication.exit() bypasses closeEvent entirely).
-#       (f) setup_file_logging closes previous file handle before opening new one.
-# v4.07 remove range (min…max) from footer raw status string; fix horizontal
-#       grid lines (axis_z) back to light gray (#cccccc, was blue).
-# v4.06 chart corruption fix: trim series_v/series_raw_mean by x-axis range
-#       (not by point count) so no off-screen polyline segment crosses the
-#       visible area when the warmup spike scrolls off the left edge. Add
-#       "Boxcar" toggle button (enables/disables A<n> polling + orange trace)
-#       and move "Raw Avg" button to the bottom-left F1/F2/F3/F4 area (those
-#       presets removed). Remove Raw σ button, series_stddev, axis_stddev,
-#       series_stddev_slope and all related state; keep raw_stddev_uV footer.
-# v4.05 clear series_raw_mean and series_stddev on Mode 1 start (S command),
-#       not just on DEL/Clear or toggle-off. Stale data from a previous session
-#       left phantom traces — polyline from old off-screen points to new ones
-#       — visible as multiple overlapping orange plots on the chart.
-# v4.04 extend R record parsing: pimd_mcu.py v4.15 appends min_uV and max_uV
-#       to the R record (format: R<t>,<mean>,<std>,<n>,<freq>,<pulse>,<delay>,
-#       <min>,<max>). Parse parts[7]/parts[8] defensively.
-# v4.03 add two chart toggles to visualise the raw boxcar-average path (A<n>):
-#       "Raw Avg" overlays raw_value_uV (orange) on the existing voltage axis
-#       next to the filtered-path blue trace; "Raw sigma" plots raw_stddev_uV
-#       on the existing (previously unused) red stddev series/axis, which now
-#       auto-expands its range as larger values are seen (was a fixed 0-1000uV
-#       range, too narrow for the std dev values now being investigated, up to
-#       70,000uV). Both default off; DEL/Clear resets them along with the rest
-#       of the chart.
-# v4.02 startup now defaults to Standard Operating Conditions (see CHANGELOG.md):
-#       10.0 kHz / 20.0 us pulse / 10.0 us delay / 256 decimation. Removed the
-#       footer's "std dev: ... uV" entry — it duplicated the top-right Std Dev
-#       box (both show the firmware's filtered-path p_stddev); the now-unused
-#       voltage_buffer/computed_stddev machinery behind it was removed too.
-#       poll_raw_average() now sends A<n> with n = min(down_sample, 1000)
-#       instead of a hardcoded A32, so the raw-path boxcar average's noise
-#       floor is comparable to the filtered path's decimation factor instead
-#       of differing by ~8-32x just from oversampling-count mismatch.
-# v4.01 added editable port field (mirrors pimd_classviz.py) — was hardcoded to
-#       'ttyACM0'; serial_open() now reads self.le_port.text(), stripping a leading
-#       '/dev/' if present
-# v4.00 renamed from pimd302.py; W (Mode 2 stream) records silently ignored;
-#       window title updated
+# History (full detail in CHANGELOG.md):
+#   v4.13 settings persistence (port/freq/pulse/delay/downsample/avg_n/toggles/geometry)
+#   v4.12 A<n> serial-backlog fix; user Avg n field; no auto-connect; V/div options trimmed
+#   v4.11 * command updated to MCU v4.23 protocol (Hz/ns)
+#   v4.10 read_from_serial drains all lines, only last * packet updates UI
+#   v4.09 quit_app uses self.close() so F12 triggers closeEvent
+#   v4.08 direct-entry freq/pulse/delay fields; on-grid sliders; buffer-drain loop; closeEvent
+#   v4.07 footer raw-status trim; horizontal grid lines back to gray
+#   v4.06 chart-corruption fix (trim series by x-range); Boxcar toggle; Raw σ removed
+#   v4.05 clear raw-mean/stddev series on Mode 1 start (phantom-trace fix)
+#   v4.04 parse min_uV/max_uV appended to R record (mcu v4.15)
+#   v4.03 Raw Avg / Raw sigma chart toggles
+#   v4.02 startup defaults to Standard Operating Conditions; footer std-dev dedup
+#   v4.01 editable port field (was hardcoded ttyACM0)
+#   v4.00 renamed from pimd302.py; W records ignored; title updated
 
 # pyright: reportOptionalMemberAccess=false
 # pyright: reportAttributeAccessIssue=false

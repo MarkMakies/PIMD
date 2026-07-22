@@ -19,7 +19,8 @@
 # warnings, not errors -- the registry owner has judgment calls on physical
 # measurements that this tool can't second-guess.
 #
-# v1 Initial version. (2026-07-14)
+# History (full detail in CHANGELOG.md):
+#   v1 initial version
 ###############################################################################
 
 import argparse

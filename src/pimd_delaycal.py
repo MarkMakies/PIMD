@@ -20,158 +20,33 @@
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
 #
-# v1.25 APP_VERSION constant re-synced with this header (was stuck at '1.19'
-#       while v1.20–v1.24 bumped the header only — the window title has been
-#       reporting v1.19 since). No functional change.
-# v1.24 Auto Nudge zigzag now respects the signal-detect ceiling (sp_signal_v,
-#       default 4.9 V): once a channel's monitored voltage reaches/exceeds it
-#       (no real signal — see v1.15), _auto_check_ceiling() latches
-#       _auto_ceiling_flat[ch] and all subsequent nudges for that channel are
-#       forced down-only (growing magnitude, no more +offset attempts), instead
-#       of continuing to zigzag up into no-signal territory. Wired into both
-#       the sequential (_auto_evaluate_channel) and parallel
-#       (_auto_evaluate_parallel) evaluators.
-# v1.23 sp_auto_max_iter range raised 1-20 -> 1-100 (Max iterations / Max
-#       att/cell spinbox) — 20 was too low for Sequential mode's per-channel
-#       max-attempts use, where the zigzag search (v1.20) needs more attempts
-#       to sweep out to the cap at small nudge steps.
-# v1.22 Auto Nudge (parallel mode) now locks a channel's delay permanently the
-#       first time it passes threshold. Previously _auto_evaluate_parallel()
-#       re-measured every active channel every iteration, so a passed channel
-#       whose std later drifted above threshold (noise/thermal/cross-talk
-#       while other channels were still being nudged) got re-queued and
-#       re-nudged, silently moving an already-accepted delay. New per-channel
-#       _auto_locked_flat sticks once a channel passes; locked channels are
-#       skipped from still_bad/nudging for the rest of the run — only their
-#       cell colour keeps tracking live pass/fail (green if still good, new
-#       _COL_AUTO_DRIFTED lavender if drifted bad while locked). Sequential
-#       mode untouched — it already never revisits a passed channel.
-# v1.21 _auto_nudge_channel() log lines now prefixed with _ch_label(ch) — with
-#       multiple channels nudging per iteration (parallel mode) or interleaved
-#       attempt numbers, the log was otherwise ambiguous about which channel
-#       each "nudge #k" / "cap reached" line referred to.
-# v1.20 (a) Voltage column headers (main table, both thermal tables, CSV export)
-#       now show 3 decimal places instead of 1, matching finer-grained target
-#       voltage sets. (b) Auto Nudge no longer walks cumulatively in one
-#       direction then flips once on cap; _auto_nudge_channel() now follows an
-#       expanding zigzag measured from the calibrated delay each attempt:
-#       +nudge, -nudge, +2*nudge, -2*nudge, +3*nudge, ... until the offset
-#       exceeds the cap (best-std fallback applies) or the outer loop's max
-#       iterations/attempts is reached (unchanged). Per-channel state
-#       _auto_dir_flat/_auto_dir_flipped replaced by a single attempt counter
-#       _auto_attempt_flat.
-# v1.19 Auto Nudge parallel / sequential toggle.  New 'Sequential' QCheckBox
-#       in auto_row1; unchecked (default) = parallel mode, checked = sequential
-#       (v1.08 behaviour).  Parallel mode: all bad channels nudged together
-#       each iteration, one shared soak per iteration — up to "Max iterations"
-#       cycles.  New _auto_evaluate_parallel() implements this; existing
-#       _auto_evaluate_initial() and _auto_evaluate_channel() unchanged.
-#       _auto_evaluate() dispatches on _auto_parallel flag.  'Max att/cell:'
-#       label renamed 'Max iterations:' in parallel mode.  Mode + iter counter
-#       logged at start; setting persisted as 'auto_sequential'.
-# v1.18 Left/right panes now separated by a draggable QSplitter (h_splitter).
-#       The left column (config + activity log) was previously fixed at 420 px;
-#       it is now a QWidget inside h_splitter with setMinimumWidth(300) so it can
-#       grow when the window is resized or the handle is dragged.  h_splitter
-#       state is persisted alongside v_splitter state in settings.
-# v1.17 Thermal monitoring tables (Latest mean / Std dev) rows now sorted
-#       ascending by pulse_us so shortest-delay rows appear first.
-#       _rebuild_thermal_tables() stores _thermal_display_order (display_row →
-#       protocol_band) and _thermal_proto_to_display (inverse map).
-#       _update_thermal_tables() uses display row d for item access and protocol
-#       band b for channel data.  _auto_color_cell() uses b for the calibration
-#       table and d (via _thermal_proto_to_display) for the thermal tables, so
-#       Auto Nudge cell highlighting remains correct.  Calibration table row
-#       order is unchanged.
-# v1.16 Row labels reformatted: frequency in Hz with thousands separator, pulse
-#       in µs to 1 d.p.  e.g. '31,250Hz / 6.2us' instead of '31.25kHz/6us'.
-#       _row_label() now multiplies freq_khz × 1000 and formats with {:,}.
-# v1.15 Coarse+fine two-phase sweep per freq/pulse pair.  A fast coarse hunt
-#       (sp_coarse_step, default 1 µs) steps up from start delay until the ADC
-#       reading drops below sp_signal_v (default 4.9 V), indicating real signal.
-#       The sweep then backs up to the last clean coarse position and switches to
-#       the existing fine step (sp_step) for accurate threshold crossing detection.
-#       For long-pulse pairs (e.g. 1.6 kHz / 100 µs) this eliminates dozens of
-#       wasted fine steps before any signal appears.  'Step size:' label renamed
-#       'Fine step:'.  Two new settings keys: 'coarse_step', 'signal_v'.
-# v1.14 _rebuild_thermal_tables now sets each thermal table's minimumHeight
-#       dynamically (header + n_rows × 30 px) so all rows are always visible
-#       without a scrollbar regardless of how many freq/pulse bands are configured.
-#       The static 120 px floor remains but is overridden upward for > 3 bands.
-# v1.13 Add 'Latest delay (us):' bold label above calibration table to match the
-#       mean/std-dev labels below.  Splitter stretch factors changed to (1, 0) so
-#       the top pane absorbs all window-resize slack and the bottom monitoring
-#       section stays at its natural size — the top table's empty rows compress
-#       instead of the bottom tables.  Thermal table minimum height raised 80→120
-#       px so the bottom tables never need a scrollbar at typical band counts.
-# v1.12 QSplitter between calibration table and monitoring section so the bottom
-#       tables maintain size rather than compressing; splitter state + window
-#       geometry (size + position) persisted in settings.  _auto_color_cell now
-#       updates all three tables identically; _update_thermal_tables mirrors the
-#       calibration table colour to both thermal tables (removes value-based
-#       std-dev colouring); _auto_finish uses _auto_color_cell for consistency.
-#       Section labels above thermal tables set to bold for visual parity.
-#       "Nudging every cell" explanation: calibrated delays sit at threshold
-#       crossings where signal slope converts amplitude noise to σ > 0.5 mV;
-#       Auto Nudge correctly relocates to quieter nearby delays — not a bug.
-# v1.11 Post-nudge settling gate: after each G command in Auto Nudge, incoming W
-#       records are discarded and display frozen for 1 s (_auto_settling flag +
-#       QTimer.singleShot).  _auto_settle_done clears the flag and flushes the
-#       buffer so std-dev accumulation begins only from clean settled frames,
-#       eliminating the false yellow flicker seen in the thermal tables at each nudge.
-# v1.10 Wider left column (320→420 px) and larger window (1200×1000→1440×1200) so
-#       activity log entries fit on a single line.  Thermal Monitoring box renamed
-#       "Live Monitoring & Auto Nudge"; setMaximumHeight(140) removed from both
-#       thermal tables and the box now gets stretch=1 so it expands with the window.
-#       Cell colouring applied to both thermal mean and std-dev tables during Auto:
-#       mean copies calibration table status colour; std dev uses green/yellow/red
-#       against the auto-nudge threshold.  All parameter field values saved to
-#       data/delaycal_settings.json on exit and restored on startup.
-# v1.09 Real-time cell colouring during Auto Nudge: yellow = queued, amber = active,
-#       green = passed, red = flagged (colours updated live as each soak completes).
-#       "Import Profile" button loads a JSON profile directly into the calibration
-#       table, enabling Auto/Thermal without first running a full sweep.
-#       Auto finish now prints a compact "Adjusted delays" summary to the log
-#       (only channels where the delay changed) and updates progress_label.
-# v1.08 Scrolling activity log panel added in left column below the config group,
-#       showing per-step calibration progress, thermal events, and auto-nudge
-#       decisions.  Auto Nudge changed from parallel to sequential per-channel
-#       processing: an initial soak identifies bad channels, then each bad channel
-#       is tackled one at a time (up to "Max attempts" nudges per channel) before
-#       moving on to the next.  _auto_iter replaced by _auto_phase / _auto_targets
-#       / _auto_target_idx / _auto_ch_attempts.  "Max iter" spinbox relabelled
-#       "Max attempts/cell".  Window height bumped 950→1000 px.
-# v1.07 Auto Nudge: iterative per-cell delay correction to escape noisy zones.
-#       After calibration, "Auto" button runs soak→evaluate iterations: streams
-#       Mode 2 with the calibrated profile, measures per-cell std dev over the
-#       last N W-frames (reuses sp_thermal_n; keep N ≤ 200 — at 50 µV/s thermal
-#       drift, N=200 @ ~100 Hz adds ~100 µV drift vs 500 µV threshold), nudges
-#       cells whose std dev exceeds the threshold by nudge_ns toward earlier
-#       delays (−ns first).  On cap hit in that direction, resets to calibrated
-#       delay and nudges in the opposite direction; flags the cell if both
-#       directions are capped.  Best-std delay kept per cell across all soaks.
-#       At finish: calibration table updated (green = passed, red = still bad);
-#       Export Profile runs automatically.  ΔV per nudged cell reported in
-#       status.  N/R cells excluded.  All I/O via QTimer + W-record callbacks —
-#       no blocking loops.
-# v1.06 * command updated to match MCU v4.23 protocol: freq in Hz (integer),
-#       pulse and delay in ns (integer). Title standardised to include author.
-# v1.05 Snap interpolated threshold-crossing delays to the 8 ns PWM clock grid
-#       before storing in the table and exporting; display to 3 d.p. (0.008 µs
-#       precision) instead of 2 d.p.  Off-grid delays cause ±1 LSB PWM jitter
-#       (documented in pimd_gui.py v4.08 / pimd_mcu.py v4.22).
-# v1.04 Thermal std dev: display to 2 decimal places (was integer mV).
-# v1.03 Profile export: autosave calibrated delays as a classviz-compatible JSON
-#       profile to data/profiles/ (timestamped, same format as pimd_classviz.py
-#       _default_profile()).  Thermal monitoring mode: streams Mode 2 with the
-#       exported profile for a configurable countdown, showing live latest-mean
-#       and rolling-std-dev tables (rate-limited to 10 Hz).  Config panel widened
-#       280→320 px; window resized 1050×620→1200×850.
-# v1.02 fix double-send bug: _on_r_record() no longer advances state when _check_thresholds()
-#        already called _advance_pair(); saves current_delay before threshold check so
-#        _prev_delay is always the actual measured delay, not the post-reset start_delay
-# v1.01 freq and pulse width paired as tuples (freq/pulse input field, e.g. 25/10)
-# v1.00 initial version
+# History (full detail in CHANGELOG.md):
+#   v1.25 APP_VERSION constant re-synced with header (was stuck at 1.19)
+#   v1.24 Auto Nudge zigzag respects the signal-detect ceiling (down-only past it)
+#   v1.23 sp_auto_max_iter range 1-20 -> 1-100
+#   v1.22 Auto Nudge (parallel) locks a channel's delay once it passes threshold
+#   v1.21 _auto_nudge_channel log lines prefixed with channel label
+#   v1.20 voltage headers to 3 d.p.; Auto Nudge expanding-zigzag from calibrated delay
+#   v1.19 Auto Nudge parallel/sequential toggle
+#   v1.18 draggable QSplitter between left/right panes
+#   v1.17 thermal tables sorted ascending by pulse_us
+#   v1.16 row labels: freq in Hz with separator, pulse in µs 1 d.p.
+#   v1.15 coarse+fine two-phase sweep per freq/pulse pair
+#   v1.14 thermal tables dynamic minimumHeight (all rows visible)
+#   v1.13 "Latest delay" label; splitter stretch (1,0); thermal min-height raise
+#   v1.12 QSplitter above monitoring; splitter/geometry persistence; unified cell colouring
+#   v1.11 post-nudge 1 s settling gate before std-dev accumulation
+#   v1.10 wider left column/window; Live Monitoring & Auto Nudge box; settings persistence
+#   v1.09 real-time cell colouring during Auto Nudge; Import Profile button
+#   v1.08 scrolling activity log; Auto Nudge sequential per-channel
+#   v1.07 Auto Nudge: iterative per-cell delay correction
+#   v1.06 * command updated to MCU v4.23 protocol (Hz/ns)
+#   v1.05 snap threshold-crossing delays to the 8 ns PWM grid; 3 d.p.
+#   v1.04 thermal std dev to 2 d.p.
+#   v1.03 profile export (classviz JSON) + thermal monitoring mode
+#   v1.02 fix double-send bug in _on_r_record/_check_thresholds
+#   v1.01 freq and pulse width paired as tuples (e.g. 25/10)
+#   v1.00 initial version
 ###############################################################################
 
 # pyright: reportOptionalMemberAccess=false

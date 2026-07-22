@@ -33,289 +33,33 @@
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #
 
-# v4.26 FIX acquire_mode2: post-emit USB IRQ burst could delay cell[i]'s CC
-#       write past the PWM wrap, mis-timing the next conversion. Symptom:
-#       channel 1 (band 1, cell 2 — the first cell acquired after the W-record
-#       print at i==0) showed ~8x the σ of its neighbours and a biased mean,
-#       locked to SWEEP POSITION: it stayed at the same heatmap cell when the
-#       first band changed from 6 µs/50 kHz (cal_72_air_v3) to 9 µs/25 kHz
-#       (cal_63_air_v1). Mechanism: read_raw_sample() re-enables IRQs right
-#       after the SPI read, so the USB CDC TX-drain IRQs queued during the
-#       read's critical section (10-50 µs latency each, v4.21) fire exactly
-#       between the read and the duty_u16 write for cell[i]; the gate/rolling
-#       bookkeeping (tens of µs of interpreter time) sat in the same gap. CC
-#       is not double-buffered (v4.13/v4.04): a write landing after the wrap
-#       leaves the next period sampling at cell[i-1]'s compare point (112 ns
-#       early on the steep 4.8-4.9 V decay ≈ +100 mV raw — passes the outlier
-#       gate, poisons rolling[1] every sweep). The 6 µs band's 20 µs period
-#       gave the tightest write budget of all — likely a contributor to its
-#       "notoriously noisy" reputation. Fix: read_raw_bytes_hold() keeps IRQs
-#       disabled from the BUSY-synced read through the freq/CC writes (adds
-#       ~2-6 µs to the ≤36 µs v4.21 blackout — same USB SOF tolerance
-#       argument), and the bookkeeping moved after the hardware writes
-#       (deduplicated: both branches carried identical copies). Read still
-#       precedes all CC writes (v4.13 invariant).
-# v4.25 FIX acquire_mode2: outlier gate could permanently latch small-signal
-#       cells. The v4.21 plausibility gate rejected samples deviating more than
-#       mean_raw // OUTLIER_GATE_FRAC from the rolling mean — written for large
-#       positive means, but raw14 is SIGNED: for a near-zero mean the threshold
-#       floors to 0 (any nonzero deviation rejected) and for a negative mean
-#       floor division makes it negative (-3 // 10 = -1), so dev >= 0 is ALWAYS
-#       over it and EVERY sample is rejected. The substituted mean is written
-#       back into the rolling buffer, so once count >= 8 the cell freezes at
-#       its warm-up value forever. Observed on the deepest-decay cell (last
-#       delay of the 100 µs band, ch 72 of cal_72_air_v3, 1 count ≈ 610 µV):
-#       flat 0 delta in classviz regardless of target. Fix: gate on
-#       abs(mean_raw) with an absolute floor OUTLIER_GATE_MIN (164 counts
-#       ≈ 100 mV ≈ 1% FS) — still catches the volts-scale bit-truncation
-#       glitches the gate exists for, but can never latch a cell.
-# v4.24 FIX acquire_mode2: boundary settling was measured in PWM periods
-#       (BOUNDARY_PRIME = 15), not absolute time — so high-frequency bands got
-#       proportionally tiny settling budgets (25 kHz: 600 µs, 20 kHz: 750 µs)
-#       even though the coil/front-end energy-step transient needs roughly
-#       constant absolute time (~1 ms+; v4.20 measured 470 µs insufficient and
-#       1.41 ms adequate on a 94 µs-period band). Symptom: the first cell of
-#       each band (first heatmap column) noisy regardless of the calibrated
-#       delay/threshold values, oscillating on a seconds timescale (partially-
-#       settled sample rides the transient; ±1-period jitter in effective
-#       settle count becomes telegraph noise, low-passed by the 32-deep /
-#       ~9.2 s rolling buffer into slow wander — the v4.21 "32-frame level
-#       shift" signature). Band 1's first cell escaped by accident: the
-#       72-field W-record print() at i==0 runs between its CC write and its
-#       read, donating ms-scale extra settling every sweep (the v4.20 comment
-#       claiming the print overlaps the settling sleep was wrong — the code
-#       sleeps then prints — but the rescue is real). Fix: SETTLE_FLOOR_US
-#       (3000) — per-band settle periods are now
-#       max(BOUNDARY_PRIME, ceil(SETTLE_FLOOR_US / period_us)), precomputed in
-#       the cell list, so every boundary gets >= 3 ms regardless of band
-#       frequency. Also covers the band8->band1 wrap boundary, where waiting
-#       up to a full 320 µs band-8 MCLK inside read_raw_sample() could consume
-#       band 1's entire old 320 µs budget (seen as overrun_count ticks).
-#       Sweep cost ~ +12 ms (289 -> ~301 ms refresh).
-# v4.23 serial protocol: freq now in Hz (was kHz), pulse/delay now in ns (was µs),
-#       in *, R, V, L output records and in the * config command.  No rounding
-#       ambiguity: values are exact integers at 8 ns PWM grid resolution.
-# v4.22 updated SAMPLE_PULSE_CORRECTION 0.908 → 0.904 µs: 10.904 µs total delay
-#       = 1363 × 8 ns exactly, eliminating the half-step dither that caused the
-#       alternating ±8 ns delay jitter at 0.1 µs GUI steps.
-# v4.21 FIX read_raw_sample: wrap BUSY poll + SPI read in disable_irq/enable_irq
-#       so USB CDC IRQs cannot fire between the BUSY-low edge and the SPI clock.
-#       Eliminates two Mode 2 anomaly types confirmed in quiet 45-channel recordings:
-#       (1) §7 SDOB bit-truncation (value ≈ 50%/25% of true): USB IRQ delays SPI
-#       start past the next MCLK; partial SDOB shift produces half/quarter values.
-#       (2) Cell-value bleed (value > next-cell, ratio >1.0): USB IRQ starves the
-#       BUSY-high poll long enough to miss the current cell's MCLK entirely, landing
-#       on the previous cell's still-valid output. Both produce 32-frame flat level
-#       shifts (one bad sample × M=32 rolling-buffer depth). IRQ blackout per call
-#       ≤36 µs worst-case (just missed MCLK); safe for USB SOF at 1 kHz.
-#       Also adds a per-cell 10% plausibility gate: if raw14 deviates >10% from
-#       rolling mean (after ≥8 samples), substitute the mean instead of updating.
-#       Belt-and-suspenders secondary defence; all 8 observed events caught.
-#       FW_VERSION synced to file header (was stuck at 4.15).
-# v4.20 FIX acquire_mode2: two first/last-cell std-dev bugs fixed.
-#       (1) BOUNDARY_PRIME 5→15: 470 µs was insufficient for the 5µs→40µs
-#       wrap-around thermal transient (8× pulse-energy step); settling
-#       signature was the 3.1→1.6→0.6 mV gradient in band-0 cells 0-2.
-#       (2) emit/poll moved from after the for-loop to inside it at i==0:
-#       previously print() ran between cell[n-1]'s write and its read,
-#       and USB CDC IRQs (~10-50 µs) exceed the 2.5 µs BUSY-LOW window at
-#       57 kHz — causing the §7 mid-conversion bit-truncated outliers in
-#       cell[n-1]. Moving here: cell[n-1] read is clean, USB noise overlaps
-#       the already-running cell[0] settling sleep instead.
-# v4.19 revert v4.18: v4.18's sleep_us+post-read-retry approach brought back
-#       the outlier corruption that v4.17 had eliminated. v4.17's BUSY edge
-#       sync (wait-for-high then wait-for-low) is restored. The reduced sample
-#       rate (~1.6 kHz effective vs 10 kHz configured) is accepted for now —
-#       the accuracy improvement (tracking within a few mV) outweighs it.
-#       updated SAMPLE_PULSE_CORRECTION to 0.908, to match new coil/front end
-# v4.18 FIX read_raw_sample: v4.17 replaced sleep_us pacing with a full
-#       BUSY edge sync (wait-for-high then wait-for-low). This is correct in
-#       principle but the ~15µs BUSY-high pulse at 10 kHz is too short for
-#       MicroPython polling to catch reliably — only ~1 in 6 pulses detected,
-#       dropping effective sample rate from 10 kHz to ~1.6 kHz (observed as
-#       Sa/s falling from 9.8 to 6.4 and Rx freq showing 1.6 kHz).
-#       Approach: restore sleep_us(period_us) pacing, add a pre-read wait for
-#       BUSY low (v4.16 fix) AND a post-read BUSY check — if MCLK fired
-#       during the 3.2µs SPI transfer, retry once after waiting for the
-#       newly-started conversion to finish. Double-retry probability is
-#       negligible (SPI transfer takes ~3.2µs, next MCLK is ~period_us away).
-# v4.17 FIX read_raw_sample: v4.16 guarded against reading while BUSY was
-#       already high, but left a second window: when called just before MCLK
-#       fires, BUSY is already low (previous conversion done), the check
-#       passes, and the SPI read starts — then MCLK fires mid-read and the
-#       LTC2508-32 invalidates the SDOB register, producing a bit-truncated
-#       result. Confirmed: min/max (v4.15) shows discrete outlier values at
-#       ~375k and ~750k µV (exactly 1/4 and 1/2 of the true ~1511k µV) —
-#       ratios consistent with 1-2 bits of partial/corrupted SPI data.
-#       Fix: change from "guard-only-if-high" to "sync to the edge" — wait
-#       for BUSY to go HIGH (MCLK has fired), then wait for BUSY LOW
-#       (conversion complete), then read. This places the SPI clock at
-#       maximum margin from both edges and makes timing 100% hardware-locked.
-#       acquire_raw_average's sleep_us(period_us) loop is also removed — each
-#       read_raw_sample() call now naturally consumes exactly one MCLK period
-#       via the BUSY waits, so software timing is no longer needed.
-# v4.16 FIX read_raw_sample: was counting BUSY-high hits but reading SDOB
-#       immediately regardless. The sleep_us()-paced loop drifts relative to
-#       the free-running PWM and occasionally lands mid-conversion (BUSY high),
-#       returning corrupt/low data — confirmed by v4.15 min/max: min drops to
-#       ~375 kµV while normal samples cluster at ~1511 kµV, pulling the boxcar
-#       mean down and producing the sawtooth oscillation and "never exceeds
-#       Mode 1" behaviour seen in pimd_gui.py. Fix: wait for BUSY low before
-#       clocking SDOB (one while-loop after the existing counter increment).
-#       busy_high_count now measures how often the wait was needed.
-# v4.15 acquire_raw_average now also returns min_uV/max_uV (the boxcar
-#       window's sample extremes), appended to the R record:
-#       R<t>,<mean_uV>,<std_uV>,<n>,<freq_kHz>,<pulse_us>,<delay_us>,<min_uV>,<max_uV>
-#       Diagnostic for a new anomaly: pimd_gui.py's "Raw Avg" chart toggle
-#       (v4.03) showed the A<n> boxcar mean swinging by several mV between
-#       polls in a repeating sawtooth, while the filtered path stayed flat —
-#       suspected to be the same unresolved family as the Mode 2 single-cell
-#       noise (v4.08-v4.14 notes below): a static PWM config, read repeatedly
-#       via read_raw_sample() in a sleep_us()-paced loop. min/max exposes
-#       whether a handful of outlier samples are hiding inside the average,
-#       the same way per-sample inspection (not just mean/std) cracked the
-#       Mode 2 cell-misattribution bug. Appended at the end — existing
-#       consumers (pimd_gui.py, pimd_delaycal.py) only read fields up to
-#       index 3, unaffected by the new trailing fields.
-# v4.14 two fixes from user testing of a same-freq/different-pulse-width
-#       profile (D128;5000,50.0,<9 delays>;5000,10.0,<9 delays>):
-#       1) needs_settling now also fires on a drive-duty (pulse-width) change,
-#          not just a frequency change — at_boundary alone missed same-freq
-#          band transitions, so BOUNDARY_PRIME settling never applied there.
-#          First cell of each band showed the same "contaminated" signature
-#          as the original v4.06 cross-band leakage (confirmed via user's
-#          stats CSV: first-cell std dev 55-65mV vs 2-12mV for the rest).
-#       2) acquire_mode2's rolling buffers were plain lists using
-#          append()+pop(0) — O(avg_depth) per sample, scaling badly and
-#          implicated in a board crash at averages=256 (128 was fine).
-#          Replaced with pre-allocated fixed-size circular buffers + an
-#          incrementally-maintained sum — O(1) per sample regardless of
-#          avg_depth, no list resizing/heap churn. Also wrapped the Mode 2
-#          main-loop call in try/except so any future unhandled error reports
-#          over serial and returns to a safe state instead of crashing outright.
-# v4.13 FIX (not just diagnostic): acquire_mode2 non-boundary cells now read
-#       SDOB BEFORE writing new CC values, matching what boundary cells already
-#       did. Root cause of the v4.08-v4.12 investigation, finally isolated: a
-#       2-cell profile's reported values were found to be EXACTLY swapped
-#       between cells (not random) at both 25kHz and 57kHz, and reversing the
-#       delay order in the D command reversed which channel reported which
-#       value — proving array-order-following, deterministic mis-indexing,
-#       not noise. Mechanism: writing a new compare value while the counter
-#       has already passed it can fire an immediate spurious trigger (same
-#       family as the already-fixed v4.04 freq/WRAP issue, but for duty_u16's
-#       compare register) — write-before-read meant the read right after
-#       captured THIS cell's own just-triggered conversion instead of the
-#       PREVIOUS cell's already-completed one. busy_high_count/overrun_count
-#       (v4.11/v4.12) did not correlate with the bug and remain as harmless
-#       diagnostics for now. Verify: re-run the 2-cell swap tests and the full
-#       CLASSIFY_EP sweep after flashing.
-# v4.12 add temporary diagnostic: overrun_count (global) increments in
-#       acquire_mode2() whenever a cell's loop iteration overran its period
-#       budget (remaining <= 0, no sleep_us call) — i.e. software fell behind
-#       the free-running hardware PWM. Reported via 'B' alongside
-#       busy_high_count. Direct test of a new finding: raw (averages=1)
-#       captures show that for a 2-cell profile (25kHz/10us, delays 7.6us and
-#       10.0us), each cell's reported value randomly flips between two
-#       discrete states (~3520mV, matching the true 7.6us value confirmed via
-#       A256, and ~820mV) — i.e. cell identity is being randomly swapped
-#       between conversions, not just noisy. A 1-cell profile at the same
-#       parameters is rock stable (no swapping possible — nothing to swap to).
-#       Averaging (avg_depth=16) blends the two states into what looked like
-#       a clean-but-wrong mean with deceptively low std dev. This is a
-#       correctness bug, potentially affecting any multi-cell Mode 2 profile
-#       (not just the single-cell edge case), pending confirmation.
-# v4.11 add temporary diagnostic: busy_high_count (global) increments in
-#       read_raw_sample() whenever busy_pin is found high at SDOB read time —
-#       per the LTC2508-32 datasheet ("MCLK Timing", p.20) this should never
-#       happen; BUSY goes high at conversion start and low when complete, and
-#       data is meant to be clocked out during the auto-power-down idle window
-#       after. New 'B' command reports and resets the counter. Direct test of
-#       whether the Mode 2 single-cell noise anomaly (see v4.08-v4.10 note)
-#       correlates with reading SDOB while a conversion is still in progress.
-#       Temporary — remove once the investigation concludes.
-# v4.10 corrected the v4.08/v4.09 comments below in place: both changes were
-#       directly A/B-tested on real hardware and found to make NO measurable
-#       difference to the noise anomaly they were written to fix. No code
-#       logic changed in v4.10 — comments only, version bumped per policy.
-# v4.09/v4.08 acquire_mode2 investigation (corrected — see below for the actual
-#       finding; both changes are kept as harmless, but neither was the fix):
-#       v4.08 skips the duty_u16() rewrite when dd/sd are unchanged from the
-#       previous period; v4.09 throttles check_for_commands() to once per
-#       COMMAND_POLL_MS instead of once per sweep cycle. Both were tested by
-#       direct A/B and made NO measurable difference — falsified.
-#
-#       Investigation trigger: a 1-cell dynamic profile (averages=16,
-#       25kHz/10us/7.6us) showed up to ~25-30mV std dev vs Mode 1's <100uV at
-#       identical parameters (verified on scope, identical waveform);
-#       scope-measured pulse-to-sample delay jitter was 60ns in Mode 2 vs <10ns
-#       in Mode 1 (DESIGN §8 documents ~15-20ns for the static-PWM baseline).
-#
-#       ACTUAL finding (isolated by direct A/B, not yet explained at the
-#       RP2040-hardware level): noise is high specifically when the PWM
-#       duty_u16 compare value is held CONSTANT across consecutive periods —
-#       whether by skipping the write (v4.08) or by rewriting the identical
-#       value (original code, and Mode 1's one-time setup). It is LOW
-#       (~310uV, matching the A32/DESIGN ~350uV expectation) when the value
-#       actually CHANGES every period. Confirmed with 4 data points: n=1 (any
-#       fix combination) ~24-30mV; n=2 profile with two DIFFERENT delays
-#       (different sample_duty each period) ~310uV; n=2 profile with two
-#       IDENTICAL delays (same dd/sd every period, like n=1) back to ~25mV.
-#       Whether the value is written or skipped doesn't matter — only whether
-#       it differs from the previous period.
-#
-#       Practical conclusion: Mode 2 (interleaved sweep) is not suited to
-#       genuine single-point / repeated-identical-cell measurement — that is
-#       exactly what Mode 1 already does well. Multi-cell sweeps (the actual
-#       purpose of Mode 2, including CLASSIFY_EP) are unaffected since cells
-#       legitimately differ period to period. No further firmware change
-#       attempted without RP2040 PWM datasheet-level investigation beyond what
-#       can be confirmed via code reading and serial A/B testing.
-#
-#       Diagnostic A32 raw-path boxcar average (static PWM, same SPI0 path)
-#       measured ~100uV-1mV early in the investigation — ruling out the
-#       raw-vs-filtered ADC path as the dominant cause before the real (CC-
-#       value-must-change) finding above was isolated.
-# v4.07 add D command: defines a RAM-only 'dynamic' profile (global dynamic_profile,
-#       selected via Q<DYNAMIC_PROFILE_INDEX>) so a PC app can try new band/pulse/
-#       delay combinations without editing PROFILES and reflashing. Lost on reset —
-#       same configure-then-select pattern as Mode 1's '*' + S. get_profile(idx)
-#       added as the single lookup point (PROFILES[idx] or dynamic_profile),
-#       replacing direct PROFILES[active_profile_index] indexing in the main loop
-#       and the Q/G command handlers; L listing includes it when defined.
-# v4.06 acquire_mode2: add BOUNDARY_PRIME (default 5) extra PWM periods of
-#       settling at each band boundary. Root cause of inter-band leakage: the
-#       first cell of each new band has only 1 period of drive at the new
-#       frequency before its SDOB is read; the previous band's coil energy
-#       (especially high-power→low-power transitions like B3→B4) cascades
-#       through cells 0–7 of the new band via initial conditions, locking a
-#       systematic offset into the rolling average. The last cell (cell 8) of
-#       each band reads correctly because its SDOB is read at the start of the
-#       next cycle's boundary processing — after a full sweep cycle of settling.
-#       Fix: extend the sleep at each boundary by BOUNDARY_PRIME periods so the
-#       coil reaches steady state before the first SDOB is taken. Tunable via
-#       BOUNDARY_PRIME; overhead ≈ 875 µs/cycle at default 5, emit rate unchanged.
-# v4.05 CLASSIFY_EP band frequencies updated to prime-ish actuals from §17.1
-#       power table (10601/17599/29201/43003/56992 Hz) — avoids beat-frequency
-#       noise, matches the measured equal-power sweep operating points.
-# v4.04 acquire_mode2: at band boundaries read SDOB before calling pwm.freq().
-#       When freq increases, the new WRAP register is smaller; if the running
-#       counter already exceeds the new WRAP, the RP2040 PWM wraps immediately,
-#       generating a spurious MCLK falling edge that triggers a new ADC conversion
-#       and overwrites the previous cell's result. Fix: read SDOB first at every
-#       band boundary, then change freq, preserving CC-write-first for same-band cells.
-# v4.03 profile structure changed from {freq_hz, pulses_us, delays_us} to
-#       {bands: [(freq_hz, pulse_us, delays_us)…]} so each band can have its own
-#       frequency; acquire_mode2 updates the PWM slice freq at band boundaries;
-#       new profile 4 CLASSIFY_EP: 5 equal-power bands × 9 calibrated delays = 45 cells
-# v4.02 acquire_raw_average: discard first 5 samples (priming) so PWM wrap-register
-#       glitch after freq change settles before the averaged window begins; fixes
-#       near-zero readings on A<n> when frequency changes between * commands
-# v4.01 acquire_mode2: CC written first at period start (~1-2 us) before SPI read
-#       — eliminates CC-write race on multi-cell profiles; precompute cell_duties;
-#       prime now fires cell[n-1] (removes startup transient in rolling[n-1]);
-#       command poll moved out of W-emit gate ('E' stops within one n_pulses*n_delays cycle)
-# v4.00 complete serial protocol rewrite (two non-concurrent modes, W streaming,
-#       Q/G commands, file renamed from pimd_mcu_302.py to pimd_mcu.py)
+# History (full detail in CHANGELOG.md):
+#   v4.26 FIX acquire_mode2: post-emit USB IRQ burst mis-timed cell[i]'s CC write (channel-1 σ)
+#   v4.25 FIX acquire_mode2: outlier gate could permanently latch small-signal cells
+#   v4.24 FIX acquire_mode2: boundary settling time-floored (SETTLE_FLOOR_US), not period-scaled
+#   v4.23 serial protocol: freq in Hz, pulse/delay in ns (exact 8 ns PWM-grid integers)
+#   v4.22 SAMPLE_PULSE_CORRECTION 0.908 → 0.904 µs — removes half-step delay dither
+#   v4.21 FIX read_raw_sample: IRQ-guard BUSY poll + SPI read; per-cell 10% plausibility gate
+#   v4.20 FIX acquire_mode2: BOUNDARY_PRIME 5→15; emit/poll moved inside loop at i==0
+#   v4.19 revert v4.18; restore v4.17 BUSY edge sync; SAMPLE_PULSE_CORRECTION 0.908
+#   v4.18 FIX read_raw_sample: restore sleep_us pacing + pre/post-read BUSY checks
+#   v4.17 FIX read_raw_sample: sync to BUSY edge (high then low), clear of MCLK
+#   v4.16 FIX read_raw_sample: wait for BUSY low before clocking SDOB
+#   v4.15 acquire_raw_average returns min_uV/max_uV (appended to R record)
+#   v4.14 needs_settling fires on pulse-width change; O(1) circular rolling buffers; Mode 2 try/except
+#   v4.13 FIX acquire_mode2: non-boundary cells read SDOB before writing CC (cell-swap root cause)
+#   v4.12 diagnostic: overrun_count via 'B'
+#   v4.11 diagnostic: busy_high_count via 'B'
+#   v4.10 comments-only: v4.08/v4.09 A/B-falsified, corrected in place
+#   v4.09/v4.08 acquire_mode2 investigation (duty-skip / poll-throttle — both falsified; CC must change)
+#   v4.07 add D command: RAM-only dynamic profile; get_profile(idx) single lookup
+#   v4.06 acquire_mode2: BOUNDARY_PRIME settling at band boundaries (inter-band leakage)
+#   v4.05 CLASSIFY_EP band freqs → prime-ish §17.1 power-table actuals
+#   v4.04 acquire_mode2: read SDOB before pwm.freq() at band boundaries (WRAP-glitch race)
+#   v4.03 per-band frequency profile structure; profile 4 CLASSIFY_EP (5 bands × 9 delays)
+#   v4.02 acquire_raw_average: discard first 5 priming samples after freq change
+#   v4.01 acquire_mode2: CC written first at period start; precompute cell_duties; prime cell[n-1]
+#   v4.00 complete serial protocol rewrite (two modes, W streaming, Q/G; renamed from pimd_mcu_302.py)
 ###############################################################################
 
 # pyright: reportMissingImports=false
