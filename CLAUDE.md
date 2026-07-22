@@ -42,13 +42,21 @@ might touch one.
   use those, don't improvise. 
 
 ## Versioning & changelog (important)
-- Stage everything as commits I can review before they land; **don't push without explicit instruction.**.
-- **On every file edit:** bump that file's version number and add an entry to
-  the file's header changelog.** Required, not optional.
+- Stage everything as commits I can review before they land; **don't push without explicit instruction.**
+- **Version number tracks functional change.** On every behaviour-changing edit,
+  bump the file's version — the `APP_VERSION`/`TOOL_VERSION` constant and/or the
+  title line in the header. Pure comment/doc/reformat edits don't bump.
+- **File headers carry a terse one-line-per-version lineage, not prose.** Under a
+  `# History (full detail in CHANGELOG.md):` heading in the header, add one line
+  per version — `#   v<N> <short phrase>`, newest first. **No paragraphs in
+  headers** — the full narrative lives only in `CHANGELOG.md`. Leave the
+  non-changelog reference content (purpose, protocol/interface notes, schema
+  docstrings) untouched.
 - **Record every change in `CHANGELOG.md`** — firmware, PC tools, hardware, or new
   findings. One entry per change, added above the marker line, in the format at the
   foot of `CHANGELOG.md`: `### <file> — v<N> — <short title>`, then a short
-  paragraph covering *what changed · why · (date)*.
+  paragraph covering *what changed · why · (date)*. This is the **single source of
+  detailed history** and the curated feed `DESIGN.md` is regenerated from.
 - **Do not edit `DESIGN.md` directly.** It is a curated snapshot, regenerated from
   `CHANGELOG.md` by a periodic human-run consolidation pass, see DESIGN.md section 18. Treat it as stable
   reference, not a scratchpad. (Only exception: a deliberate, human-directed
