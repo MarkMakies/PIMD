@@ -1,3 +1,26 @@
+### Repo-wide — header changelogs slimmed to a terse version lineage; CLAUDE.md rule updated
+
+The full-prose changelog embedded in every `.py` header duplicated `CHANGELOG.md`
+paragraph-for-paragraph — `pimd_classviz.py` alone carried ~500 comment lines / 35
+version paragraphs before any code (mcu 323, features 191, delaycal 180, gui 101).
+On a solo, AI-driven repo that is triple-bookkeeping (git + header + this file) with no
+reader. Headers now carry only a terse one-line-per-version lineage under a
+`# History (full detail in CHANGELOG.md):` heading; the full narrative lives here alone,
+which is also the curated feed `DESIGN.md` is regenerated from. The `CLAUDE.md`
+"Versioning & changelog" section was rewritten to match: version number tracks functional
+change (pure doc/reformat edits don't bump), headers stay terse, `CHANGELOG.md` is the
+single detailed record. Non-changelog header content (purpose, protocol/interface notes,
+`pimd_features.py`'s CORPUS_HEADER schema docstring) left untouched. No functional/code
+change and no per-file version bump — this is a documentation reformat. Any version whose
+prose lived only in a header was migrated here first so nothing is lost: `pimd_mcu.py`
+v4.00/v4.01/v4.02, `pimd_delaycal.py` v1.00/v1.01, and `pimd_gui.py` v4.00/v4.01 (all absent
+from this file, which began each of those tools at the next version) are added to the
+archive — mcu beside its v4.03 entry, delaycal/gui in a "migrated from file headers" block
+at the foot of this file. All other files' header versions (classviz v1.00–v1.33, features
+v1–v7, classify v1.0–v1.2, targets v1) were already fully covered here. (2026-07-22)
+
+---
+
 ### src/pimd_classviz.py — v1.33 — continuous training capture (Training group, space-bar air/target toggle)
 
 Reworks the Analysis tab's signature capture per Mark's bench feedback: the
@@ -2813,6 +2836,27 @@ from a prior `*` command. Overhead ≤ 5% at 10 kHz; negligible at higher freque
 
 ---
 
+### mcu/pimd_mcu.py — v4.02 / v4.01 / v4.00 — migrated from the file header (2026-07-22)
+
+These three earliest entries predated `CHANGELOG.md` and lived only in the file's
+header changelog; migrated verbatim here when the per-file headers were slimmed to a
+terse version lineage (see the 2026-07-22 header-slim entry above the marker line).
+
+**v4.02** — `acquire_raw_average`: discard the first 5 samples (priming) so the PWM
+wrap-register glitch after a frequency change settles before the averaged window begins;
+fixes near-zero readings on `A<n>` when the frequency changes between `*` commands. (Also
+recorded in the v4.03 entry above as "carried into v4.03".)
+
+**v4.01** — `acquire_mode2`: CC written first at period start (~1–2 µs) before the SPI
+read — eliminates the CC-write race on multi-cell profiles; precompute `cell_duties`;
+prime now fires `cell[n-1]` (removes the startup transient in `rolling[n-1]`); command
+poll moved out of the W-emit gate so `E` stops within one `n_pulses*n_delays` cycle.
+
+**v4.00** — complete serial protocol rewrite: two non-concurrent modes, `W` streaming,
+`Q`/`G` commands; file renamed from `pimd_mcu_302.py` to `pimd_mcu.py`.
+
+---
+
 ### src/pimd_scope.py — v4.01
 
 - `PROFILES_META` converted from flat per-profile dict to `{bands: [(freq_khz, pulse_us,
@@ -2855,6 +2899,30 @@ W4,47489,4597492,4120426,...,562667,227699
 Values in µV. Channels decrease monotonically across each band's delay sweep (shortest
 delay → highest signal ~4.5 V; longest delay → lowest signal ~0.23 V). Values stable
 between records. All 5 bands × 9 cells populated correctly.
+
+---
+
+## Archive — migrated from file headers (2026-07-22)
+
+These earliest entries predated `CHANGELOG.md` and lived only in their file's header
+changelog; migrated here verbatim when the per-file headers were slimmed to a terse
+version lineage (see the header-slim entry above the marker line at the top of this file).
+
+### src/pimd_delaycal.py — v1.01 / v1.00 — migrated from the file header
+
+**v1.01** — freq and pulse width are now paired as tuples (freq/pulse input field, e.g.
+`25/10`).
+
+**v1.00** — initial version.
+
+### src/pimd_gui.py — v4.01 / v4.00 — migrated from the file header
+
+**v4.01** — added an editable port field (mirrors `pimd_classviz.py`); was hardcoded to
+`ttyACM0`. `serial_open()` now reads `self.le_port.text()`, stripping a leading `/dev/`
+if present.
+
+**v4.00** — renamed from `pimd302.py`; `W` (Mode 2 stream) records silently ignored; window
+title updated.
 
 ---
 
