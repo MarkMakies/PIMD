@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.35
+# PIMD Signature Visualiser (ClassViz) v1.36
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -18,6 +18,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.36 persist Saved-profile / Saved-list selectors, Stats Std thresholds, Training settle window
 #   v1.35 training status labels name air/target; place/remove countdown flashes (red <5 s) + beeps
 #   v1.34 training auto-detect cycle (auto place/remove, 30 s countdowns, Save/Ignore, rolling air reuse)
 #   v1.33 continuous training capture (Training group; space-bar air/target toggle; supply battery/psu)
@@ -96,7 +97,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.35'
+APP_VERSION = '1.36'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -4328,6 +4329,22 @@ class MainWindow(QMainWindow):
             self.sp_sig_settle_mv.setValue(float(s.get('sig_settle_mv', 1.0)))
             self.sp_sig_detect_mv.setValue(float(s.get('sig_detect_mv', 0.5)))
             self.cb_sig_train_override.setChecked(bool(s.get('sig_train_override', True)))
+
+            # Stats-tab Std colour thresholds + Training-tab settle window.
+            self.sp_std_lower.setValue(float(s.get('std_lower', 0.50)))
+            self.sp_std_upper.setValue(float(s.get('std_upper', 1.00)))
+            self.sp_training_settle.setValue(int(s.get('training_settle', 50)))
+
+            # Saved-profile / Saved-list dropdowns (both already populated from
+            # disk in _build_ui, so findText guards a since-deleted file; only
+            # the dropdown selection is restored -- no auto Load & Run).
+            for combo, key in ((self.cb_profile_file, 'profile_file'),
+                               (self.cb_training_list, 'training_list')):
+                name = s.get(key)
+                if name:
+                    idx = combo.findText(name)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             self.resize(1100, 900)  # first run
 
@@ -4376,6 +4393,12 @@ class MainWindow(QMainWindow):
             'sig_settle_mv': self.sp_sig_settle_mv.value(),
             'sig_detect_mv': self.sp_sig_detect_mv.value(),
             'sig_train_override': self.cb_sig_train_override.isChecked(),
+
+            'profile_file':    self.cb_profile_file.currentText(),
+            'training_list':   self.cb_training_list.currentText(),
+            'std_lower':       self.sp_std_lower.value(),
+            'std_upper':       self.sp_std_upper.value(),
+            'training_settle': self.sp_training_settle.value(),
 
             'supply': self.cb_supply.currentText(),
 

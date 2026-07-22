@@ -1,3 +1,27 @@
+### src/pimd_classviz.py — v1.36 — persist the remaining preference controls
+
+Audit of `_save_settings`/`_load_settings` after Mark noticed the top-bar
+**Saved profile** dropdown wasn't remembered across launches. Four genuine
+preference controls had no persistence and are now saved/restored: the
+`cb_profile_file` (Saved profile) and `cb_training_list` (Training Session
+Saved list) selectors, the Stats-tab Std colour thresholds
+(`sp_std_lower`/`sp_std_upper`, 0.50/1.00) and the Training-tab settle window
+(`sp_training_settle`, 50). Both dropdowns are already populated from disk in
+`_build_ui` before `_load_settings` runs, so restore uses `findText` and falls
+back to the default index if the saved file has since been deleted (verified);
+restoring a profile selection only sets the dropdown — it does not auto Load &
+Run, which still needs a live connection and an explicit click. Deliberately
+left unpersisted (documented, not oversights): `cb_continuous` (Log
+Continuously — an action toggle; auto-starting logging on launch is a foot-gun,
+same stance as not restoring an in-progress recording or the editable-file
+pointer), `le_csv` (its default is intentionally date-stamped per launch), and
+`le_label` (per-capture free text). Everything else the operator sets was
+already persisted. Verified headless: a five-value round-trip through a temp
+settings file restores all five, and a settings blob naming a non-existent
+profile leaves the combo at its default index without error. (2026-07-22)
+
+---
+
 ### src/pimd_classviz.py — v1.35 — Training status labels + place/remove flash & beep
 
 Two UX fixes to the v1.34 Training status line, in `_update_sig_train_indicator`
