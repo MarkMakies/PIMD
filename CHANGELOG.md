@@ -1,3 +1,27 @@
+### src/pimd_classviz.py — v1.37 — FIX Load signatures / Open for editing rejected the app's own files
+
+Both Analysis-tab load buttons delegated schema sniffing/reading to
+`pimd_corpus_check.py`, which is deliberately frozen on the legacy
+`target`/`distance_cm` schema and hard-`SystemExit`s on the v1.32+
+`target_id`/`distance_mm` schema — the exact schema this app now writes. So
+`_on_load_signatures_clicked` (`load_corpus`) and `_on_sig_open_for_edit_clicked`
+(`sniff_format` gate) both failed on every `gui_signatures_*.csv` the Training
+flow produces, surfacing only a `Load failed:`/`Open failed:` line in the status
+bar — i.e. nothing loaded. Confirmed against a real capture file. Fix: a new
+`_sig_file_is_new_schema()` (checks the header for target_id/distance_mm/delta_mV)
+dispatches both handlers to the app's own already-correct
+`_scan_editable_signature_file()` reader for new-schema files. Load signatures
+falls back to `pimd_corpus_check.load_corpus()` for legacy reference corpora
+(still overlay-able read-only); Open for editing now requires the new schema
+(editing appends v1.32+ rows via Save, so the file must already be that schema)
+and gives a clear message pointing at New file… / Load signatures… otherwise.
+`_merge_template_list` already handled the new schema's (session, capture_id)
+2-tuple keys, so no list-rendering change was needed. Verified headless against
+the real failing file: both buttons now parse its 3 signatures; a legacy-schema
+header is correctly routed to the `pimd_corpus_check` path. (2026-07-22)
+
+---
+
 ### src/pimd_classviz.py — v1.36 — persist the remaining preference controls
 
 Audit of `_save_settings`/`_load_settings` after Mark noticed the top-bar

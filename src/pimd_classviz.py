@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.36
+# PIMD Signature Visualiser (ClassViz) v1.37
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -18,6 +18,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.37 FIX Load signatures / Open for editing rejected the app's own v1.32+ files (schema dispatch)
 #   v1.36 persist Saved-profile / Saved-list selectors, Stats Std thresholds, Training settle window
 #   v1.35 training status labels name air/target; place/remove countdown flashes (red <5 s) + beeps
 #   v1.34 training auto-detect cycle (auto place/remove, 30 s countdowns, Save/Ignore, rolling air reuse)
@@ -97,7 +98,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.36'
+APP_VERSION = '1.37'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -2535,6 +2536,21 @@ class MainWindow(QMainWindow):
 
     # -- Corpus signature overlay (excludes chart 1) -------------------------
 
+    def _sig_file_is_new_schema(self, path):
+        """True if the file's header carries the v1.32+ corpus schema this app
+        reads and writes (target_id/distance_mm/delta_mV columns), i.e. is
+        _scan_editable_signature_file()-readable. pimd_corpus_check.py is still
+        on the legacy target/distance_cm schema and hard-rejects the new one,
+        so both load paths dispatch on this. Reads only the first non-comment
+        line."""
+        try:
+            with open(path, newline='') as f:
+                header = next((ln for ln in f if not ln.startswith('#')), '')
+        except OSError:
+            return False
+        cols = header.rstrip('\n').split(',')
+        return 'target_id' in cols and 'distance_mm' in cols and 'delta_mV' in cols
+
     def _on_load_signatures_clicked(self):
         # DontUseNativeDialog: the native GTK/portal file dialog renders as a
         # completely blank window in this environment -- Qt's own dialog
@@ -2545,7 +2561,13 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            sigs = pimd_corpus_check.load_corpus(path)
+            # v1.32+ files (what this app writes) go through our own reader;
+            # pimd_corpus_check.load_corpus only handles the legacy schema and
+            # would SystemExit on the new one (v1.37 fix).
+            if self._sig_file_is_new_schema(path):
+                sigs = self._scan_editable_signature_file(path)
+            else:
+                sigs = pimd_corpus_check.load_corpus(path)
         except (SystemExit, Exception) as e:
             self.statusBar().showMessage('Load failed: {0}'.format(e))
             return
@@ -3232,17 +3254,20 @@ class MainWindow(QMainWindow):
             options=QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
+        # Editing appends v1.32+ rows via Save, so the file must already be that
+        # schema (target_id/distance_mm/delta_mV). The old pimd_corpus_check
+        # sniff gate rejected exactly these files (v1.37 fix).
+        if not self._sig_file_is_new_schema(path):
+            self.statusBar().showMessage(
+                'Open for editing needs a v1.32+ signature file (target_id/distance_mm '
+                'columns). Use "New file…" to start one, or "Load signatures…" to browse a '
+                'legacy corpus read-only.')
+            return
         try:
-            fmt = pimd_corpus_check.sniff_format(path)
-        except SystemExit as e:
+            sigs = self._scan_editable_signature_file(path)
+        except Exception as e:
             self.statusBar().showMessage('Open failed: {0}'.format(e))
             return
-        if fmt != 'long':
-            self.statusBar().showMessage(
-                'GUI editing only supports long-format corpus files -- use "Load signatures…" '
-                'to browse this wide-format file read-only.')
-            return
-        sigs = self._scan_editable_signature_file(path)
         if sigs and QMessageBox.question(
                 self, 'Open for editing',
                 "'{0}' already has {1} signature(s). Add/Delete will modify this file directly. "
