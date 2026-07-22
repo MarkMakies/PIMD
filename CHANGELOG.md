@@ -1,3 +1,27 @@
+### src/pimd_classviz.py — v1.35 — Training status labels + place/remove flash & beep
+
+Two UX fixes to the v1.34 Training status line, in `_update_sig_train_indicator`
+and the phase-entry/exit helpers. (1) The A (status) labels now name their
+subject — `SETTLING air/target`, `COLLECTING air/target — k left`, `ACQUIRED air
+— N/N (rolling)` — and the `await_remove` label, which wrongly read `ACQUIRED —
+target on (rolling)`, is corrected to `ACQUIRED target — captured, remove now`:
+the target signature is frozen at `_sig_finish_target` (the `await_remove` ingest
+branch never appends to the buffer), so "rolling" was misleading; only the
+leading air genuinely rolls. (2) The 30 s place/remove countdowns now signal
+imminent action — the B instruction flashes (yellow, turning red in the final
+5 s) via a new `_sig_await_flash_timer`, and `QApplication.beep()` fires once
+when each prompt first appears (`_start_await_flash`, called from
+`_sig_lock_leading_air` and `_sig_finish_target`; stopped by `_stop_await_flash`
+on entering target/air_trail, on abort, and on Stop). No capture/stats change.
+The beep uses the OS system bell, which is silent if the desktop bell is
+disabled — a guaranteed tone would need a bundled audio asset + Qt Multimedia.
+Verified headless (offscreen-Qt): the subject labels render per phase, the
+target-held label has no "rolling", the await flash timer is active only during
+await_target/await_remove (and stops on target-entry/abort/Stop), and
+`_await_flash_style` returns red for ≤ 5 s remaining, yellow above. (2026-07-22)
+
+---
+
 ### src/pimd_classviz.py — v1.34 — Training auto-detect capture cycle
 
 Reworks the v1.33 Training group from a manual space-toggle into an automated

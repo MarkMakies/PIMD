@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.34
+# PIMD Signature Visualiser (ClassViz) v1.35
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -18,6 +18,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.35 training status labels name air/target; place/remove countdown flashes (red <5 s) + beeps
 #   v1.34 training auto-detect cycle (auto place/remove, 30 s countdowns, Save/Ignore, rolling air reuse)
 #   v1.33 continuous training capture (Training group; space-bar air/target toggle; supply battery/psu)
 #   v1.32 structured target-metadata capture regime (registry-backed Analysis/Training capture)
@@ -95,7 +96,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.34'
+APP_VERSION = '1.35'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -330,6 +331,7 @@ class MainWindow(QMainWindow):
         self._sig_await_deadline = None # wall-clock; 30 s guard for await_target/await_remove
         self._sig_decide_pending = False  # a computed signature is awaiting Save/Ignore
         self._sig_decide_flash_on = False # flash phase for the Save/Ignore buttons
+        self._sig_await_flash_on = False  # flash phase for the place/remove countdown (B)
         self._sig_air_before   = None   # {'t_seconds':(n,), 'frames_mV':(n,n_channels), 'n_frames':int}
         self._sig_air_after    = None   # same shape, optional
         self._sig_target       = None   # same shape
@@ -1813,6 +1815,10 @@ class MainWindow(QMainWindow):
         self._sig_decide_flash_timer.setInterval(450)
         self._sig_decide_flash_timer.timeout.connect(self._sig_decide_flash_tick)
 
+        self._sig_await_flash_timer = QTimer(self)
+        self._sig_await_flash_timer.setInterval(450)
+        self._sig_await_flash_timer.timeout.connect(self._sig_await_flash_tick)
+
         self._update_sig_capture_gating()
         return box
 
@@ -2798,9 +2804,35 @@ class MainWindow(QMainWindow):
         self._sig_air_after = None
         self._sig_train_phase = 'await_target'
         self._sig_await_deadline = time.time() + self._SIG_AWAIT_SECONDS
+        self._start_await_flash()
         self._update_sig_train_indicator()
 
+    def _start_await_flash(self):
+        """Beep once and start the B-instruction flash for a place/remove
+        countdown (imminent-action cue)."""
+        QApplication.beep()
+        self._sig_await_flash_on = True
+        self._sig_await_flash_timer.start()
+
+    def _stop_await_flash(self):
+        self._sig_await_flash_on = False
+        timer = getattr(self, '_sig_await_flash_timer', None)
+        if timer is not None:
+            timer.stop()
+        if hasattr(self, 'lbl_sig_train_instr'):
+            self.lbl_sig_train_instr.setStyleSheet('')
+
+    def _sig_await_flash_tick(self):
+        self._sig_await_flash_on = not self._sig_await_flash_on
+        self._update_sig_train_indicator()
+
+    def _await_flash_style(self, remaining):
+        if not self._sig_await_flash_on:
+            return ''
+        return self.MY_RED if remaining <= 5 else self.MY_YELLOW
+
     def _sig_enter_target(self):
+        self._stop_await_flash()
         self._sig_train_phase = 'target'
         self._sig_await_deadline = None
         self._sig_train_restart_buffer()
@@ -2811,9 +2843,11 @@ class MainWindow(QMainWindow):
         self._sig_target = self._sig_train_snapshot()
         self._sig_train_phase = 'await_remove'
         self._sig_await_deadline = time.time() + self._SIG_AWAIT_SECONDS
+        self._start_await_flash()
         self._update_sig_train_indicator()
 
     def _sig_enter_air_trail(self):
+        self._stop_await_flash()
         self._sig_train_phase = 'air_trail'
         self._sig_await_deadline = None
         self._sig_train_restart_buffer()
@@ -2848,6 +2882,7 @@ class MainWindow(QMainWindow):
         self._sig_air_after  = None
         self._sig_air_ref    = None
         self._sig_await_deadline = None
+        self._stop_await_flash()
         self._sig_train_phase = 'air_lead'
         self._sig_train_restart_buffer()
         self.statusBar().showMessage('Training: ' + reason)
@@ -2950,36 +2985,44 @@ class MainWindow(QMainWindow):
             return
 
         phase = self._sig_train_phase
+        # subject for the collecting-phase labels (air_lead/target/air_trail)
+        subj = 'target' if phase == 'target' else 'air'
         # -- A: status colour + text --
         if phase == 'await_target':
             a_text, style = 'WAITING for target…', self.MY_YELLOW
         elif phase == 'await_remove':
-            a_text, style = 'ACQUIRED — target on (rolling)', self.MY_GREEN
+            a_text, style = 'ACQUIRED target — captured, remove now', self.MY_GREEN
         elif self._sig_train_status == 'settling':
-            a_text = 'SETTLING' + ('' if settle_mv is None else ' {0:.3f} mV'.format(settle_mv))
+            a_text = 'SETTLING {0}'.format(subj) + (
+                '' if settle_mv is None else ' — {0:.3f} mV'.format(settle_mv))
             style = self.MY_YELLOW
         elif self._sig_train_status == 'collecting':
             buf = self._sig_train_buf
-            a_text = 'COLLECTING — {0} left'.format(buf.maxlen - len(buf))
+            a_text = 'COLLECTING {0} — {1} left'.format(subj, buf.maxlen - len(buf))
             style = self.MY_BLUE
         else:   # ready
-            a_text = 'ACQUIRED {0}/{0} (rolling)'.format(self._sig_train_buf.maxlen)
+            a_text = 'ACQUIRED {0} — {1}/{1} (rolling)'.format(subj, self._sig_train_buf.maxlen)
             style = self.MY_GREEN
         self.lbl_sig_train_status.setText(a_text)
         if style != self._sig_train_last_style:
             self.lbl_sig_train_status.setStyleSheet(style)
             self._sig_train_last_style = style
 
-        # -- B: instruction (decision overlays air_lead) --
-        self.lbl_sig_train_instr.setStyleSheet('')
+        # -- B: instruction (decision overlays air_lead; the place/remove
+        # countdowns flash yellow, then red in the final 5 s) --
+        b_style = ''
         if self._sig_decide_pending:
             b_text = 'Save signature?'
         elif phase == 'await_target':
-            b_text = 'Place target now — {0}s'.format(self._sig_await_remaining())
+            rem = self._sig_await_remaining()
+            b_text = 'Place target now — {0}s'.format(rem)
+            b_style = self._await_flash_style(rem)
         elif phase == 'target':
             b_text = 'Profiling target…'
         elif phase == 'await_remove':
-            b_text = 'Remove target now — {0}s'.format(self._sig_await_remaining())
+            rem = self._sig_await_remaining()
+            b_text = 'Remove target now — {0}s'.format(rem)
+            b_style = self._await_flash_style(rem)
         elif phase == 'air_trail':
             b_text = 'Final air…'
         elif self._sig_train_status == 'ready':   # air_lead ready
@@ -2987,6 +3030,7 @@ class MainWindow(QMainWindow):
         else:
             b_text = 'Acquiring leading air…'
         self.lbl_sig_train_instr.setText(b_text)
+        self.lbl_sig_train_instr.setStyleSheet(b_style)
 
     def _sig_await_remaining(self):
         if self._sig_await_deadline is None:
@@ -3049,6 +3093,7 @@ class MainWindow(QMainWindow):
         self._sig_air_after  = None
         self._sig_target     = None
         self._clear_sig_decide()   # always stop the flash; _sig_last_stats kept below if preserving
+        self._stop_await_flash()
         pb = getattr(self, 'pb_sig_train_start', None)
         if pb is not None:
             pb.blockSignals(True)

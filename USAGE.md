@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.3
+# PIMD — Usage Guide (USAGE.md) v1.4
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,9 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.4 2026-07-22 classviz v1.34 → v1.35 (Training status labels name air/target;
+                place/remove countdown flashes red in the final 5 s + beeps on
+                the prompt). §5 Training bullet touched.
 v1.3 2026-07-22 classviz v1.33 → v1.34 (Training group becomes an automated
                 auto-detect cycle: one Space per cycle, auto place/remove
                 detection, 30 s countdowns, Save/Ignore). §5 Training bullet
@@ -43,7 +46,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.25)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.34)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.35)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │
                      ▼
@@ -157,7 +160,7 @@ Settings persist in `src/data/delaycal_settings.json`.
 
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.34)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.35)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -178,10 +181,12 @@ target metadata validated against the target registry.
   management, registry-validated target combo from `targets.csv` via
   `pimd_targets.py`, structured placement fields — distance_mm, axes, offsets,
   medium, repeat_idx, notes — readout and Save/Delete) and a **Training** group
-  (v1.34): an automated auto-detect capture cycle. Press **Start Training**; two
-  status areas show **A** = state (yellow SETTLING → blue COLLECTING with a
-  frames-left countdown → green ACQUIRED, rolling) and **B** = the next
-  instruction. Once the leading air is green, B says **Press Space** — the one
+  (v1.35): an automated auto-detect capture cycle. Press **Start Training**; two
+  status areas show **A** = state, naming air vs target (yellow SETTLING → blue
+  COLLECTING with a frames-left countdown → green ACQUIRED; the leading air keeps
+  rolling, the target is held once captured) and **B** = the next instruction.
+  The place/remove countdowns in **B** flash (red in the final 5 s) with a beep
+  when each prompt appears. Once the leading air is green, B says **Press Space** — the one
   Space press per cycle locks the last N frames as the leading air and starts a
   30 s **place target** countdown. The app **auto-detects** placement (signal
   re-settles with mean |Δ| from the locked air above the **Detect ≥ mV**
