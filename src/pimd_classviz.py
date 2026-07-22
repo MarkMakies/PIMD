@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.33
+# PIMD Signature Visualiser (ClassViz) v1.34
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -18,6 +18,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.34 training auto-detect cycle (auto place/remove, 30 s countdowns, Save/Ignore, rolling air reuse)
 #   v1.33 continuous training capture (Training group; space-bar air/target toggle; supply battery/psu)
 #   v1.32 structured target-metadata capture regime (registry-backed Analysis/Training capture)
 #   v1.31 Analysis-tab signature captures hardened to session-pipeline rigor (settle gate, glitch exclusion)
@@ -94,7 +95,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.33'
+APP_VERSION = '1.34'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -311,22 +312,30 @@ class MainWindow(QMainWindow):
         self._targets        = {}    # dict[target_id -> pimd_targets.Target]
         self._target_issues   = []
 
-        # Analysis tab — continuous training capture (v1.33). A second,
-        # independent capture channel from _capturing/_capture_buf (which stay
-        # hard-wired to the Heatmap tab's "Capture baseline"). One session
-        # alternates AIR/TARGET phases; each committed air anchor is both
-        # air_after for the previous target and air_before for the next.
+        # Analysis tab — automated auto-detect training cycle (v1.34). A
+        # second, independent capture channel from _capturing/_capture_buf
+        # (which stay hard-wired to the Heatmap tab's "Capture baseline"). One
+        # Space press locks the leading air; target placement/removal are
+        # auto-detected; the trailing air rolls straight into the next cycle's
+        # leading air (same rolling deque).
         self._sig_capture_n    = pimd_features.MIN_CENTRAL_FRAMES
         self._analysis_training_active = False
-        self._sig_train_phase  = 'air'       # 'air' | 'target'
-        self._sig_train_status = 'settling'  # 'settling' | 'collecting' | 'ready'
+        # phase: 'air_lead' | 'await_target' | 'target' | 'await_remove' | 'air_trail'
+        self._sig_train_phase  = 'air_lead'
+        self._sig_train_status = 'settling'  # 'settling' | 'collecting' | 'ready' (collecting phases)
         self._sig_train_buf    = None        # deque(maxlen=N) of (ts, raw_uV.copy()); rolls in 'ready'
         self._sig_train_last_style = None    # stylesheet churn guard for the status label
         self._sig_glitch_skipped = 0    # glitch frames excluded from the current window (v1.31)
+        self._sig_air_ref      = None   # np mV vector: median of the locked leading air (auto-detect ref)
+        self._sig_await_deadline = None # wall-clock; 30 s guard for await_target/await_remove
+        self._sig_decide_pending = False  # a computed signature is awaiting Save/Ignore
+        self._sig_decide_flash_on = False # flash phase for the Save/Ignore buttons
         self._sig_air_before   = None   # {'t_seconds':(n,), 'frames_mV':(n,n_channels), 'n_frames':int}
         self._sig_air_after    = None   # same shape, optional
         self._sig_target       = None   # same shape
         self._sig_last_stats   = None   # cached dict from _compute_sig_stats(), for the live readout
+
+        self._SIG_AWAIT_SECONDS = 30.0  # place/remove-target guard countdown
 
         # Analysis tab — session recording (alternate path, reuses the
         # Training Session tab's own _session_start/_session_stop/_append_mark
@@ -1712,44 +1721,33 @@ class MainWindow(QMainWindow):
         v.addLayout(row_reload)
 
     def _build_analysis_training_group(self):
-        """Training group (v1.33) — continuous space-bar-driven air/target
-        toggle. Replaces the v1.31/1.32 three-button air-before/target/
-        air-after quick-capture; the settle gate, glitch exclusion and stats
-        math are unchanged, only the operator flow is new."""
+        """Training group (v1.34) — automated auto-detect capture cycle. One
+        Space press per cycle locks the leading air; target placement and
+        removal are auto-detected (settle + Detect threshold), with 30 s guard
+        countdowns and a Save/Ignore decision. The settle gate, glitch
+        exclusion and stats math (pimd_features) are unchanged from v1.33."""
         box = QGroupBox('Training')
         v = QVBoxLayout(box)
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(2)
 
-        row_a = QHBoxLayout()
+        # -- Row 1: Start/Stop, Frames, Settle, Detect, Space-override --------
+        row1 = QHBoxLayout()
         self.pb_sig_train_start = QPushButton('Start Training')
         self.pb_sig_train_start.setCheckable(True)
         self.pb_sig_train_start.toggled.connect(self._on_sig_train_start_toggled)
-        row_a.addWidget(self.pb_sig_train_start)
+        row1.addWidget(self.pb_sig_train_start)
 
-        self.pb_sig_train_acquire = QPushButton('Acquire (Space)')
-        self.pb_sig_train_acquire.clicked.connect(self._on_sig_train_acquire)
-        self.pb_sig_train_acquire.setToolTip(
-            'Commits the freshest N clean settled frames as the current '
-            'phase\'s capture. Only acts when the indicator is blue (READY). '
-            'The Space bar does the same while the Analysis tab is visible.')
-        row_a.addWidget(self.pb_sig_train_acquire)
-
-        self.lbl_sig_train_status = QLabel('Idle — press Start Training')
-        row_a.addWidget(self.lbl_sig_train_status, stretch=1)
-        v.addLayout(row_a)
-
-        row_b = QHBoxLayout()
-        row_b.addWidget(QLabel('Frames:'))
+        row1.addWidget(QLabel('Frames:'))
         self.sp_sig_capture_n = QSpinBox()
         self.sp_sig_capture_n.setRange(10, 2000)
         self.sp_sig_capture_n.setValue(self._sig_capture_n)
         self.sp_sig_capture_n.setToolTip(
             'Frames per capture window. Applied at the next phase change or '
             'settle-loss restart, not mid-window.')
-        row_b.addWidget(self.sp_sig_capture_n)
+        row1.addWidget(self.sp_sig_capture_n)
 
-        row_b.addWidget(QLabel('Settle ≤ (mV):'))
+        row1.addWidget(QLabel('Settle ≤ (mV):'))
         self.sp_sig_settle_mv = QDoubleSpinBox()
         self.sp_sig_settle_mv.setRange(0.05, 50.0)
         self.sp_sig_settle_mv.setDecimals(3)
@@ -1761,11 +1759,59 @@ class MainWindow(QMainWindow):
             'metric as the Training tab\'s Settledness) is at or below this, so '
             'target/air transitions and the firmware\'s ~10 s rolling-average '
             'ramp can\'t enter the window. Raise to 50 to disable.')
-        row_b.addWidget(self.sp_sig_settle_mv)
+        row1.addWidget(self.sp_sig_settle_mv)
 
-        self.lbl_sig_train_phase = QLabel('')
-        row_b.addWidget(self.lbl_sig_train_phase, stretch=1)
-        v.addLayout(row_b)
+        row1.addWidget(QLabel('Detect ≥ (mV):'))
+        self.sp_sig_detect_mv = QDoubleSpinBox()
+        self.sp_sig_detect_mv.setRange(0.05, 50.0)
+        self.sp_sig_detect_mv.setDecimals(3)
+        self.sp_sig_detect_mv.setSingleStep(0.1)
+        self.sp_sig_detect_mv.setValue(0.5)
+        self.sp_sig_detect_mv.setToolTip(
+            'Target auto-detect threshold. After the signal re-settles, a '
+            'target is "present" when the mean per-channel |Δ| from the locked '
+            'leading-air baseline exceeds this, and "removed" when it drops '
+            'back below it. Raise for large/close targets, lower for small/'
+            'distant ones.')
+        row1.addWidget(self.sp_sig_detect_mv)
+
+        self.cb_sig_train_override = QCheckBox('Space override')
+        self.cb_sig_train_override.setChecked(True)
+        self.cb_sig_train_override.setToolTip(
+            'When checked, Space also force-advances the current phase (commit '
+            'whatever is collected / skip the auto-detect wait) as a manual '
+            'fallback. When unchecked, Space only locks the leading air and the '
+            'rest of the cycle is purely auto-detected.')
+        row1.addWidget(self.cb_sig_train_override)
+        row1.addStretch(1)
+        v.addLayout(row1)
+
+        # -- Row 2: A = status (colored), B = instruction --------------------
+        row2 = QHBoxLayout()
+        self.lbl_sig_train_status = QLabel('Idle — press Start Training')
+        self.lbl_sig_train_status.setToolTip(
+            'Status (A): yellow = settling/waiting, blue = collecting (frames '
+            'left), green = acquired (rolling).')
+        row2.addWidget(self.lbl_sig_train_status, stretch=1)
+        self.lbl_sig_train_instr = QLabel('')
+        self.lbl_sig_train_instr.setToolTip('Instruction (B): what to do next.')
+        row2.addWidget(self.lbl_sig_train_instr, stretch=1)
+        v.addLayout(row2)
+
+        # -- Row 3: Save / Ignore decision (flash when a signature is ready) --
+        row3 = QHBoxLayout()
+        self.pb_sig_train_save = QPushButton('Save Sig')
+        self.pb_sig_train_save.clicked.connect(self._on_sig_train_save)
+        row3.addWidget(self.pb_sig_train_save)
+        self.pb_sig_train_ignore = QPushButton('Ignore Sig')
+        self.pb_sig_train_ignore.clicked.connect(self._on_sig_train_ignore)
+        row3.addWidget(self.pb_sig_train_ignore)
+        row3.addStretch(1)
+        v.addLayout(row3)
+
+        self._sig_decide_flash_timer = QTimer(self)
+        self._sig_decide_flash_timer.setInterval(450)
+        self._sig_decide_flash_timer.timeout.connect(self._sig_decide_flash_tick)
 
         self._update_sig_capture_gating()
         return box
@@ -2636,14 +2682,25 @@ class MainWindow(QMainWindow):
 
     # -- Signature capture (air-before / target / air-after) ----------------
 
-    # -- Training state machine (v1.33) ---------------------------------
-    # One continuous session alternates AIR/TARGET capture phases; each
-    # committed air anchor closes the previous target (air_after) and opens
-    # the next (air_before). Status ladder within a phase: 'settling'
-    # (yellow) -> 'collecting' (green) -> 'ready' (blue; the deque keeps
-    # rolling so Acquire commits the freshest N clean frames). Settle loss
-    # mid-window clears the buffer back to 'settling' -- a disturbance
-    # contaminates the whole window (same philosophy as the v1.31 gate).
+    # -- Training state machine (v1.34) ---------------------------------
+    # Automated auto-detect cycle. Phases:
+    #   air_lead     -- rolling the leading air; Space (green) locks the last
+    #                   N frames and starts the cycle.
+    #   await_target -- air locked; wait (30 s) for a target to be placed and
+    #                   the signal to re-settle above the Detect threshold.
+    #   target       -- collect N target frames.
+    #   await_remove -- target acquired; wait (30 s) for removal (re-settle
+    #                   back below Detect).
+    #   air_trail    -- collect N trailing air frames -> compute the signature
+    #                   -> Save/Ignore; the buffer keeps rolling as the next
+    #                   cycle's leading air.
+    # Colour ladder in the collecting phases: 'settling' (yellow) ->
+    # 'collecting' (blue, frames-left countdown) -> 'ready' (green, rolling).
+    # Settle loss mid-window clears the buffer -- a disturbance contaminates
+    # the whole window (v1.31 gate philosophy). All snapshot/stats math is
+    # unchanged from v1.33; only the transition triggers and UI are new.
+
+    _SIG_COLLECTING_PHASES = ('air_lead', 'target', 'air_trail')
 
     def _on_sig_train_start_toggled(self, checked):
         if not checked:
@@ -2665,57 +2722,137 @@ class MainWindow(QMainWindow):
         self._sig_air_after  = None
         self._sig_target     = None
         self._sig_last_stats = None
+        self._sig_air_ref    = None
+        self._sig_await_deadline = None
+        self._clear_sig_decide()
         self._update_sig_readout()
         self._analysis_training_active = True
-        self._sig_train_phase = 'air'
+        self._sig_train_phase = 'air_lead'
         self.pb_sig_train_start.setText('Stop Training')
         self._sig_train_restart_buffer()
         self._update_sig_capture_gating()
 
-    def _on_sig_train_acquire(self):
-        """Commits the freshest N clean settled frames as the current phase's
-        capture. Bound to the Acquire button and (via eventFilter) Space."""
-        if not self._analysis_training_active:
-            return
-        if self._sig_train_status != 'ready':
-            self.statusBar().showMessage(
-                'Training: not ready — wait for the blue READY state')
-            return
+    def _sig_train_snapshot(self):
+        """The current rolling buffer as a capture entry (same dict shape the
+        v1.33 acquire produced)."""
         buf = self._sig_train_buf
         ts_arr  = np.array([ts for ts, _ in buf], dtype=float)
         raw_arr = np.array([r for _, r in buf], dtype=float)
-        entry = {'t_seconds': ts_arr, 'frames_mV': raw_arr / 1000.0, 'n_frames': len(ts_arr)}
         if self._sig_glitch_skipped > 0.2 * buf.maxlen:
             self.statusBar().showMessage(
-                '⚠ training acquire ({0}): {1} glitch frame(s) excluded while '
-                'filling the {2}-frame window — check for interference'.format(
+                '⚠ training ({0}): {1} glitch frame(s) excluded while filling '
+                'the {2}-frame window — check for interference'.format(
                     self._sig_train_phase, self._sig_glitch_skipped, buf.maxlen))
-        if self._sig_train_phase == 'air':
-            if self._sig_target is not None:
-                # This air closes the pending target: compute + display a
-                # stats *snapshot*, then immediately shift the slots so the
-                # same anchor opens the next target. Save reads only
-                # _sig_last_stats + placement widgets, so shifting here (not
-                # at save time) is race-free even if the operator acquires
-                # the next target before pressing Save.
-                self._sig_air_after = entry
-                had_unsaved = self._sig_last_stats is not None
-                stats = self._compute_sig_stats()
-                self._sig_last_stats = stats
-                self._set_sig_readout_from_stats(stats)
-                self._sig_air_before = entry
-                self._sig_target     = None
-                self._sig_air_after  = None
-                if had_unsaved:
+        return {'t_seconds': ts_arr, 'frames_mV': raw_arr / 1000.0, 'n_frames': len(ts_arr)}
+
+    def _on_sig_train_space(self):
+        """Space handler. Locks the leading air (air_lead -> await_target), and
+        — when 'Space override' is checked — force-advances any other phase as
+        a manual fallback for slow/failed auto-detect."""
+        if not self._analysis_training_active:
+            return
+        if self._sig_decide_pending:
+            self.statusBar().showMessage('Training: decide Save / Ignore first')
+            return
+        phase = self._sig_train_phase
+        override = self.cb_sig_train_override.isChecked()
+        if phase == 'air_lead':
+            if self._sig_train_status != 'ready':
+                if not override:
                     self.statusBar().showMessage(
-                        'Training: previous unsaved capture replaced')
-            else:
-                self._sig_air_before = entry
-            self._sig_train_phase = 'target'
-        else:
-            self._sig_target = entry
-            self._sig_train_phase = 'air'
+                        'Training: leading air not ready yet (wait for green)')
+                    return
+            self._sig_lock_leading_air()
+        elif not override:
+            self.statusBar().showMessage(
+                'Training: auto-detecting — enable "Space override" to advance manually')
+            return
+        elif phase == 'await_target':
+            self._sig_enter_target()
+        elif phase == 'target':
+            self._sig_finish_target()
+        elif phase == 'await_remove':
+            self._sig_enter_air_trail()
+        elif phase == 'air_trail':
+            self._sig_finish_air_trail()
+        self._update_sig_capture_gating()
+
+    def _sig_can_commit(self):
+        """True if the rolling buffer holds enough frames to snapshot (guards
+        a Space-override force-advance of a barely-started window)."""
+        if self._sig_train_buf is None or len(self._sig_train_buf) < 2:
+            self.statusBar().showMessage('Training: not enough frames collected yet')
+            return False
+        return True
+
+    def _sig_lock_leading_air(self):
+        """Snapshot the last N rolling frames as the leading air and arm the
+        target-placement wait."""
+        if not self._sig_can_commit():
+            return
+        entry = self._sig_train_snapshot()
+        self._sig_air_before = entry
+        # air reference for the Detect threshold: median of the locked frames
+        self._sig_air_ref = np.median(entry['frames_mV'], axis=0)
+        self._sig_target    = None
+        self._sig_air_after = None
+        self._sig_train_phase = 'await_target'
+        self._sig_await_deadline = time.time() + self._SIG_AWAIT_SECONDS
+        self._update_sig_train_indicator()
+
+    def _sig_enter_target(self):
+        self._sig_train_phase = 'target'
+        self._sig_await_deadline = None
         self._sig_train_restart_buffer()
+
+    def _sig_finish_target(self):
+        if not self._sig_can_commit():
+            return
+        self._sig_target = self._sig_train_snapshot()
+        self._sig_train_phase = 'await_remove'
+        self._sig_await_deadline = time.time() + self._SIG_AWAIT_SECONDS
+        self._update_sig_train_indicator()
+
+    def _sig_enter_air_trail(self):
+        self._sig_train_phase = 'air_trail'
+        self._sig_await_deadline = None
+        self._sig_train_restart_buffer()
+
+    def _sig_finish_air_trail(self):
+        """Trailing air completes the signature; the buffer keeps rolling as
+        the next cycle's leading air while the operator decides Save/Ignore."""
+        if not self._sig_can_commit():
+            return
+        self._sig_air_after = self._sig_train_snapshot()
+        stats = self._compute_sig_stats()
+        self._sig_last_stats = stats
+        self._set_sig_readout_from_stats(stats)
+        # stats now hold everything Save needs (it reads _sig_last_stats +
+        # placement widgets, never the raw slots) -- drop the slots so the
+        # readout/Save gating go inert once the decision is made.
+        self._sig_air_before = None
+        self._sig_target     = None
+        self._sig_air_after  = None
+        # roll straight into the next leading air (same deque, no reset)
+        self._sig_train_phase = 'air_lead'
+        self._sig_start_sig_decide()
+        self._update_sig_train_indicator()
+
+    def _sig_train_abort(self, reason):
+        """Discard the in-progress signature on a countdown timeout; the
+        session stays live and returns to rolling leading air. The buffer is
+        restarted so a stale window (e.g. target frames after a remove
+        timeout) can't be mistaken for fresh air."""
+        self._sig_air_before = None
+        self._sig_target     = None
+        self._sig_air_after  = None
+        self._sig_air_ref    = None
+        self._sig_await_deadline = None
+        self._sig_train_phase = 'air_lead'
+        self._sig_train_restart_buffer()
+        self.statusBar().showMessage('Training: ' + reason)
+        self.lbl_sig_train_instr.setText(reason)
+        self.lbl_sig_train_instr.setStyleSheet(self.MY_RED)
         self._update_sig_capture_gating()
 
     def _sig_train_restart_buffer(self):
@@ -2738,71 +2875,180 @@ class MainWindow(QMainWindow):
         mat = np.array([arr for _, arr in recent], dtype=float)
         return float(mat.std(0).mean()) / 1000.0
 
+    def _current_dev_from_air(self):
+        """Mean per-channel |Δ| in mV between the current settle-window median
+        and the locked leading-air reference. None if no reference or too few
+        frames / a channel-count mismatch (profile changed mid-cycle)."""
+        if self._sig_air_ref is None:
+            return None
+        n_win  = self.sp_stats_window.value()
+        recent = list(self._rolling_buf)[-n_win:]
+        if len(recent) < 2:
+            return None
+        mat = np.array([arr for _, arr in recent], dtype=float) / 1000.0
+        if mat.shape[1] != self._sig_air_ref.shape[0]:
+            return None
+        return float(np.abs(np.median(mat, axis=0) - self._sig_air_ref).mean())
+
     def _sig_train_ingest(self, now, raw, glitch_mask):
         """Per-frame training logic, called from process_packet."""
         settle_mv = self._current_settle_mv()
         settled = settle_mv is not None and settle_mv <= self.sp_sig_settle_mv.value()
+        phase = self._sig_train_phase
+
+        if phase in ('await_target', 'await_remove'):
+            # Guard countdown + auto-detect. A transition fires only when the
+            # signal is settled AND the |Δ| from the locked air crosses Detect
+            # (present > Detect, removed < Detect) -- the placement/removal
+            # transient (unsettled) is skipped naturally.
+            if self._sig_await_deadline is not None and now >= self._sig_await_deadline:
+                self._sig_train_abort('timed out — signature discarded')
+                return
+            if settled:
+                dev = self._current_dev_from_air()
+                if dev is not None:
+                    if phase == 'await_target' and dev > self.sp_sig_detect_mv.value():
+                        self._sig_enter_target()
+                        return
+                    if phase == 'await_remove' and dev < self.sp_sig_detect_mv.value():
+                        self._sig_enter_air_trail()
+                        return
+            self._update_sig_train_indicator(settle_mv)
+            return
+
+        # Collecting phases (air_lead / target / air_trail).
         if not settled:
             if self._sig_train_status != 'settling':
-                # Settle lost mid-window: the whole window is contaminated.
                 self._sig_train_buf.clear()
                 self._sig_glitch_skipped = 0
                 self._sig_train_status = 'settling'
             self._update_sig_train_indicator(settle_mv)
             return
         if glitch_mask.any():
-            # mirrors pimd_features.drop_flagged: glitch frames never enter
-            # a capture window
             self._sig_glitch_skipped += 1
         else:
             self._sig_train_buf.append((now, raw.copy()))
         full = len(self._sig_train_buf) >= self._sig_train_buf.maxlen
         self._sig_train_status = 'ready' if full else 'collecting'
+        if full and phase == 'target':
+            self._sig_finish_target()           # enough target frames -> await removal
+            return
+        if full and phase == 'air_trail':
+            self._sig_finish_air_trail()         # enough trailing air -> signature + decide
+            return
         self._update_sig_train_indicator(settle_mv)
 
     def _update_sig_train_indicator(self, settle_mv=None):
-        """Renders the colored status label + phase instruction. Stylesheet
-        is only touched on state change; text may update every frame."""
+        """Renders A (colored status) and B (instruction). Stylesheet is only
+        touched on state change; text may update every frame."""
         if not self._analysis_training_active:
             self.lbl_sig_train_status.setText('Idle — press Start Training')
-            self.lbl_sig_train_phase.setText('')
-            style = ''
+            self.lbl_sig_train_status.setStyleSheet('')
+            self._sig_train_last_style = ''
+            self.lbl_sig_train_instr.setText('')
+            self.lbl_sig_train_instr.setStyleSheet('')
+            return
+
+        phase = self._sig_train_phase
+        # -- A: status colour + text --
+        if phase == 'await_target':
+            a_text, style = 'WAITING for target…', self.MY_YELLOW
+        elif phase == 'await_remove':
+            a_text, style = 'ACQUIRED — target on (rolling)', self.MY_GREEN
         elif self._sig_train_status == 'settling':
-            self.lbl_sig_train_status.setText(
-                'SETTLING' + ('' if settle_mv is None else ' {0:.3f} mV'.format(settle_mv)))
+            a_text = 'SETTLING' + ('' if settle_mv is None else ' {0:.3f} mV'.format(settle_mv))
             style = self.MY_YELLOW
         elif self._sig_train_status == 'collecting':
-            self.lbl_sig_train_status.setText('COLLECTING {0}/{1}'.format(
-                len(self._sig_train_buf), self._sig_train_buf.maxlen))
-            style = self.MY_GREEN
-        else:
-            self.lbl_sig_train_status.setText(
-                'READY — Space to acquire ({0})'.format(self._sig_train_phase))
+            buf = self._sig_train_buf
+            a_text = 'COLLECTING — {0} left'.format(buf.maxlen - len(buf))
             style = self.MY_BLUE
+        else:   # ready
+            a_text = 'ACQUIRED {0}/{0} (rolling)'.format(self._sig_train_buf.maxlen)
+            style = self.MY_GREEN
+        self.lbl_sig_train_status.setText(a_text)
         if style != self._sig_train_last_style:
             self.lbl_sig_train_status.setStyleSheet(style)
             self._sig_train_last_style = style
+
+        # -- B: instruction (decision overlays air_lead) --
+        self.lbl_sig_train_instr.setStyleSheet('')
+        if self._sig_decide_pending:
+            b_text = 'Save signature?'
+        elif phase == 'await_target':
+            b_text = 'Place target now — {0}s'.format(self._sig_await_remaining())
+        elif phase == 'target':
+            b_text = 'Profiling target…'
+        elif phase == 'await_remove':
+            b_text = 'Remove target now — {0}s'.format(self._sig_await_remaining())
+        elif phase == 'air_trail':
+            b_text = 'Final air…'
+        elif self._sig_train_status == 'ready':   # air_lead ready
+            b_text = 'Press Space'
+        else:
+            b_text = 'Acquiring leading air…'
+        self.lbl_sig_train_instr.setText(b_text)
+
+    def _sig_await_remaining(self):
+        if self._sig_await_deadline is None:
+            return int(self._SIG_AWAIT_SECONDS)
+        return max(0, int(round(self._sig_await_deadline - time.time())))
+
+    # -- Save / Ignore decision -----------------------------------------
+    def _sig_start_sig_decide(self):
+        self._sig_decide_pending = True
+        self._sig_decide_flash_on = True
+        self._sig_decide_flash_timer.start()
+        self._update_sig_capture_gating()
+
+    def _clear_sig_decide(self):
+        self._sig_decide_pending = False
+        self._sig_decide_flash_on = False
+        timer = getattr(self, '_sig_decide_flash_timer', None)
+        if timer is not None:
+            timer.stop()
+        for pb in (getattr(self, 'pb_sig_train_save', None),
+                   getattr(self, 'pb_sig_train_ignore', None)):
+            if pb is not None:
+                pb.setStyleSheet('')
+
+    def _sig_decide_flash_tick(self):
+        self._sig_decide_flash_on = not self._sig_decide_flash_on
+        self.pb_sig_train_save.setStyleSheet(self.MY_GREEN if self._sig_decide_flash_on else '')
+        self.pb_sig_train_ignore.setStyleSheet(self.MY_YELLOW if self._sig_decide_flash_on else '')
+
+    def _on_sig_train_save(self):
+        # _on_sig_save_clicked's training-branch tail clears the decision and
+        # resets the readout/gating (works for a direct pb_sig_save click too).
+        if not self._sig_decide_pending:
+            return
+        self._on_sig_save_clicked()   # reads _sig_last_stats + placement widgets
+
+    def _on_sig_train_ignore(self):
+        if not self._sig_decide_pending:
+            return
+        self._clear_sig_decide()
+        self._sig_last_stats = None
+        self._update_sig_readout()
+        self.statusBar().showMessage('Training: signature ignored')
         if self._analysis_training_active:
-            if self._sig_train_phase == 'target':
-                instr = 'Place target now — edit metadata while it settles'
-            elif self._sig_target is not None:
-                instr = 'Remove target now — next air acquire closes the signature'
-            else:
-                instr = 'Keep coil clear — leading air capture'
-            self.lbl_sig_train_phase.setText(instr)
+            self._update_sig_train_indicator()
+        self._update_sig_capture_gating()
 
     def _reset_sig_capture_state(self, preserve_stats=False):
         """Ends any training session and clears the capture slots. With
         preserve_stats, the last computed signature (readout + Save) survives
         a Stop so an unsaved capture can still be saved."""
         self._analysis_training_active = False
-        self._sig_train_phase    = 'air'
+        self._sig_train_phase    = 'air_lead'
         self._sig_train_status   = 'settling'
         self._sig_train_buf      = None
         self._sig_glitch_skipped = 0
+        self._sig_air_ref        = None
+        self._sig_await_deadline = None
         self._sig_air_before = None
         self._sig_air_after  = None
         self._sig_target     = None
+        self._clear_sig_decide()   # always stop the flash; _sig_last_stats kept below if preserving
         pb = getattr(self, 'pb_sig_train_start', None)
         if pb is not None:
             pb.blockSignals(True)
@@ -2883,7 +3129,7 @@ class MainWindow(QMainWindow):
             self.lbl_sig_readout.setStyleSheet('' if stats['quality'] == 'ok' else self.MY_YELLOW)
 
     def _update_sig_capture_gating(self):
-        if not hasattr(self, 'pb_sig_train_acquire'):
+        if not hasattr(self, 'pb_sig_train_ignore'):
             return   # mid-build: the Training group runs this again once complete
         has_file = self._editable_sig_path is not None
         self.sig_target.setEnabled(has_file)
@@ -2897,8 +3143,11 @@ class MainWindow(QMainWindow):
         self.sig_notes.setEnabled(has_file)
         self.sp_sig_capture_n.setEnabled(has_file)
         self.sp_sig_settle_mv.setEnabled(has_file)
+        self.sp_sig_detect_mv.setEnabled(has_file)
+        self.cb_sig_train_override.setEnabled(has_file)
         self.pb_sig_train_start.setEnabled(has_file)
-        self.pb_sig_train_acquire.setEnabled(self._analysis_training_active)
+        self.pb_sig_train_save.setEnabled(self._sig_decide_pending)
+        self.pb_sig_train_ignore.setEnabled(self._sig_decide_pending)
         stats = self._sig_last_stats
         self.pb_sig_save.setEnabled(
             has_file and stats is not None and 'error' not in stats
@@ -3094,10 +3343,13 @@ class MainWindow(QMainWindow):
                 writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
         self._reload_editable_signature_list()
         if self._analysis_training_active:
-            # Keep the training session running: the slots were already
-            # shifted at air-acquire, so recomputing correctly yields dashes
-            # (and Save disabled) until the next signature completes.
+            # Keep the session running: the raw slots were cleared when the
+            # signature was computed, so the readout goes to dashes and the
+            # decision (flash + Save/Ignore) is retired until the next cycle.
+            self._clear_sig_decide()
+            self._sig_last_stats = None
             self._update_sig_readout()
+            self._update_sig_train_indicator()
             self._update_sig_capture_gating()
         else:
             self._reset_sig_capture_state()
@@ -4029,6 +4281,8 @@ class MainWindow(QMainWindow):
 
             self.sp_sig_capture_n.setValue(int(s.get('sig_capture_n', pimd_features.MIN_CENTRAL_FRAMES)))
             self.sp_sig_settle_mv.setValue(float(s.get('sig_settle_mv', 1.0)))
+            self.sp_sig_detect_mv.setValue(float(s.get('sig_detect_mv', 0.5)))
+            self.cb_sig_train_override.setChecked(bool(s.get('sig_train_override', True)))
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             self.resize(1100, 900)  # first run
 
@@ -4075,6 +4329,8 @@ class MainWindow(QMainWindow):
 
             'sig_capture_n': self.sp_sig_capture_n.value(),
             'sig_settle_mv': self.sp_sig_settle_mv.value(),
+            'sig_detect_mv': self.sp_sig_detect_mv.value(),
+            'sig_train_override': self.cb_sig_train_override.isChecked(),
 
             'supply': self.cb_supply.currentText(),
 
@@ -4103,9 +4359,9 @@ class MainWindow(QMainWindow):
         widgets that already consume Space (e.g. QPushButton's
         Space-to-click). Suppressed whenever a text-entry widget has focus
         (including a QTableWidget cell mid-edit, which uses an embedded
-        QLineEdit). Dispatch (v1.33): an active Analysis-tab training session
-        gets Space as Acquire while that tab is visible; otherwise Space
-        stays the Training Session tab's step-advance."""
+        QLineEdit). Dispatch (v1.34): an active Analysis-tab training session
+        gets Space (lock leading air / override-advance) while that tab is
+        visible; otherwise Space stays the Training Session tab's step-advance."""
         if event.type() == QEvent.Type.KeyPress:
             if isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox)):
                 return super().eventFilter(obj, event)
@@ -4114,7 +4370,7 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_Space:
                 if self._analysis_training_active and \
                         self.tabs.currentIndex() == self._analysis_tab_index:
-                    self._on_sig_train_acquire()
+                    self._on_sig_train_space()
                 else:
                     self._on_training_space()
                 return True

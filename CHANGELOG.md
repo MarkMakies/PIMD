@@ -1,3 +1,47 @@
+### src/pimd_classviz.py — v1.34 — Training auto-detect capture cycle
+
+Reworks the v1.33 Training group from a manual space-toggle into an automated
+cycle per Mark's bench spec. The operator presses **Space once per cycle** to
+lock the leading air; target **placement and removal are auto-detected**, with
+30 s guard countdowns and a Save/Ignore decision. Layout: row 1 =
+Start/Stop · Frames · Settle ≤ mV · new **Detect ≥ mV** · **Space override**
+checkbox; row 2 = two status areas, **A** (colored state) and **B**
+(instruction); row 3 = **Save Sig / Ignore Sig** (flash while a signature is
+pending). The Acquire button is gone — Space is handled in `eventFilter`.
+
+State machine (`_sig_train_phase`): `air_lead` (roll the leading air) →
+`await_target` → `target` → `await_remove` → `air_trail`. Colour ladder for the
+collecting phases is remapped from v1.33: yellow SETTLING → **blue COLLECTING**
+(frames-left countdown) → **green ACQUIRED** (rolling). Auto-detect
+(`_current_dev_from_air`): a transition fires only when the signal is settled
+(the unchanged v1.31 `_current_settle_mv` gate) AND the mean per-channel |Δ|
+from the locked leading-air reference crosses **Detect** — above for placement,
+below for removal — so the hand transient (unsettled) is skipped naturally. The
+30 s countdowns (`_sig_await_deadline`) show in B and, on expiry, **abort** the
+in-progress signature (discard slots, flash red, restart the buffer, session
+stays live). The trailing air **keeps rolling** as the next cycle's leading air
+(same deque, never reset across the decision), so "space locks the last N frames
+prior to space" holds and after Save/Ignore the next air is already good. The
+**Space override** checkbox (default on, persisted) lets Space also force-advance
+any phase as a manual fallback; a `_sig_can_commit` guard (≥2 frames) stops an
+override of a barely-started window from snapshotting an empty buffer.
+
+Capture math is untouched — `_compute_sig_stats`, `central_frames`,
+`compute_plateau_stats`, `quality_flags`, glitch exclusion, the channel-count
+guard (DESIGN §11) and the CSV save path (`_on_sig_save_clicked`) are all reused
+verbatim; Save Sig routes through `_on_sig_save_clicked`, whose training-branch
+tail now retires the decision and resets the readout (works for a direct
+Signatures-group Save too). Two new persisted settings: `sig_detect_mv` (0.5),
+`sig_train_override` (true). Verified headless (offscreen-Qt, synthetic frames):
+full auto cycle place→profile→remove→signature with rolling reuse, Save writes
+CSV rows + retires the decision, Ignore writes nothing, a past deadline aborts to
+`air_lead` with slots cleared, Space override force-advances every phase, and
+Stop preserves an unsaved signature for a manual Save. Not verified on hardware:
+auto-detect behaviour under real placement/removal transients and noise.
+(2026-07-22)
+
+---
+
 ### Repo-wide — header changelogs slimmed to a terse version lineage; CLAUDE.md rule updated
 
 The full-prose changelog embedded in every `.py` header duplicated `CHANGELOG.md`

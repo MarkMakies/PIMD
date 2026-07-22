@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.2
+# PIMD — Usage Guide (USAGE.md) v1.3
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,10 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.3 2026-07-22 classviz v1.33 → v1.34 (Training group becomes an automated
+                auto-detect cycle: one Space per cycle, auto place/remove
+                detection, 30 s countdowns, Save/Ignore). §5 Training bullet
+                rewritten.
 v1.2 2026-07-21 classviz v1.32 → v1.33 (continuous Training group replaces the
                 three-button quick-capture; Supply combo battery|psu), features
                 v6 → v7 (doc-only supply vocabulary). §5 rewritten to match.
@@ -39,7 +43,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.25)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.33)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.34)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │
                      ▼
@@ -153,7 +157,7 @@ Settings persist in `src/data/delaycal_settings.json`.
 
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.33)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.34)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -174,16 +178,22 @@ target metadata validated against the target registry.
   management, registry-validated target combo from `targets.csv` via
   `pimd_targets.py`, structured placement fields — distance_mm, axes, offsets,
   medium, repeat_idx, notes — readout and Save/Delete) and a **Training** group
-  (v1.33): press **Start Training** for a continuous session that alternates AIR
-  and TARGET captures, driven by one **Acquire** button which the **Space bar**
-  mirrors while the Analysis tab is visible. The status label steps yellow
-  SETTLING (collection gated until mean rolling σ ≤ threshold, default 1.0 mV) →
-  green COLLECTING → blue READY; in READY the window keeps rolling so Acquire
-  commits the freshest N clean (glitch-excluded) frames, and losing settledness
-  mid-window restarts it. Each committed air anchor closes the pending target
-  (metrics presented for a final Save) and simultaneously opens the next one, so
-  the operator just alternates place/remove target and taps Space — the app works
-  out the before/after airs. Saves append to
+  (v1.34): an automated auto-detect capture cycle. Press **Start Training**; two
+  status areas show **A** = state (yellow SETTLING → blue COLLECTING with a
+  frames-left countdown → green ACQUIRED, rolling) and **B** = the next
+  instruction. Once the leading air is green, B says **Press Space** — the one
+  Space press per cycle locks the last N frames as the leading air and starts a
+  30 s **place target** countdown. The app **auto-detects** placement (signal
+  re-settles with mean |Δ| from the locked air above the **Detect ≥ mV**
+  threshold), profiles the target, then prompts **remove target** (another 30 s)
+  and **auto-detects** removal (Δ back below Detect) to take the trailing air.
+  The completed signature's metrics are presented with flashing **Save Sig /
+  Ignore Sig**; meanwhile the trailing air keeps rolling as the next cycle's
+  leading air, so after deciding you just press Space again. A missed 30 s
+  countdown aborts that signature (session stays live). The **Space override**
+  checkbox lets Space also force-advance a phase manually if auto-detect stalls.
+  Collection stays settledness-gated (mean rolling σ ≤ **Settle ≤ mV**, default
+  1.0) and glitch-excluded. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
 - **Training Session tab:** guided, marked capture runs from a training-list JSON;
