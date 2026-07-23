@@ -42,7 +42,7 @@ might touch one.
   use those, don't improvise. 
 
 ## Versioning & changelog (important)
-- Stage everything as commits I can review before they land; **don't push without explicit instruction.**
+- Stage everything as commits I can review before they land; **don't commit without explicit instruction.** **don't push without explicit instruction.**
 - **Version number tracks functional change.** On every behaviour-changing edit,
   bump the file's version — the `APP_VERSION`/`TOOL_VERSION` constant and/or the
   title line in the header. Pure comment/doc/reformat edits don't bump.
