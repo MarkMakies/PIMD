@@ -36,13 +36,18 @@ src/data/corpora/
 # Session dumps written by pimd_classviz.py (runtime capture data, not source)
 src/data/sessions/
 
-# Calibration profiles — only the current *operating* profile is tracked
-# (§10 firmware<->ML contract). delaycal writes candidates here routinely and
-# superseded locks are kept locally, so the directory is ignored by default:
-# locking a new operating profile is a deliberate act, so add it explicitly
-# (git add -f) and update this exception.
-src/data/profiles/*
-!src/data/profiles/cal_63_air_v2.json
+# Superseded calibration profiles — kept on disk, not repo source. Only the
+# current *operating* profile is tracked (§10 firmware<->ML contract); it is
+# cal_63_air_v2.json, which is deliberately absent from this list.
+#
+# Listed file-by-file rather than as `src/data/profiles/*` + a negation: the
+# wildcard form is correct as far as git is concerned, but the dir/* + !negation
+# idiom renders unreliably in some editors' ignore decorations. The trade-off is
+# that new delaycal candidate profiles are NOT ignored by default — add each
+# superseded lock here as it is retired.
+src/data/profiles/cal_63_air_v1.json
+src/data/profiles/cal_72_air_v2.json
+src/data/profiles/cal_72_air_v3.json
 
 # Previous-epoch profile8b captures — kept on disk, not repo source
 # (their DESIGN.md §15 rows were dropped at Doc-rev 1.8)

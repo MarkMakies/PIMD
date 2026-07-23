@@ -1,3 +1,32 @@
+### .gitignore / DESIGN.md 1.9.2 — superseded profiles listed individually
+
+The profiles rule was `src/data/profiles/*` plus `!src/data/profiles/cal_63_air_v2.json`.
+Git handles that correctly — `git check-ignore -v` named the rule, and
+`git status --ignored` reported the three superseded locks as `!!` — but VS Code's
+Explorer kept showing all four profiles in normal (tracked) text rather than
+greying the ignored three. The `dir/*` + negation idiom renders unreliably in some
+editors' ignore decorations, and a working tree you can't trust at a glance is a
+foot-gun in a repo where "which profile is the operating one" is a §10 contract.
+
+Replaced with three explicit paths (`cal_63_air_v1`, `cal_72_air_v2`,
+`cal_72_air_v3`). Net tracking is identical — only `cal_63_air_v2.json` is tracked,
+all four stay on disk. The trade-off is deliberate and documented in both files:
+new delaycal candidate profiles are **no longer ignored by default**, so they show
+up as untracked until they are either locked (tracked) or retired (added here).
+Arguably the safer default anyway — a new profile appearing in `git status` is a
+prompt to decide about it, not noise.
+
+DESIGN.md §15's `src/data/profiles/` row was describing the old mechanism, so it is
+reworded to state the policy rather than the `.gitignore` implementation, and
+Doc-rev bumped 1.9.1 → 1.9.2.
+
+Verified: the three report `!!` under `git status --ignored` and `check-ignore -v`
+names their new individual rules; `cal_63_air_v2.json` reports not-ignored and stays
+tracked; a scratch `cal_TEST_new.json` correctly appears as `??` rather than being
+silently hidden. (2026-07-23)
+
+---
+
 ### src/pimd_target_check.py — v3 — renamed from pimd_targets.py
 
 Module renamed `pimd_targets.py` → `pimd_target_check.py`, aligning it with
