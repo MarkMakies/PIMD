@@ -1,3 +1,45 @@
+### src/pimd_corpus_check.py — v1.6 — FIX air captures aborted the whole run
+
+An **air** capture legitimately has no distance: classviz forces
+`distance_mm=None` when `target_id == 'air'`, and `pimd_features.format_distance
+(None)` writes an empty `distance_mm` column. v1.5's loader parsed that column
+unconditionally (`int(round(float(...)))`), so a single air capture anywhere in
+a corpus killed the entire run with an opaque
+`ValueError: could not convert string to float: ''` — before a single check
+could execute. Found while testing the classviz v1.39 work: the Analysis tab's
+Training cycle can save air captures into the corpus, so the next re-profiling
+run would have produced a corpus the checker refused to read at all.
+
+New `_parse_distance_mm()` returns `None` for a blank column. Fixing the parse
+alone only moved the crash, though: `check_splithalf_snr()` sorts every capture
+by `distance_mm`, and one `None` among the ints raises
+`TypeError: '<' not supported between instances of 'NoneType' and 'int'` as soon
+as a corpus holds both an air capture and an object one — i.e. every real
+corpus. Its sort key now substitutes -1 for a missing distance (real distances
+are >= 0) so air sorts first within a label, and the row is labelled `@air`
+rather than `@Nonemm`.
+
+Air keeps its SNR row deliberately — its split-half floor is the most directly
+meaningful noise reading in the corpus — and stays excluded from every
+distance-keyed check (shape-invariance, falloff, repeat, cross-campaign), which
+it already was via `NON_OBJECT_TARGET_IDS`. `one_per_distance()` additionally
+skips any capture whose distance is `None`, so a hand-edited object row with a
+blank distance is dropped from those checks instead of blowing up the
+`sorted(grp)` every caller does.
+
+Verified: a 14-check suite over synthetic corpora shaped like a real
+re-profiling run (air anchors interleaved with an object at 60/120/180 mm plus a
+repeat) — the air-only corpus that reproduced the v1.5 crash now loads; both air
+captures appear as `@air` in the SNR check and nowhere else; no `None` leaks
+into any label; the object still gets its shape-invariance rows, its repeat
+comparison and a falloff fit recovering n=2.00 from an r^-2 fixture; a blank
+distance on an object row is skipped without crashing; and the CLI exits 0 with
+a full table. Against both real `src/data/corpora/gui_signatures_*.csv` files
+(no air rows) v1.6's output is byte-identical to v1.5's, so this is a pure fix
+with no behaviour change on existing data. (2026-07-23)
+
+---
+
 ### src/pimd_targets.py — v2 — registry relocated to data/targets/targets_v1.csv
 
 The target registry lived at `src/data/training_lists/targets.csv` — a directory

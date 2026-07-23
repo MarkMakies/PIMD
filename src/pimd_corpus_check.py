@@ -2,7 +2,7 @@
 """
 pimd_corpus_check.py — corpus-level acceptance checks for a PIMD signature corpus.
 
-Version: 1.5
+Version: 1.6
 
 Reads the v1.32+ target-registry corpus schema (the CORPUS_HEADER schema that
 pimd_classviz.py's Training capture and pimd_features.py's corpus builder both
@@ -14,9 +14,12 @@ offset_x_mm, offset_y_mm, medium) -- mirrors pimd_classviz._placement_tuple_key.
 
 Distances are read from the data (whatever distance_mm values were captured),
 not hardcoded -- a target seen at >= 2 distances gets shape-invariance rows and
-at >= 3 distances a falloff fit. All distance labels are in mm.
+at >= 3 distances a falloff fit. All distance labels are in mm. An air capture
+has no distance at all (blank distance_mm column): it appears in the split-half
+SNR check labelled '@air' and is excluded from every distance-keyed check.
 
 # History (full detail in CHANGELOG.md):
+#   v1.6 FIX air captures (blank distance_mm) aborted the whole run
 #   v1.5 migrate to the v1.32+ target_id/distance_mm schema; retire canary check; repeats via repeat_idx
 #   v1.4 loud rejection of the v1.32+ schema (stopgap, superseded by v1.5)
 #   v1.3 campaign-2: canary suffix-match, cross-session repeat, cos(10,15) gate, --baseline gating
@@ -72,6 +75,20 @@ REQUIRED_FIELDS = set(CORPUS_FIELDS)
 # Loading (v1.32+ CORPUS_HEADER schema only)
 # -----------------------------------------------------------------------------
 
+def _parse_distance_mm(raw):
+    """Corpus distance_mm -> int mm, or None when the column is blank.
+
+    An **air** capture legitimately has no distance: pimd_features writes
+    format_distance(None) == '' for it (classviz forces distance_mm=None when
+    target_id == 'air'). v1.5 parsed this column unconditionally, so a single
+    air capture anywhere in the corpus aborted the whole run with an opaque
+    "could not convert string to float: ''" before any check could run.
+    None also covers a hand-edited row that simply left the field empty; every
+    distance-keyed check skips those rather than guessing a value."""
+    raw = raw.strip()
+    return int(round(float(raw))) if raw else None
+
+
 def _read_header(path):
     with open(path, newline='') as f:
         for line in f:
@@ -97,7 +114,7 @@ def load_corpus(path):
         if 'target' in cols or 'distance_cm' in cols:
             raise SystemExit(
                 f"{path}: legacy target/distance_cm corpus schema -- "
-                "pimd_corpus_check.py v1.5 only reads the v1.32+ target-registry "
+                "pimd_corpus_check.py v1.5+ only reads the v1.32+ target-registry "
                 "schema (target_id/distance_mm columns; see "
                 "pimd_features.CORPUS_HEADER_FIELDS). Legacy-schema support was "
                 "intentionally dropped; there is no legacy corpus left to validate.")
@@ -136,7 +153,7 @@ def load_corpus(path):
         sigs.append(dict(
             session=field('session'), capture_id=field('capture_id'),
             target_id=field('target_id'), short_name=field('short_name'),
-            distance_mm=int(round(float(field('distance_mm')))),
+            distance_mm=_parse_distance_mm(field('distance_mm')),
             long_axis=field('long_axis'), face_normal=field('face_normal'),
             offset_x_mm=field('offset_x_mm'), offset_y_mm=field('offset_y_mm'),
             medium=field('medium'), repeat_idx=int(float(field('repeat_idx'))),
@@ -188,10 +205,13 @@ def one_per_distance(sigs):
     """Groups object captures by physical target (TARGET_FIELDS) into
     {target_key -> {distance_mm -> sig}}, keeping one signature per distance --
     preferring the base placement (repeat_idx == 1) so repeats never
-    double-count in the distance-keyed checks."""
+    double-count in the distance-keyed checks. Captures with no distance are
+    excluded: air by target_id, plus (defensively) any object row whose
+    distance_mm column was left blank -- a None key would otherwise blow up the
+    `sorted(grp)` every caller does."""
     by_target = {}
     for s in sigs:
-        if s['target_id'] in NON_OBJECT_TARGET_IDS:
+        if s['target_id'] in NON_OBJECT_TARGET_IDS or s['distance_mm'] is None:
             continue
         grp = by_target.setdefault(target_key(s), {})
         d = s['distance_mm']
@@ -278,9 +298,20 @@ def check_shape_invariance(sigs, corpus_label):
 # -----------------------------------------------------------------------------
 
 def check_splithalf_snr(sigs, corpus_label):
+    """Runs over *every* capture, air included -- an air capture has no
+    distance but its split-half floor is still the most directly meaningful
+    noise reading in the corpus, so it gets a row labelled '@air'. The sort key
+    substitutes -1 for a missing distance (real distances are >= 0) so air
+    sorts first within a label instead of raising on None < int."""
     rows = []
-    for s in sorted(sigs, key=lambda s: (label_of(s), s['distance_mm'], s['session'])):
-        metric = f'{label_of(s)} @{s["distance_mm"]}mm [{tag(corpus_label, s["session"])}]'
+
+    def sort_key(s):
+        d = s['distance_mm']
+        return (label_of(s), -1 if d is None else d, s['session'])
+
+    for s in sorted(sigs, key=sort_key):
+        where = 'air' if s['distance_mm'] is None else f'{s["distance_mm"]}mm'
+        metric = f'{label_of(s)} @{where} [{tag(corpus_label, s["session"])}]'
         if s['splithalf'] <= 0:
             rows.append(mkrow('splithalf-snr', metric, 'n/a (splithalf=0)',
                                f'>= {SPLITHALF_SNR_MIN}', 'SKIP'))
