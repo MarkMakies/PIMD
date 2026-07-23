@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Target Registry (pimd_targets.py) v1
-# — loads and validates data/training_lists/targets.csv, the human-maintained
+# PIMD Target Registry (pimd_targets.py) v2
+# — loads and validates data/targets/targets_v1.csv, the human-maintained
 #   registry of physical target objects captured by the PIMD detector. Shared
-#   by pimd_classviz.py's Analysis/Training tabs and pimd_features.py's
-#   corpus builder -- one implementation, so both tools agree on what a valid
-#   target row looks like.
+#   by pimd_classviz.py's Analysis tab and pimd_features.py's corpus builder
+#   -- one implementation, so both tools agree on what a valid target row
+#   looks like.
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt).
 #
 # The registry is human-owned data -- this module reads and validates it,
@@ -20,6 +20,7 @@
 # measurements that this tool can't second-guess.
 #
 # History (full detail in CHANGELOG.md):
+#   v2 registry relocated to data/targets/targets_v1.csv (out of data/training_lists/)
 #   v1 initial version
 ###############################################################################
 
@@ -31,7 +32,13 @@ import sys
 from dataclasses import dataclass
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_REGISTRY_PATH = os.path.join(SCRIPT_DIR, 'data', 'training_lists', 'targets.csv')
+# Single source of truth for the registry location -- pimd_classviz.py
+# (TARGETS_REGISTRY_PATH) and pimd_features.py (--registry default) both derive
+# from this, so the file moves by editing this one line. v2 moved it out of
+# data/training_lists/, which was never a sensible home for it: that directory
+# held the Training Session tab's saved run-lists, and classviz v1.39 removed
+# that tab entirely.
+DEFAULT_REGISTRY_PATH = os.path.join(SCRIPT_DIR, 'data', 'targets', 'targets_v1.csv')
 
 TARGET_ID_RE = re.compile(r'^[A-Za-z0-9_]+$')
 
@@ -285,7 +292,8 @@ def print_target_table(targets, issues):
 def build_arg_parser():
     p = argparse.ArgumentParser(description='Load and validate the PIMD target registry.')
     p.add_argument('--registry', default=DEFAULT_REGISTRY_PATH,
-                    help='Path to targets.csv (default: {0}).'.format(DEFAULT_REGISTRY_PATH))
+                    help='Path to the target registry CSV (default: {0}).'.format(
+                        DEFAULT_REGISTRY_PATH))
     return p
 
 

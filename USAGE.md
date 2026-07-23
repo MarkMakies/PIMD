@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.4
+# PIMD — Usage Guide (USAGE.md) v1.5
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,11 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.5 2026-07-23 classviz v1.36 → v1.39, targets v1 → v2. Training Session tab
+                removed (all capture is now the Analysis tab's Training group)
+                — §5 bullet dropped and the intent line reworded. Target
+                registry relocated to src/data/targets/targets_v1.csv; §7 path
+                and the two targets.csv mentions updated.
 v1.4 2026-07-22 classviz v1.34 → v1.35 (Training status labels name air/target;
                 place/remove countdown flashes red in the final 5 s + beeps on
                 the prompt). §5 Training bullet touched.
@@ -57,7 +62,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
 Typical workflow: flash the firmware once (DESIGN §16) → run **delaycal** after a
 full thermal soak to produce a calibrated profile → lock the profile JSON → run
 **classviz**, Load & Run the locked profile, capture target signatures against the
-`targets.csv` registry → build the corpus with **features**. **gui** is the
+`targets_v1.csv` registry → build the corpus with **features**. **gui** is the
 independent Mode 1 bench monitor used for noise/drift investigation at a single
 operating point.
 
@@ -164,9 +169,9 @@ Settings persist in `src/data/delaycal_settings.json`.
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
-ferrous/reinforcing), and is the **only capture path for the ML corpus** — both
-quick signature captures and guided training sessions, with structured
-target metadata validated against the target registry.
+ferrous/reinforcing), and is the **only capture path for the ML corpus** — the
+Analysis tab's automated Training cycle, with structured target metadata
+validated against the target registry.
 
 **Operation.**
 - Connects over USB-serial; **Load & Run** on the top bar sends any saved profile
@@ -178,7 +183,7 @@ target metadata validated against the target registry.
   stay faithful to the wire).
 - **Stats tab:** per-cell Latest / Mean / Std with green/yellow/red thresholds.
 - **Analysis tab:** live comparison charts, a **Signatures** group (signature file
-  management, registry-validated target combo from `targets.csv` via
+  management, registry-validated target combo from `targets_v1.csv` via
   `pimd_targets.py`, structured placement fields — distance_mm, axes, offsets,
   medium, repeat_idx, notes — readout and Save/Delete) and a **Training** group
   (v1.35): an automated auto-detect capture cycle. Press **Start Training**; two
@@ -201,8 +206,6 @@ target metadata validated against the target registry.
   1.0) and glitch-excluded. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
-- **Training Session tab:** guided, marked capture runs from a training-list JSON;
-  rows validated against the registry; per-row placement via the Placement dialog.
 - **Session-dump recorder:** self-describing per-session CSV to
   `src/data/sessions/` — embedded profile JSON, per-column map, `# mark:` /
   `# mark_target:` lines — the input format for `pimd_features.py`.
@@ -223,7 +226,7 @@ build is **geometry-guarded** so frames from different profile geometries can ne
 mix (DESIGN §10 invariant).
 
 **Operation — `pimd_targets.py` (registry).**
-- Loads and validates `src/data/training_lists/targets.csv` — the human-authored
+- Loads and validates `src/data/targets/targets_v1.csv` — the human-authored
   registry of physical target objects (id, material, shape, dims, mass, …). Read
   only; the registry is human-owned data and is never written by tooling.
 - Hard errors (duplicate/malformed `target_id`, bad enum, unparseable numeric) vs

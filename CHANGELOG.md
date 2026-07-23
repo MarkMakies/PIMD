@@ -1,3 +1,40 @@
+### src/pimd_targets.py — v2 — registry relocated to data/targets/targets_v1.csv
+
+The target registry lived at `src/data/training_lists/targets.csv` — a directory
+that otherwise held the Training Session tab's saved run-list JSONs, and that
+classviz v1.39 has just made dead by removing that tab. The registry is not
+training-list data and never was, so it moves to its own home:
+`src/data/targets/targets_v1.csv` (moved with `git mv`, contents untouched — 22
+targets, no validation issues).
+
+One line changes: `DEFAULT_REGISTRY_PATH` in this module. `pimd_classviz.py`
+(`TARGETS_REGISTRY_PATH`) and `pimd_features.py` (the `--registry` default) both
+already derived from it, so neither needed a source edit and neither is version
+bumped. The `--registry` CLI flag still overrides, and its help text prints the
+new default. Header/docstring references updated; the CLI help no longer names
+the file literally, since the filename now carries a version suffix.
+
+Verified: `pimd_targets.py` CLI loads all 22 targets from the new path with no
+issues; `pimd_features.--registry` resolves to it; classviz builds headless with
+a 23-entry target combo (22 + air) and reports "Target registry loaded: 22
+target(s)". (2026-07-23)
+
+Note for the next DESIGN.md consolidation pass: §15 has two rows and one
+`References/` caption still pointing at `src/data/training_lists/targets.csv`,
+and the `src/pimd_targets.py` row still says v1. (2026-07-23)
+
+---
+
+### USAGE.md — v1.5 — Training Session tab removed; registry path updated
+
+Follows classviz v1.39 and targets v2. The §5 "Training Session tab" bullet is
+dropped and the classviz intent line no longer offers "quick signature captures
+and guided training sessions" as two paths — the Analysis tab's automated
+Training cycle is the only capture path now. The §7 registry path and the two
+other `targets.csv` mentions become `src/data/targets/targets_v1.csv`. (2026-07-23)
+
+---
+
 ### src/pimd_classviz.py — v1.39 — remove the Training Session tab
 
 All corpus capture now happens through the Analysis tab's own Training group
