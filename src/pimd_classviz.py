@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.38
+# PIMD Signature Visualiser (ClassViz) v1.39
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Connects to the board, sends Q4/G to start Mode 2 streaming with the default
 # CLASSIFY_EP profile, and displays a heatmap of signed cell deviations from a
-# captured air baseline. Includes a Training Session tab for guided, marked
-# signature-corpus capture, and a top-bar saved-profile selector to load/send
+# captured air baseline. Signature-corpus capture lives on the Analysis tab
+# (its Training group runs the automated auto-detect air/target/air cycle and
+# writes the corpus CSV), alongside a top-bar saved-profile selector to load/send
 # a band/pulse/delay profile to the board as a RAM-only "dynamic" profile
 # (firmware D command) without reflashing — the heatmap/stats table resize to
 # match whatever profile (static or dynamic) is active. Profile authoring/saving
@@ -18,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.39 remove the Training Session tab (all capture now via the Analysis tab Training group)
 #   v1.38 Analysis: shrinkable heatmap split, auto-check new sigs, black live traces, quality colouring
 #   v1.37 FIX Load signatures / Open for editing rejected the app's own v1.32+ files (schema dispatch)
 #   v1.36 persist Saved-profile / Saved-list selectors, Stats Std thresholds, Training settle window
@@ -80,7 +82,7 @@ from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
 from PyQt6.QtGui import QBrush, QColor, QFont  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
     QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
@@ -99,7 +101,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.38'
+APP_VERSION = '1.39'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -112,7 +114,6 @@ DEFAULT_PORT = '/dev/ttyACM0'
 
 PROFILES_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
 SESSIONS_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
-TRAINING_LISTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'training_lists')
 CORPORA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'corpora')
 TARGETS_REGISTRY_PATH = pimd_targets.DEFAULT_REGISTRY_PATH   # single source of truth
 SUPPLY_CHOICES = ['battery', 'psu']
@@ -155,31 +156,6 @@ def _load_profile_file(name):
     with open(path, 'rb') as f:
         raw = f.read()
     return json.loads(raw), raw
-
-
-def _list_training_list_files():
-    if not os.path.isdir(TRAINING_LISTS_DIR):
-        return []
-    return sorted(f[:-5] for f in os.listdir(TRAINING_LISTS_DIR) if f.endswith('.json'))
-
-
-def _load_training_list_file(name):
-    with open(os.path.join(TRAINING_LISTS_DIR, name + '.json')) as f:
-        return json.load(f)
-
-
-def _save_training_list_file(name, rows):
-    """rows: list of {'target_id': str, 'distance_mm': float, 'placement':
-    {'long_axis','face_normal','offset_x_mm','offset_y_mm','medium',
-    'repeat_idx','notes'}}. A row missing 'target_id' (e.g. a pre-v1.32 list
-    with the old 'target'/'distance_cm' keys) is loudly rejected on load --
-    see _on_training_load_list() -- rather than migrated. Index is never
-    persisted (always derived/renumbered on load); Time/Settledness are live
-    per-run data, never part of the saved template."""
-    os.makedirs(TRAINING_LISTS_DIR, exist_ok=True)
-    data = {'name': name, 'rows': rows}
-    with open(os.path.join(TRAINING_LISTS_DIR, name + '.json'), 'w') as f:
-        json.dump(data, f, indent=2)
 
 
 pg.setConfigOptions(background='w', foreground='k', antialias=True)
@@ -272,11 +248,10 @@ class MainWindow(QMainWindow):
         self._ch_glitch_buf: 'np.ndarray | None' = None  # shape (64, n_channels), circular
         self._ch_glitch_pos  = 0
 
-        # Data state — Training Session tab
-        self._training_current_row: 'int | None' = None   # None when no training session active
-        self._training_paused: bool = False
-        self._training_row_start_wall: 'float | None' = None
-        self._training_pause_started: 'float | None' = None
+        # Pauses session *recording* (frame rows stop being written, marks are
+        # refused) without closing the file. Driven by the Analysis tab's
+        # Session Pause button; read by process_packet.
+        self._session_paused: bool = False
 
         # Data state — stats
         self._freeze_stats = False
@@ -319,8 +294,8 @@ class MainWindow(QMainWindow):
         self._editable_sig_seq        = 0      # running per-file capture_id sequence, reset on New/Open
         self._editable_repeat_counts  = {}     # placement tuple -> count seen, for repeat_idx auto-increment
 
-        # Target registry (pimd_targets.py) -- shared by the Analysis tab's
-        # inline capture widgets and the Training tab's Placement dialog.
+        # Target registry (pimd_targets.py) -- backs the Analysis tab's inline
+        # capture widgets.
         self._targets        = {}    # dict[target_id -> pimd_targets.Target]
         self._target_issues   = []
 
@@ -356,9 +331,9 @@ class MainWindow(QMainWindow):
 
         self._SIG_AWAIT_SECONDS = 30.0  # place/remove-target guard countdown
 
-        # Analysis tab — session recording (alternate path, reuses the
-        # Training Session tab's own _session_start/_session_stop/_append_mark
-        # machinery and self._recording/_training_paused flags verbatim).
+        # Analysis tab — session recording (alternate path to the Stats tab's
+        # Record Session button; drives the same _session_start/_session_stop/
+        # _append_mark machinery and the _recording/_session_paused flags).
         self._analysis_session_recording = False
 
         self._setup_colormaps()
@@ -544,8 +519,8 @@ class MainWindow(QMainWindow):
 
         # Session-level supply (DESIGN §12 — battery/PSU noise floor differs
         # and can't be auto-detected). Not per-capture: shared by the
-        # Analysis-tab quick-capture save path and the Training/Analysis
-        # session mark-writing path.
+        # Analysis-tab quick-capture save path and the session mark-writing
+        # path.
         row1.addWidget(QLabel('Supply:'))
         self.cb_supply = QComboBox()
         self.cb_supply.addItems(SUPPLY_CHOICES)
@@ -561,7 +536,6 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
         self.tabs.addTab(self._build_stats_tab(),   'Stats')
-        self.tabs.addTab(self._build_training_session_tab(), 'Training Session')
         self._analysis_tab_index = self.tabs.addTab(self._build_analysis_tab(), 'Analysis')
         layout.addWidget(self.tabs, stretch=1)
 
@@ -892,515 +866,8 @@ class MainWindow(QMainWindow):
             profile.get('name', name)))
 
     # ------------------------------------------------------------------
-    # Tab 2 — Training Session
+    # Tab 2 — Analysis
     # ------------------------------------------------------------------
-    def _build_training_session_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout(w)
-
-        # Control row
-        ctrl = QHBoxLayout()
-        self.pb_training_start = QPushButton('Start')
-        self.pb_training_start.setStyleSheet(self.MY_GREEN)
-        self.pb_training_start.clicked.connect(self._on_training_start)
-        ctrl.addWidget(self.pb_training_start)
-
-        self.pb_training_pause = QPushButton('Pause')
-        self.pb_training_pause.setCheckable(True)
-        self.pb_training_pause.setEnabled(False)
-        self.pb_training_pause.toggled.connect(self._on_training_pause_toggled)
-        ctrl.addWidget(self.pb_training_pause)
-
-        self.pb_training_stop = QPushButton('Stop')
-        self.pb_training_stop.setStyleSheet(self.MY_RED)
-        self.pb_training_stop.setEnabled(False)
-        self.pb_training_stop.clicked.connect(self._on_training_stop)
-        ctrl.addWidget(self.pb_training_stop)
-
-        ctrl.addStretch(1)
-
-        ctrl.addWidget(QLabel('Settle window (frames):'))
-        self.sp_training_settle = QSpinBox()
-        self.sp_training_settle.setRange(2, 2000)
-        self.sp_training_settle.setSingleStep(10)
-        self.sp_training_settle.setValue(50)
-        ctrl.addWidget(self.sp_training_settle)
-
-        self.lbl_training_status = QLabel('Not recording')
-        ctrl.addWidget(self.lbl_training_status)
-        layout.addLayout(ctrl)
-
-        hint = QLabel('Press Space to advance to the next target and mark it.')
-        hint.setStyleSheet('color: gray;')
-        layout.addWidget(hint)
-
-        # Table: Index | Target ID | Distance (mm) | Time at Target (s) | Settledness (mV)
-        self._training_row_placement = {}   # opaque token -> placement dict (survives Add/Remove Row)
-        self._training_row_token_seq = 0
-        self.tbl_training = QTableWidget(0, 5)
-        self.tbl_training.setHorizontalHeaderLabels(
-            ['Index', 'Target ID', 'Distance (mm)', 'Time at Target (s)', 'Settledness (mV)'])
-        self.tbl_training.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tbl_training.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
-        self.tbl_training.itemChanged.connect(self._on_training_table_changed)
-        self._insert_default_training_row()
-        layout.addWidget(self.tbl_training, stretch=1)
-
-        # Add/Remove row + Placement… + validation
-        row_btns = QHBoxLayout()
-        self.pb_training_add_row = QPushButton('Add Row')
-        self.pb_training_add_row.clicked.connect(self._on_training_add_row)
-        row_btns.addWidget(self.pb_training_add_row)
-        self.pb_training_remove_row = QPushButton('Remove Row')
-        self.pb_training_remove_row.clicked.connect(self._on_training_remove_row)
-        row_btns.addWidget(self.pb_training_remove_row)
-        self.pb_training_placement = QPushButton('Placement…')
-        self.pb_training_placement.setToolTip(
-            'Edit the selected row\'s placement (long_axis/face_normal/offsets/medium) -- '
-            'same widget set as the Analysis tab.')
-        self.pb_training_placement.clicked.connect(self._on_training_placement_clicked)
-        row_btns.addWidget(self.pb_training_placement)
-        row_btns.addStretch(1)
-        layout.addLayout(row_btns)
-
-        self.lbl_training_validation = QLabel('')
-        layout.addWidget(self.lbl_training_validation)
-
-        # Saved target-list template — mirrors the top-bar Saved-profile pattern
-        row_list = QHBoxLayout()
-        row_list.addWidget(QLabel('Saved list:'))
-        self.cb_training_list = QComboBox()
-        self._refresh_training_list_file_list()
-        row_list.addWidget(self.cb_training_list, stretch=1)
-        self.pb_training_load_list = QPushButton('Load List')
-        self.pb_training_load_list.clicked.connect(self._on_training_load_list)
-        row_list.addWidget(self.pb_training_load_list)
-        self.pb_training_save_list = QPushButton('Save List…')
-        self.pb_training_save_list.clicked.connect(self._on_training_save_list)
-        row_list.addWidget(self.pb_training_save_list)
-        layout.addLayout(row_list)
-
-        self._validate_training_table()
-        return w
-
-    # -- row construction / editability -----------------------------------
-
-    def _make_training_item(self, text, editable):
-        item = QTableWidgetItem(text)
-        item.setTextAlignment(_C)
-        if not editable:
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        return item
-
-    def _default_placement(self):
-        return {'target_id': 'air', 'distance_mm': 0, 'long_axis': 'na', 'face_normal': 'na',
-                'offset_x_mm': 0, 'offset_y_mm': 0, 'medium': 'air', 'repeat_idx': 1, 'notes': ''}
-
-    def _populate_training_row(self, row, target_id, distance_mm, placement=None):
-        self._training_row_token_seq += 1
-        token = self._training_row_token_seq
-        item0 = self._make_training_item('', editable=False)
-        item0.setData(Qt.ItemDataRole.UserRole, token)
-        self.tbl_training.setItem(row, 0, item0)
-        self.tbl_training.setItem(row, 1, self._make_training_item(str(target_id), editable=True))
-        try:
-            dist_text = str(int(float(distance_mm)))
-        except (TypeError, ValueError):
-            dist_text = str(distance_mm)
-        self.tbl_training.setItem(row, 2, self._make_training_item(dist_text, editable=True))
-        self.tbl_training.setItem(row, 3, self._make_training_item('—', editable=False))
-        self.tbl_training.setItem(row, 4, self._make_training_item('—', editable=False))
-        self._training_row_placement[token] = dict(placement) if placement else self._default_placement()
-
-    def _insert_default_training_row(self):
-        self.tbl_training.blockSignals(True)
-        r = self.tbl_training.rowCount()
-        self.tbl_training.insertRow(r)
-        self._populate_training_row(r, 'air', 0)
-        self._renumber_training_rows()
-        self.tbl_training.blockSignals(False)
-
-    def _renumber_training_rows(self):
-        for r in range(self.tbl_training.rowCount()):
-            self.tbl_training.item(r, 0).setText(str(r + 1))
-
-    # -- add/remove rows ----------------------------------------------------
-
-    def _on_training_add_row(self):
-        self.tbl_training.blockSignals(True)
-        r = self.tbl_training.rowCount()
-        self.tbl_training.insertRow(r)
-        self._populate_training_row(r, '', 0)
-        self._renumber_training_rows()
-        self.tbl_training.blockSignals(False)
-        self._validate_training_table()
-
-    def _on_training_remove_row(self):
-        r = self.tbl_training.currentRow()
-        if r >= 0:
-            token = self.tbl_training.item(r, 0).data(Qt.ItemDataRole.UserRole)
-            self._training_row_placement.pop(token, None)
-            self.tbl_training.blockSignals(True)
-            self.tbl_training.removeRow(r)
-            self._renumber_training_rows()
-            self.tbl_training.blockSignals(False)
-        self._validate_training_table()
-
-    def _on_training_table_changed(self, item):
-        self._validate_training_table()
-
-    # -- Placement… dialog (shares _build_target_placement_widget_set with --
-    # -- the Analysis tab's inline widgets -- one implementation) -----------
-
-    def _on_training_placement_clicked(self):
-        row = self.tbl_training.currentRow()
-        if row < 0:
-            self.statusBar().showMessage('Select a row first.')
-            return
-        token = self.tbl_training.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        current = self._training_row_placement.get(token, self._default_placement())
-        current_target_id = self.tbl_training.item(row, 1).text().strip() or current.get('target_id')
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle('Placement — row {0}'.format(row + 1))
-        dlg_layout = QVBoxLayout(dlg)
-        self._build_target_placement_widget_set(dlg_layout, 'training_dlg')
-        self._populate_target_combo(self.training_dlg_target, selected_target_id=current_target_id)
-        try:
-            self.training_dlg_distance_mm.setValue(int(float(
-                self.tbl_training.item(row, 2).text().strip() or current.get('distance_mm', 0) or 0)))
-        except ValueError:
-            self.training_dlg_distance_mm.setValue(int(current.get('distance_mm', 0) or 0))
-        self.training_dlg_long_axis.setCurrentText(current.get('long_axis', 'na'))
-        self.training_dlg_face_normal.setCurrentText(current.get('face_normal', 'na'))
-        self.training_dlg_offset_x_mm.setValue(int(current.get('offset_x_mm', 0)))
-        self.training_dlg_offset_y_mm.setValue(int(current.get('offset_y_mm', 0)))
-        self.training_dlg_medium.setCurrentText(current.get('medium', 'air'))
-        self.training_dlg_repeat_idx.setValue(int(current.get('repeat_idx', 1)))
-
-        btn_row = QHBoxLayout()
-        pb_ok = QPushButton('OK')
-        pb_ok.clicked.connect(dlg.accept)
-        pb_cancel = QPushButton('Cancel')
-        pb_cancel.clicked.connect(dlg.reject)
-        btn_row.addStretch(1)
-        btn_row.addWidget(pb_ok)
-        btn_row.addWidget(pb_cancel)
-        dlg_layout.addLayout(btn_row)
-
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        placement = self._placement_from_widgets('training_dlg')
-        self._training_row_placement[token] = placement
-        self.tbl_training.blockSignals(True)
-        self.tbl_training.item(row, 1).setText(placement['target_id'] or 'air')
-        self.tbl_training.item(row, 2).setText(str(placement['distance_mm']))
-        self.tbl_training.blockSignals(False)
-        self._validate_training_table()
-
-    # -- validation -----------------------------------------------------
-
-    def _validate_training_table(self):
-        rows = self.tbl_training.rowCount()
-        has_air = False
-        error = None
-        if rows == 0:
-            error = 'no target rows defined'
-        else:
-            for r in range(rows):
-                target_id = self.tbl_training.item(r, 1).text().strip()
-                dist_text = self.tbl_training.item(r, 2).text().strip()
-                if not target_id:
-                    error = 'row {0}: empty target'.format(r + 1)
-                    break
-                try:
-                    float(dist_text)
-                except ValueError:
-                    error = 'row {0}: distance is not a number'.format(r + 1)
-                    break
-                if target_id.lower() == 'air':
-                    has_air = True
-                elif target_id not in self._targets:
-                    error = "row {0}: target_id '{1}' not in the registry".format(r + 1, target_id)
-                    break
-            if error is None and not has_air:
-                error = 'no row has Target ID = "air" (required by pimd_features.py)'
-
-        valid = error is None
-        if valid:
-            self.lbl_training_validation.setText('✓ {0} targets'.format(rows))
-            self.lbl_training_validation.setStyleSheet('color: green;')
-        else:
-            self.lbl_training_validation.setText('✗ {0}'.format(error))
-            self.lbl_training_validation.setStyleSheet('color: red;')
-
-        if self._training_current_row is None:   # never re-enable Start mid-session
-            self.pb_training_start.setEnabled(valid)
-        return valid
-
-    # -- mark-text rule (mirrors the deleted _on_mark_hotkey branches) ------
-
-    def _training_row_mark_text(self, row):
-        target = self.tbl_training.item(row, 1).text().strip()
-        if target.lower() == 'air':
-            return 'air'   # no @ suffix — required exact match for pimd_features.py
-        distance = self.tbl_training.item(row, 2).text().strip()
-        return '{0} @{1}'.format(target, distance)
-
-    def _training_row_mark_target_dict(self, row):
-        """(target_id, placement dict) for _append_mark_target() -- distance_mm
-        and target_id come from the row's live table cells (the source of
-        truth for quick edits); the remaining placement fields come from
-        _training_row_placement (set via the Placement… dialog)."""
-        token = self.tbl_training.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        placement = dict(self._training_row_placement.get(token, self._default_placement()))
-        target_id = self.tbl_training.item(row, 1).text().strip()
-        dist_text = self.tbl_training.item(row, 2).text().strip()
-        placement['target_id'] = target_id
-        if target_id.lower() == 'air':
-            placement['distance_mm'] = None
-        else:
-            try:
-                placement['distance_mm'] = float(dist_text)
-            except ValueError:
-                placement['distance_mm'] = None
-        return target_id, placement
-
-    # -- Start / Pause / Stop / Space ---------------------------------------
-
-    def _on_training_start(self):
-        if not self._validate_training_table():
-            self.statusBar().showMessage('Training list invalid — fix the table before starting.')
-            return
-        if not self.serial.isOpen() or self.pb_start.text() != 'Running':
-            self.statusBar().showMessage(
-                'Connect and start streaming before beginning a training session.')
-            return
-        if self._recording:
-            self.statusBar().showMessage('A session is already recording — stop it first.')
-            return
-
-        self._clear_training_live_columns()
-
-        # Reuses _session_start()'s file-open/header machinery verbatim, but
-        # passes notes derived from the run list instead of popping up the
-        # interactive notes prompt (there's nothing to ask the operator that
-        # isn't already in the table). Syncs pb_record's checked state without
-        # re-entering _toggle_record_frames -> _session_start() a second time.
-        self._session_start(notes=self._build_training_notes())
-        self.pb_record.blockSignals(True)
-        self.pb_record.setChecked(True)
-        self.pb_record.blockSignals(False)
-
-        self._training_current_row = 0
-        self._training_paused = False
-        self._training_row_start_wall = time.time()
-        self._append_mark(self._training_row_mark_text(0))
-        target_id, placement = self._training_row_mark_target_dict(0)
-        self._append_mark_target(target_id, placement)
-        self.tbl_training.selectRow(0)
-        self._set_training_active_ui(True)
-        self._update_training_status_label()
-
-    def _clear_training_live_columns(self):
-        """Reset Time-at-Target and Settledness back to '—' for every row --
-        otherwise a re-run of the same list would start showing the previous
-        run's stale elapsed-time/settledness values on rows not yet reached."""
-        for r in range(self.tbl_training.rowCount()):
-            self.tbl_training.item(r, 3).setText('—')
-            self.tbl_training.item(r, 4).setText('—')
-
-    def _build_training_notes(self):
-        """Session notes auto-derived from the run list, replacing the
-        interactive notes prompt: nothing the operator would type isn't
-        already captured by the table itself."""
-        lines = ['Training Session run list:']
-        for r in range(self.tbl_training.rowCount()):
-            idx = self.tbl_training.item(r, 0).text()
-            target = self.tbl_training.item(r, 1).text()
-            distance = self.tbl_training.item(r, 2).text()
-            lines.append('{0}. {1} @{2}mm'.format(idx, target, distance))
-        return '\n'.join(lines)
-
-    def _on_training_pause_toggled(self, checked):
-        if checked:
-            self._training_paused = True
-            self._training_pause_started = time.time()
-            self.pb_training_pause.setText('Resume')
-            self.pb_training_pause.setStyleSheet(self.MY_YELLOW)
-        else:
-            self._training_paused = False
-            if self._training_pause_started is not None:
-                self._training_row_start_wall += (time.time() - self._training_pause_started)
-            self._training_pause_started = None
-            self.pb_training_pause.setText('Pause')
-            self.pb_training_pause.setStyleSheet('')
-        self._update_training_status_label()
-
-    def _on_training_stop(self):
-        if self._training_current_row is None:
-            return
-        self.pb_record.setChecked(False)   # -> _session_stop() -> centralized reset
-
-    def _on_training_space(self):
-        if self._training_current_row is None:
-            return
-        if self._training_paused:
-            self.statusBar().showMessage('Paused — resume before marking next target')
-            return
-
-        last = self.tbl_training.rowCount() - 1
-        if self._training_current_row >= last:
-            n_targets = self.tbl_training.rowCount()
-            path = self._session_path
-            self.pb_record.setChecked(False)   # -> _session_stop() -> centralized reset
-            self.statusBar().showMessage(
-                'Training session complete: {0} targets recorded → {1}'.format(n_targets, path))
-        else:
-            self._training_current_row += 1
-            self._training_row_start_wall = time.time()
-            self._append_mark(self._training_row_mark_text(self._training_current_row))
-            target_id, placement = self._training_row_mark_target_dict(self._training_current_row)
-            self._append_mark_target(target_id, placement)
-            self.tbl_training.selectRow(self._training_current_row)
-            self._update_training_status_label()
-
-    # -- UI enablement / reset -----------------------------------------
-
-    def _set_training_active_ui(self, active):
-        self.pb_training_start.setEnabled(not active and self._validate_training_table())
-        self.pb_training_pause.setEnabled(active)
-        self.pb_training_stop.setEnabled(active)
-        self.pb_training_add_row.setEnabled(not active)
-        self.pb_training_remove_row.setEnabled(not active)
-        self.pb_training_placement.setEnabled(not active)
-        self.pb_training_load_list.setEnabled(not active)
-        self.pb_training_save_list.setEnabled(not active)
-        self.tbl_training.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers if active
-            else QAbstractItemView.EditTrigger.DoubleClicked)
-        if not active:
-            self.pb_training_pause.blockSignals(True)
-            self.pb_training_pause.setChecked(False)
-            self.pb_training_pause.setText('Pause')
-            self.pb_training_pause.setStyleSheet('')
-            self.pb_training_pause.blockSignals(False)
-
-    def _update_training_status_label(self):
-        if self._training_current_row is None:
-            self.lbl_training_status.setText('Not recording')
-        else:
-            n = self.tbl_training.rowCount()
-            state = ' (paused)' if self._training_paused else ''
-            self.lbl_training_status.setText('Recording — target {0}/{1}{2}'.format(
-                self._training_current_row + 1, n, state))
-
-    def _reset_training_ui(self):
-        """Called from _session_stop() whenever a Training Session was active
-        when the underlying recording got closed out — from any of its
-        trigger points, not just our own Stop button."""
-        self._training_current_row = None
-        self._training_paused = False
-        self._training_pause_started = None
-        self._training_row_start_wall = None
-        self._set_training_active_ui(False)
-        self._update_training_status_label()
-
-    # -- live update (called from _redraw()) -----------------------------
-
-    def _update_training_live(self):
-        row = self._training_current_row
-        n = self.sp_training_settle.value()
-        recent = list(self._rolling_buf)[-n:]
-        if len(recent) >= 2:
-            mat = np.array([arr for _, arr in recent], dtype=float)
-            stds = mat.std(0)
-            settle_text = '{0:.3f}'.format(stds.mean() / 1000.0)
-        else:
-            settle_text = '—'
-        self.tbl_training.item(row, 4).setText(settle_text)
-
-        if not self._training_paused:
-            elapsed = time.time() - self._training_row_start_wall
-            self.tbl_training.item(row, 3).setText('{0:.1f}'.format(elapsed))
-
-    # -- saved target-list template ---------------------------------------
-
-    def _refresh_training_list_file_list(self):
-        self.cb_training_list.clear()
-        for name in _list_training_list_files():
-            self.cb_training_list.addItem(name)
-
-    def _on_training_load_list(self):
-        name = self.cb_training_list.currentText()
-        if not name:
-            self.statusBar().showMessage('No saved target list selected')
-            return
-        try:
-            data = _load_training_list_file(name)
-        except Exception as e:
-            self.statusBar().showMessage('Load failed: {0}'.format(e))
-            return
-        rows = data.get('rows', [])
-        # Loud rejection, not a free-text -> target_id migration: a row
-        # written by pre-v1.32 classviz (or hand-authored without target_id)
-        # cannot be safely guessed against the registry (e.g. "steel
-        # spanner" -> which target_id?). Re-author the list instead.
-        missing = [i + 1 for i, r in enumerate(rows) if 'target_id' not in r]
-        if missing:
-            self.statusBar().showMessage(
-                "'{0}' predates the target registry (row(s) {1} have no target_id) -- "
-                're-author this list against the current registry; no automatic '
-                'migration is attempted.'.format(name, ', '.join(str(i) for i in missing)))
-            return
-        self.tbl_training.blockSignals(True)
-        self.tbl_training.setRowCount(0)
-        self._training_row_placement = {}
-        for r_data in rows:
-            r = self.tbl_training.rowCount()
-            self.tbl_training.insertRow(r)
-            placement = dict(r_data.get('placement', {}))
-            self._populate_training_row(r, r_data.get('target_id', ''), r_data.get('distance_mm', 0),
-                                         placement=placement)
-        if self.tbl_training.rowCount() == 0:
-            self.tbl_training.insertRow(0)
-            self._populate_training_row(0, 'air', 0)
-        self._renumber_training_rows()
-        self.tbl_training.blockSignals(False)
-        self._validate_training_table()
-        self.statusBar().showMessage('Loaded target list: {0} ({1} rows)'.format(
-            name, self.tbl_training.rowCount()))
-
-    def _on_training_save_list(self):
-        name, ok = QInputDialog.getText(self, 'Save Target List', 'List name:')
-        if not ok or not name.strip():
-            return
-        rows = []
-        for r in range(self.tbl_training.rowCount()):
-            target_id = self.tbl_training.item(r, 1).text().strip()
-            dist_text = self.tbl_training.item(r, 2).text().strip()
-            try:
-                distance_mm = float(dist_text)
-            except ValueError:
-                self.statusBar().showMessage(
-                    'Cannot save: row {0} has a non-numeric distance'.format(r + 1))
-                return
-            _target_id, placement = self._training_row_mark_target_dict(r)
-            placement.pop('target_id', None)
-            placement.pop('distance_mm', None)
-            rows.append({'target_id': target_id, 'distance_mm': distance_mm, 'placement': placement})
-        _save_training_list_file(name.strip(), rows)
-        self._refresh_training_list_file_list()
-        idx = self.cb_training_list.findText(name.strip())
-        if idx >= 0:
-            self.cb_training_list.setCurrentIndex(idx)
-        self.statusBar().showMessage('Saved target list: {0}'.format(name.strip()))
-
-    # ------------------------------------------------------------------
-    # Tab 3 — Analysis
-    # ------------------------------------------------------------------
-    ANALYSIS_TAB_INDEX = 3
-
     def _style_compact(self, plot, title=None):
         """Small tick font + a little padding + optional small title --
         applied to every Analysis-tab plot so ~20 small panels can share
@@ -1552,8 +1019,7 @@ class MainWindow(QMainWindow):
         self.lw_analysis_templates.itemChanged.connect(self._on_analysis_template_item_changed)
         self.lw_analysis_templates.currentItemChanged.connect(lambda *_: self._update_sig_capture_gating())
 
-    # -- Shared target/placement widget set (Analysis tab inline + Training --
-    # -- tab Placement dialog) -- one implementation, two call sites ---------
+    # -- Target/placement widget set (Analysis tab inline capture inputs) ----
 
     def _build_target_placement_widget_set(self, layout, prefix, emphasise_target=False):
         """Builds a target-registry combo + structured placement widgets into
@@ -1562,15 +1028,16 @@ class MainWindow(QMainWindow):
         {prefix}_offset_y_mm, {prefix}_medium, {prefix}_repeat_idx. Pure
         construction -- caller wires signals and calls
         _populate_target_combo() to fill the target combo from the currently
-        loaded registry. Instantiated inline (Analysis tab) and inside a
-        QDialog (Training tab's per-row Placement editor) so field
-        definitions never duplicate.
+        loaded registry. Kept as a separate builder (rather than inlined into
+        its one caller) because the field set is the corpus schema's placement
+        tuple -- it deserves one definition even with a single instantiation
+        site. The second call site, the Training Session tab's per-row
+        Placement dialog, went with that tab in v1.39.
 
-        emphasise_target: bold/enlarge the Target label + combo (v1.38). Set
-        for the Analysis tab's inline capture set, where that one combo
-        decides what every Save writes into the corpus and picking the wrong
-        one silently mislabels a capture -- it shouldn't look like just
-        another dropdown. The Training dialog keeps the plain look."""
+        emphasise_target: bold/enlarge the Target label + combo (v1.38), where
+        that one combo decides what every Save writes into the corpus and
+        picking the wrong one silently mislabels a capture -- it shouldn't
+        look like just another dropdown."""
         row_a = QHBoxLayout()
         lbl_target = QLabel('Target:')
         target_combo = QComboBox()
@@ -1798,8 +1265,8 @@ class MainWindow(QMainWindow):
         self.sp_sig_settle_mv.setValue(1.0)
         self.sp_sig_settle_mv.setToolTip(
             'Settledness gate: collection only runs while the mean per-channel '
-            'rolling std dev (over the Stats tab\'s "Std dev N" window — same '
-            'metric as the Training tab\'s Settledness) is at or below this, so '
+            'rolling std dev (over the Stats tab\'s "Std dev N" window) is at '
+            'or below this, so '
             'target/air transitions and the firmware\'s ~10 s rolling-average '
             'ramp can\'t enter the window. Raise to 50 to disable.')
         row1.addWidget(self.sp_sig_settle_mv)
@@ -2849,8 +2316,6 @@ class MainWindow(QMainWindow):
         refuse = None
         if self._editable_sig_path is None:
             refuse = 'Training: open a signature file first (New file… / Open for editing…)'
-        elif self._training_current_row is not None:
-            refuse = 'Training: a guided Training Session is running — stop it first'
         if refuse is not None:
             self.pb_sig_train_start.blockSignals(True)
             self.pb_sig_train_start.setChecked(False)
@@ -3625,8 +3090,8 @@ class MainWindow(QMainWindow):
         self._reload_editable_signature_list()
         self.statusBar().showMessage("Deleted '{0}' from {1}".format(item.text(), self._editable_sig_path))
 
-    # -- Session recording (alternate path -- same file format as the ----
-    # -- Training Session tab, reuses its machinery verbatim) -------------
+    # -- Session recording (alternate path to the Stats tab's Record ------
+    # -- Session button -- same file format, same machinery) --------------
 
     def _on_sig_session_start(self):
         if not self.serial.isOpen() or self.pb_start.text() != 'Running':
@@ -3644,9 +3109,10 @@ class MainWindow(QMainWindow):
         self._update_sig_session_status_label()
 
     def _on_sig_session_pause_toggled(self, checked):
-        # Shared with the Training Session tab's own pause -- process_packet's
-        # frame-write gate checks this same flag regardless of which tab set it.
-        self._training_paused = checked
+        # process_packet's frame-write gate and the mark handler both read this
+        # flag; _session_stop() clears it so a session stopped while paused
+        # can't leave the next one silently recording nothing.
+        self._session_paused = checked
         self.pb_sig_session_pause.setText('Resume' if checked else 'Pause')
         self.pb_sig_session_pause.setStyleSheet(self.MY_YELLOW if checked else '')
         self._update_sig_session_status_label()
@@ -3660,7 +3126,7 @@ class MainWindow(QMainWindow):
         if not self._recording:
             self.statusBar().showMessage('Start recording before marking.')
             return
-        if self._training_paused:
+        if self._session_paused:
             self.statusBar().showMessage('Paused — resume before marking.')
             return
         target_id = self.sig_target.currentData()
@@ -3669,8 +3135,8 @@ class MainWindow(QMainWindow):
             return
         if target_id != 'air' and target_id not in self._targets:
             self.statusBar().showMessage(
-                "Target '{0}' is no longer in the registry -- reload targets and pick "
-                'again.'.format(target_id))
+                "Target '{0}' is no longer in the registry -- restart ClassViz to pick "
+                'up registry edits, then pick again.'.format(target_id))
             return
         placement = self._placement_from_widgets('sig')
         if target_id == 'air':
@@ -3699,7 +3165,7 @@ class MainWindow(QMainWindow):
             self.lbl_sig_session_status.setText('Not recording')
         else:
             self.lbl_sig_session_status.setText(
-                'Recording{0}'.format(' (paused)' if self._training_paused else ''))
+                'Recording{0}'.format(' (paused)' if self._session_paused else ''))
 
     # ------------------------------------------------------------------
     # Serial
@@ -3829,7 +3295,7 @@ class MainWindow(QMainWindow):
         self._frame_count += 1
         self._rolling_buf.append((now, raw))
 
-        if self._recording and self._session_file and not self._training_paused:
+        if self._recording and self._session_file and not self._session_paused:
             self._session_write_row(fw_time_ms, now, raw, glitch_mask)
 
         if self._capturing:
@@ -4030,10 +3496,12 @@ class MainWindow(QMainWindow):
 
     def _session_start(self, notes=None):
         """Open a new self-describing session-dump CSV and write its header.
-        notes: pre-supplied session notes (e.g. auto-derived from the Training
-        Session run list) that skip the interactive prompt entirely. If None,
-        prompts the operator via QInputDialog (the plain Stats-tab "Record
-        Session" flow, which has no run list to derive notes from)."""
+        notes: pre-supplied session notes, skipping the interactive prompt. If
+        None (both current callers -- the Stats tab's "Record Session" button
+        and the Analysis tab's Session Start), prompts the operator via
+        QInputDialog. The parameter is kept because _session_write_header takes
+        the notes either way; v1.39 removed the one caller that pre-supplied
+        them (the Training Session tab derived them from its run list)."""
         if notes is None:
             notes, _ = QInputDialog.getMultiLineText(
                 self, 'Session notes', 'Planned target order / notes for this session:')
@@ -4120,19 +3588,18 @@ class MainWindow(QMainWindow):
         self._session_path       = None
         self._session_start_wall = None
         # Centralized reset: covers this method being triggered from any of its
-        # callers (this tab's own toggle, _apply_profile force-stop on a profile
-        # change, start_stop force-stop on disconnect) so the Training Session
-        # tab's UI never gets stuck in a "started" state when the underlying
-        # recording is closed out from under it.
-        if self._training_current_row is not None:
-            self._reset_training_ui()
+        # callers (the Stats tab's own toggle, _apply_profile force-stop on a
+        # profile change, start_stop force-stop on disconnect) so the Analysis
+        # tab's Session controls never get stuck in a "started" state when the
+        # underlying recording is closed out from under them.
+        self._session_paused = False
         if self._analysis_session_recording:
             self._analysis_session_recording = False
             self._set_sig_session_active_ui(False)
             self._update_sig_session_status_label()
 
     # ------------------------------------------------------------------
-    # Ground-truth marks (low-level writer, reused by the Training Session tab)
+    # Ground-truth marks (low-level writer, used by the Analysis tab's Session)
     # ------------------------------------------------------------------
     def _append_mark(self, text):
         """Append one '#'-prefixed ground-truth mark line to the currently-open
@@ -4208,15 +3675,13 @@ class MainWindow(QMainWindow):
         self._update_analysis_heatmap()
 
         # The rest of the Analysis tab's charts/strips — only compute when
-        # that tab is visible.
-        if self.tabs.currentIndex() == self.ANALYSIS_TAB_INDEX:
+        # that tab is visible. Keyed off _analysis_tab_index (what addTab()
+        # actually returned) rather than a hardcoded constant: v1.39 removed a
+        # tab above this one, and a stale literal here would have silently
+        # stopped matching and frozen the charts.
+        if self.tabs.currentIndex() == self._analysis_tab_index:
             self._update_analysis_charts()
             self._update_analysis_strips()
-
-        # Training Session live cells — always live regardless of visible tab
-        # (operator may be watching Heatmap while physically holding the probe).
-        if self._training_current_row is not None:
-            self._update_training_live()
 
     def _update_baseline_label(self, mean):
         mode = self._baseline_mode
@@ -4538,21 +4003,18 @@ class MainWindow(QMainWindow):
             if isinstance(left_sizes, list) and len(left_sizes) == self.analysis_left_split.count():
                 self.analysis_left_split.setSizes([int(x) for x in left_sizes])
 
-            # Stats-tab Std colour thresholds + Training-tab settle window.
+            # Stats-tab Std colour thresholds.
             self.sp_std_lower.setValue(float(s.get('std_lower', 0.50)))
             self.sp_std_upper.setValue(float(s.get('std_upper', 1.00)))
-            self.sp_training_settle.setValue(int(s.get('training_settle', 50)))
 
-            # Saved-profile / Saved-list dropdowns (both already populated from
-            # disk in _build_ui, so findText guards a since-deleted file; only
-            # the dropdown selection is restored -- no auto Load & Run).
-            for combo, key in ((self.cb_profile_file, 'profile_file'),
-                               (self.cb_training_list, 'training_list')):
-                name = s.get(key)
-                if name:
-                    idx = combo.findText(name)
-                    if idx >= 0:
-                        combo.setCurrentIndex(idx)
+            # Saved-profile dropdown (already populated from disk in _build_ui,
+            # so findText guards a since-deleted file; only the dropdown
+            # selection is restored -- no auto Load & Run).
+            profile_name = s.get('profile_file')
+            if profile_name:
+                idx = self.cb_profile_file.findText(profile_name)
+                if idx >= 0:
+                    self.cb_profile_file.setCurrentIndex(idx)
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             self.resize(1100, 900)  # first run
 
@@ -4603,10 +4065,8 @@ class MainWindow(QMainWindow):
             'sig_train_override': self.cb_sig_train_override.isChecked(),
 
             'profile_file':    self.cb_profile_file.currentText(),
-            'training_list':   self.cb_training_list.currentText(),
             'std_lower':       self.sp_std_lower.value(),
             'std_upper':       self.sp_std_upper.value(),
-            'training_settle': self.sp_training_settle.value(),
 
             'supply': self.cb_supply.currentText(),
 
@@ -4636,24 +4096,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
         """App-wide filter (installed on the QApplication instance) so the
-        Space-bar actions work regardless of focus, and are swallowed before
+        Space-bar action works regardless of focus, and is swallowed before
         widgets that already consume Space (e.g. QPushButton's
-        Space-to-click). Suppressed whenever a text-entry widget has focus
-        (including a QTableWidget cell mid-edit, which uses an embedded
-        QLineEdit). Dispatch (v1.34): an active Analysis-tab training session
-        gets Space (lock leading air / override-advance) while that tab is
-        visible; otherwise Space stays the Training Session tab's step-advance."""
+        Space-to-click). Suppressed whenever a text-entry widget has focus.
+        Space drives an active Analysis-tab training cycle (lock leading air /
+        override-advance) while that tab is visible; otherwise it is left alone
+        and reaches whatever widget has focus, as normal. Since v1.39 that is
+        the only Space binding -- the Training Session tab's step-advance went
+        with the tab."""
         if event.type() == QEvent.Type.KeyPress:
             if isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox)):
                 return super().eventFilter(obj, event)
             if event.isAutoRepeat():
                 return True   # swallow held-key repeats
-            if event.key() == Qt.Key.Key_Space:
-                if self._analysis_training_active and \
-                        self.tabs.currentIndex() == self._analysis_tab_index:
-                    self._on_sig_train_space()
-                else:
-                    self._on_training_space()
+            if event.key() == Qt.Key.Key_Space and self._analysis_training_active \
+                    and self.tabs.currentIndex() == self._analysis_tab_index:
+                self._on_sig_train_space()
                 return True
         return super().eventFilter(obj, event)
 

@@ -1,3 +1,64 @@
+### src/pimd_classviz.py — v1.39 — remove the Training Session tab
+
+All corpus capture now happens through the Analysis tab's own Training group
+(the automated auto-detect air/target/air cycle from v1.34–v1.35, refined in
+v1.38), so the separate **Training Session** tab is redundant and is gone: the
+guided run-list table, Start/Pause/Stop, Space step-advance, the per-row
+Placement… dialog and the saved target-list JSON templates. That is one
+contiguous 505-line block (`_build_training_session_tab` through
+`_on_training_save_list`, 26 methods), plus the module-level
+`TRAINING_LISTS_DIR` and its three saved-list file helpers, the `__init__`
+state `_training_current_row` / `_training_row_start_wall` /
+`_training_pause_started`, and the now-unused `QAbstractItemView` / `QDialog`
+imports. Every removed method was verified to have no caller outside the block.
+
+**Deliberately kept:** the session-recording machinery the tab shared with the
+rest of the app — `_session_start` / `_session_stop` / `_append_mark` /
+`_append_mark_target` and the `_recording` / `_session_file` state — which the
+Analysis tab's Session sub-panel and the Stats tab's Record Session button both
+drive. `_build_target_placement_widget_set()` also stays despite dropping to a
+single call site: the field set *is* the corpus schema's placement tuple and
+deserves one definition.
+
+**Tab-index hazard fixed.** `_redraw` gated the Analysis charts on a hardcoded
+`ANALYSIS_TAB_INDEX = 3` while `eventFilter` used the `_analysis_tab_index`
+that `addTab()` actually returned. Removing a tab above Analysis moves it to
+index 2, so the constant would have silently stopped matching and frozen the
+charts. The constant is deleted and both sites now use the live index.
+
+**Latent bug fixed as a consequence.** `_training_paused` (renamed to
+`_session_paused`, now that no "training session" sets it) was only ever
+cleared on stop by `_reset_training_ui()`, which ran solely when a *Training
+Session tab* run was active. An Analysis-tab session that was paused and then
+stopped therefore left the flag set — `_set_sig_session_active_ui(False)`
+unchecks the Pause button with signals blocked, so the toggle handler never
+fires — and the next recording silently wrote no frames, since process_packet
+gates on it. Deleting the tab would have removed the only reset path entirely,
+so `_session_stop()` now clears the flag directly.
+
+Space is now bound only to an active Analysis training cycle while that tab is
+visible (unchanged condition); with no Training Session step-advance to fall
+through to, Space is otherwise left alone and reaches the focused widget as
+normal. Settings drop `training_list` and `training_settle`; stale keys in an
+existing settings file are ignored by `.get()`, so no migration. Also folds in
+a v1.38 leftover: `_on_sig_session_mark()`'s dangling-target message still said
+"reload targets", naming the button v1.38 deleted.
+
+Verified headless (`QT_QPA_PLATFORM=offscreen`, 99 checks across three scripts,
+all passing): three tabs remain in Heatmap/Stats/Analysis order with the
+Analysis index now 2 and the stale constant gone; no `_training_*` attribute or
+module-level list helper survives; a v1.38 settings file carrying the dropped
+keys still loads and still applies the rest; and the shared session recorder
+still starts, marks (writing both `# mark:` and `# mark_target:`), refuses a
+mark while paused, resets the pause flag on stop, and records on the following
+session. The v1.38 suites still pass unchanged. Bench confirmation of a full
+Analysis training cycle and a Stats-tab Record Session still to be done.
+
+Note for the next DESIGN.md consolidation pass: §15's `pimd_classviz.py` row
+still advertises the Training Session tab. (2026-07-23)
+
+---
+
 ### src/pimd_classviz.py — v1.38 — Analysis-tab capture ergonomics
 
 Seven bench annoyances from using the Analysis tab as the primary capture
