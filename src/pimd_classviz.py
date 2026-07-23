@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.37
+# PIMD Signature Visualiser (ClassViz) v1.38
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -18,6 +18,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.38 Analysis: shrinkable heatmap split, auto-check new sigs, black live traces, quality colouring
 #   v1.37 FIX Load signatures / Open for editing rejected the app's own v1.32+ files (schema dispatch)
 #   v1.36 persist Saved-profile / Saved-list selectors, Stats Std thresholds, Training settle window
 #   v1.35 training status labels name air/target; place/remove countdown flashes (red <5 s) + beeps
@@ -98,7 +99,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.37'
+APP_VERSION = '1.38'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -183,6 +184,14 @@ def _save_training_list_file(name, rows):
 
 pg.setConfigOptions(background='w', foreground='k', antialias=True)
 
+# Highlight colours, as bare rgb() strings so both the widget stylesheets
+# (MainWindow.MY_GREEN/YELLOW/RED, built from these) and the per-field <span>
+# backgrounds in the signature readout draw from one definition.
+_HL_GREEN  = 'rgb(143, 240, 164)'
+_HL_YELLOW = 'rgb(249, 240, 107)'
+_HL_RED    = 'rgb(246,  97,  81)'
+_HL_BLUE   = 'rgb(153, 193, 241)'
+
 _R = int(Qt.AlignmentFlag.AlignRight) | int(Qt.AlignmentFlag.AlignVCenter)
 _C = int(Qt.AlignmentFlag.AlignCenter)
 
@@ -198,10 +207,10 @@ def _csv_default_path():
 
 
 class MainWindow(QMainWindow):
-    MY_GREEN  = 'background-color: rgb(143, 240, 164);'
-    MY_YELLOW = 'background-color: rgb(249, 240, 107);'
-    MY_RED    = 'background-color: rgb(246,  97,  81);'
-    MY_BLUE   = 'background-color: rgb(153, 193, 241);'
+    MY_GREEN  = 'background-color: {0};'.format(_HL_GREEN)
+    MY_YELLOW = 'background-color: {0};'.format(_HL_YELLOW)
+    MY_RED    = 'background-color: {0};'.format(_HL_RED)
+    MY_BLUE   = 'background-color: {0};'.format(_HL_BLUE)
 
     def __init__(self):
         super().__init__()
@@ -338,6 +347,12 @@ class MainWindow(QMainWindow):
         self._sig_air_after    = None   # same shape, optional
         self._sig_target       = None   # same shape
         self._sig_last_stats   = None   # cached dict from _compute_sig_stats(), for the live readout
+        # (session, capture_id) keys saved during this app session (v1.38) --
+        # they land *checked* in the signature list so a fresh capture is on
+        # the charts immediately, without hunting for it. Only ever consulted
+        # for a key's first appearance, so unticking one sticks. In-memory
+        # only; cleared whenever a different editable file is started/opened.
+        self._sig_autocheck_keys = set()
 
         self._SIG_AWAIT_SECONDS = 30.0  # place/remove-target guard countdown
 
@@ -941,7 +956,7 @@ class MainWindow(QMainWindow):
         row_btns.addWidget(self.pb_training_remove_row)
         self.pb_training_placement = QPushButton('Placement…')
         self.pb_training_placement.setToolTip(
-            'Edit the selected row\'s placement (long_axis/face_normal/offsets/medium/notes) -- '
+            'Edit the selected row\'s placement (long_axis/face_normal/offsets/medium) -- '
             'same widget set as the Analysis tab.')
         self.pb_training_placement.clicked.connect(self._on_training_placement_clicked)
         row_btns.addWidget(self.pb_training_placement)
@@ -1062,7 +1077,6 @@ class MainWindow(QMainWindow):
         self.training_dlg_offset_y_mm.setValue(int(current.get('offset_y_mm', 0)))
         self.training_dlg_medium.setCurrentText(current.get('medium', 'air'))
         self.training_dlg_repeat_idx.setValue(int(current.get('repeat_idx', 1)))
-        self.training_dlg_notes.setText(current.get('notes', ''))
 
         btn_row = QHBoxLayout()
         pb_ok = QPushButton('OK')
@@ -1405,10 +1419,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        # Left column: Controls + Signatures + Heatmap, stacked, sharing one
-        # width -- Signatures/Controls used to span the full tab width above
-        # everything else; now they're grouped with the heatmap so the right
-        # side (charts) can reach the top of the tab.
+        # Left column: Controls + Signatures + Training above, Heatmap below,
+        # sharing one width -- Signatures/Controls used to span the full tab
+        # width above everything else; now they're grouped with the heatmap so
+        # the right side (charts) can reach the top of the tab.
+        #
+        # The two halves are split (v1.38) rather than stacked with a fixed
+        # heatmap stretch: the heatmap used to own a fixed share of the column
+        # height regardless of how many signatures were loaded, so the
+        # signature list stayed ~2 rows tall and was unusable for picking
+        # overlays out of a 10+ capture corpus. The handle now trades heatmap
+        # height for signature-list height, and the heatmap can be dragged
+        # away entirely on a capture-only day.
         left_col = QWidget()
         left_v = QVBoxLayout(left_col)
         left_v.setContentsMargins(0, 0, 0, 0)
@@ -1420,9 +1442,19 @@ class MainWindow(QMainWindow):
         top_v.setSpacing(2)
         top_v.addLayout(self._build_analysis_ctrl_row_a())
         left_v.addWidget(top_box)
-        left_v.addWidget(self._build_analysis_signatures_group())
+        left_v.addWidget(self._build_analysis_signatures_group(), stretch=1)
         left_v.addWidget(self._build_analysis_training_group())
-        left_v.addWidget(self._build_analysis_heatmap_group(), stretch=1)
+
+        left_split = QSplitter(Qt.Orientation.Vertical)
+        left_split.setHandleWidth(4)
+        left_split.addWidget(left_col)
+        left_split.addWidget(self._build_analysis_heatmap_group())
+        left_split.setStretchFactor(0, 1)
+        left_split.setStretchFactor(1, 1)
+        left_split.setSizes([620, 380])
+        left_split.setCollapsible(0, False)   # capture controls must stay reachable
+        left_split.setCollapsible(1, True)    # the heatmap may be dragged fully away
+        self.analysis_left_split = left_split
 
         # Right column: row1 (strips | chart2 side by side) + 8-grid + 9-grid.
         row1_split = QSplitter(Qt.Orientation.Horizontal)
@@ -1440,7 +1472,7 @@ class MainWindow(QMainWindow):
 
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.setHandleWidth(4)
-        main_split.addWidget(left_col)
+        main_split.addWidget(left_split)
         main_split.addWidget(right_split)
         main_split.setSizes([560, 1440])
         layout.addWidget(main_split, stretch=1)
@@ -1475,7 +1507,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(2)
         self._build_sig_row1_files(v)
-        v.addWidget(self.lw_analysis_templates)
+        v.addWidget(self.lw_analysis_templates, stretch=1)
         self._build_sig_row2_capture_inputs(v)
         self._build_sig_row3_readout_save(v)
         self._build_sig_row4_session(v)
@@ -1508,33 +1540,50 @@ class MainWindow(QMainWindow):
         row_b.addWidget(self.lbl_sig_mode, stretch=1)
         v.addLayout(row_b)
 
-        # Shrunk from the original wrapped left-to-right "tag" flow --
+        # Changed from the original wrapped left-to-right "tag" flow --
         # labels now carry amp/SNR/quality text, so a normal scrollable
-        # top-to-bottom list stays compact and legible, freeing room below
-        # for the capture/save/session controls.
+        # top-to-bottom list is more legible. It takes all the height the
+        # left splitter gives it (v1.38): the old 46px *maximum* pinned it to
+        # ~2 visible rows, which made a 10+ capture corpus unpickable; 46px is
+        # now the floor instead, and the surplus comes out of the heatmap.
         self.lw_analysis_templates = QListWidget()
         self.lw_analysis_templates.setFlow(QListWidget.Flow.TopToBottom)
-        self.lw_analysis_templates.setMaximumHeight(46)
+        self.lw_analysis_templates.setMinimumHeight(46)
         self.lw_analysis_templates.itemChanged.connect(self._on_analysis_template_item_changed)
         self.lw_analysis_templates.currentItemChanged.connect(lambda *_: self._update_sig_capture_gating())
 
     # -- Shared target/placement widget set (Analysis tab inline + Training --
     # -- tab Placement dialog) -- one implementation, two call sites ---------
 
-    def _build_target_placement_widget_set(self, layout, prefix):
+    def _build_target_placement_widget_set(self, layout, prefix, emphasise_target=False):
         """Builds a target-registry combo + structured placement widgets into
         `layout`, storing them as self.{prefix}_target, {prefix}_distance_mm,
         {prefix}_long_axis, {prefix}_face_normal, {prefix}_offset_x_mm,
-        {prefix}_offset_y_mm, {prefix}_medium, {prefix}_repeat_idx,
-        {prefix}_notes. Pure construction -- caller wires signals and calls
+        {prefix}_offset_y_mm, {prefix}_medium, {prefix}_repeat_idx. Pure
+        construction -- caller wires signals and calls
         _populate_target_combo() to fill the target combo from the currently
         loaded registry. Instantiated inline (Analysis tab) and inside a
         QDialog (Training tab's per-row Placement editor) so field
-        definitions never duplicate."""
+        definitions never duplicate.
+
+        emphasise_target: bold/enlarge the Target label + combo (v1.38). Set
+        for the Analysis tab's inline capture set, where that one combo
+        decides what every Save writes into the corpus and picking the wrong
+        one silently mislabels a capture -- it shouldn't look like just
+        another dropdown. The Training dialog keeps the plain look."""
         row_a = QHBoxLayout()
-        row_a.addWidget(QLabel('Target:'))
+        lbl_target = QLabel('Target:')
         target_combo = QComboBox()
         target_combo.setMinimumWidth(220)
+        if emphasise_target:
+            emph_font = QFont()
+            emph_font.setPointSize(12)
+            emph_font.setBold(True)
+            lbl_target.setFont(emph_font)
+            target_combo.setFont(emph_font)
+            target_combo.setMinimumWidth(300)
+            target_combo.setMinimumHeight(30)
+        row_a.addWidget(lbl_target)
         setattr(self, '{0}_target'.format(prefix), target_combo)
         row_a.addWidget(target_combo, stretch=1)
 
@@ -1606,13 +1655,6 @@ class MainWindow(QMainWindow):
         row_c.addWidget(repeat_idx)
         layout.addLayout(row_c)
 
-        row_d = QHBoxLayout()
-        row_d.addWidget(QLabel('Notes:'))
-        notes = QLineEdit()
-        setattr(self, '{0}_notes'.format(prefix), notes)
-        row_d.addWidget(notes, stretch=1)
-        layout.addLayout(row_d)
-
     def _populate_target_combo(self, combo, selected_target_id=None):
         combo.blockSignals(True)
         combo.clear()
@@ -1638,7 +1680,11 @@ class MainWindow(QMainWindow):
             'offset_y_mm': getattr(self, '{0}_offset_y_mm'.format(prefix)).value(),
             'medium': getattr(self, '{0}_medium'.format(prefix)).currentText(),
             'repeat_idx': getattr(self, '{0}_repeat_idx'.format(prefix)).value(),
-            'notes': getattr(self, '{0}_notes'.format(prefix)).text().strip(),
+            # The Notes entry box was dropped in v1.38 (dead weight in the
+            # capture flow -- nothing was being typed into it). The key and
+            # the corpus 'notes' column stay, always empty, so build_rows()
+            # and the session dump's mark_target: line are unchanged.
+            'notes': '',
         }
 
     def _update_sig_repeat_idx_suggestion(self):
@@ -1663,7 +1709,10 @@ class MainWindow(QMainWindow):
           - loads with errors -> dialog (if show_dialog_on_error) + only the
             non-erroring targets loaded, 'air' always present.
           - loads with only warnings -> status bar summary, fully populated.
-        Called once at UI-build time and again from the reload button."""
+        Called once at UI-build time. The Analysis tab's "Reload targets"
+        button was dropped in v1.38 -- the registry is a slow-moving reference
+        file, so a mid-session reload was never worth a permanent control;
+        restart ClassViz to pick up registry edits."""
         try:
             targets, issues = pimd_targets.load_targets(TARGETS_REGISTRY_PATH)
         except OSError as e:
@@ -1703,11 +1752,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_update_sig_capture_gating'):
             self._update_sig_capture_gating()
 
-    def _on_reload_targets_registry_clicked(self):
-        self._load_targets_registry(show_dialog_on_error=True)
-
     def _build_sig_row2_capture_inputs(self, v):
-        self._build_target_placement_widget_set(v, 'sig')
+        self._build_target_placement_widget_set(v, 'sig', emphasise_target=True)
         self.sig_target.currentIndexChanged.connect(self._update_sig_capture_gating)
         for widget, signal_name in (
             (self.sig_target, 'currentIndexChanged'), (self.sig_distance_mm, 'valueChanged'),
@@ -1716,13 +1762,6 @@ class MainWindow(QMainWindow):
             (self.sig_medium, 'currentIndexChanged'),
         ):
             getattr(widget, signal_name).connect(self._update_sig_repeat_idx_suggestion)
-
-        row_reload = QHBoxLayout()
-        self.pb_sig_reload_registry = QPushButton('Reload targets')
-        self.pb_sig_reload_registry.clicked.connect(self._on_reload_targets_registry_clicked)
-        row_reload.addWidget(self.pb_sig_reload_registry)
-        row_reload.addStretch(1)
-        v.addLayout(row_reload)
 
     def _build_analysis_training_group(self):
         """Training group (v1.34) — automated auto-detect capture cycle. One
@@ -1825,6 +1864,60 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_sig_row3_readout_save(self, v):
+        # Green-when thresholds for the readout colouring below (v1.38).
+        # Defaults come from pimd_features' own constants so the colours start
+        # out agreeing with the quality column it writes; editable because the
+        # right amplitude floor is rig- and target-dependent.
+        row_q = QHBoxLayout()
+        row_q.addWidget(QLabel('Green when:'))
+
+        row_q.addWidget(QLabel('Amp(L2) ≥'))
+        self.sp_sig_q_amp_mv = QDoubleSpinBox()
+        self.sp_sig_q_amp_mv.setRange(0.0, 1000.0)
+        self.sp_sig_q_amp_mv.setDecimals(2)
+        self.sp_sig_q_amp_mv.setSingleStep(0.25)
+        self.sp_sig_q_amp_mv.setValue(
+            pimd_features.AIR_THRESHOLD_MV_DEFAULT * math.sqrt(self._n_channels))
+        self.sp_sig_q_amp_mv.setToolTip(
+            'Amp(L2) at/above this reads green, at/above half of it amber, below red.\n'
+            'Default = pimd_features.AIR_THRESHOLD_MV_DEFAULT × √n_channels, i.e. the '
+            'L2 equivalent of the "above this, not air" mean|Δ| threshold (L2 ≈ √n × '
+            'mean|·| for comparable per-cell magnitudes).')
+        row_q.addWidget(self.sp_sig_q_amp_mv)
+        row_q.addWidget(QLabel('mV'))
+
+        row_q.addWidget(QLabel('Mean|Δ| ≥'))
+        self.sp_sig_q_mean_mv = QDoubleSpinBox()
+        self.sp_sig_q_mean_mv.setRange(0.0, 1000.0)
+        self.sp_sig_q_mean_mv.setDecimals(3)
+        self.sp_sig_q_mean_mv.setSingleStep(0.05)
+        self.sp_sig_q_mean_mv.setValue(pimd_features.AIR_THRESHOLD_MV_DEFAULT)
+        self.sp_sig_q_mean_mv.setToolTip(
+            'Mean|Δ| at/above this reads green, at/above half of it amber, below red.\n'
+            'Default = pimd_features.AIR_THRESHOLD_MV_DEFAULT, which is literally '
+            '"mean|delta| below this -> air".')
+        row_q.addWidget(self.sp_sig_q_mean_mv)
+        row_q.addWidget(QLabel('mV'))
+
+        row_q.addWidget(QLabel('Splithalf ≤'))
+        self.sp_sig_q_split_ratio = QDoubleSpinBox()
+        self.sp_sig_q_split_ratio.setRange(0.01, 2.0)
+        self.sp_sig_q_split_ratio.setDecimals(2)
+        self.sp_sig_q_split_ratio.setSingleStep(0.05)
+        self.sp_sig_q_split_ratio.setValue(pimd_features.NOISY_RATIO_THRESHOLD)
+        self.sp_sig_q_split_ratio.setToolTip(
+            'Splithalf/SNR read green while splithalf ≤ this × Amp, amber to 1.5× that, '
+            'else red.\nDefault = pimd_features.NOISY_RATIO_THRESHOLD, the exact rule '
+            "quality_flags() uses to stamp 'noisy' (0.20 == SNR 5).")
+        row_q.addWidget(self.sp_sig_q_split_ratio)
+        row_q.addWidget(QLabel('× Amp'))
+        row_q.addStretch(1)
+        v.addLayout(row_q)
+
+        for sp in (self.sp_sig_q_amp_mv, self.sp_sig_q_mean_mv, self.sp_sig_q_split_ratio):
+            sp.valueChanged.connect(
+                lambda *_: self._set_sig_readout_from_stats(self._sig_last_stats))
+
         row_a = QHBoxLayout()
         self.lbl_sig_readout = QLabel('Amp: —  Mean|Δ|: —  Splithalf: —  SNR: —  Quality: —')
         self.lbl_sig_readout.setWordWrap(True)
@@ -1913,6 +2006,10 @@ class MainWindow(QMainWindow):
 
     def _build_analysis_heatmap_widget(self):
         self.analysis_gw = pg.GraphicsLayoutWidget()
+        # Low floor (v1.38) so the left splitter can squeeze the heatmap right
+        # down in favour of the signature list -- the widget's natural minimum
+        # would otherwise pin the handle well short of collapsed.
+        self.analysis_gw.setMinimumHeight(80)
         self.analysis_plot = self.analysis_gw.addPlot()
         self.analysis_plot.invertY(True)
         self._style_compact(self.analysis_plot)
@@ -2060,8 +2157,12 @@ class MainWindow(QMainWindow):
         self.analysis_c2_plot.setLabel('bottom', 'pulse width (µs)', **{'font-size': '7pt'})
         self.analysis_c2_refline = self.analysis_c2_plot.addLine(
             y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
+        # Live "current" trace is black (v1.38) -- it used to be blue, which
+        # collided with whatever blue pg.intColor() handed a template overlay,
+        # making "live vs corpus" ambiguous at a glance. Black is never an
+        # intColor hue, and the overlays stay dashed on top of it.
         self.analysis_c2_curve = self.analysis_c2_plot.plot(
-            [], [], pen=pg.mkPen('b', width=2), symbol='o', symbolSize=5)
+            [], [], pen=pg.mkPen('k', width=2), symbol='o', symbolSize=5)
         self.analysis_c2_template_curves = {}
         self._rebuild_analysis_chart2_ticks()
         return self.analysis_c2_glw
@@ -2164,7 +2265,7 @@ class MainWindow(QMainWindow):
             if i > 0:
                 plot.hideAxis('left')
             plot.addLine(y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
-            curve = plot.plot([], [], pen=pg.mkPen('b', width=2), symbol='o', symbolSize=4)
+            curve = plot.plot([], [], pen=pg.mkPen('k', width=2), symbol='o', symbolSize=4)
             self.analysis_g8_plots.append(plot)
             self.analysis_g8_curves.append(curve)
             self.analysis_g8_template_curves.append({})
@@ -2268,7 +2369,7 @@ class MainWindow(QMainWindow):
             if j > 0:
                 plot.hideAxis('left')
             plot.addLine(y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
-            curve = plot.plot([], [], pen=pg.mkPen('b', width=2), symbol='o', symbolSize=4)
+            curve = plot.plot([], [], pen=pg.mkPen('k', width=2), symbol='o', symbolSize=4)
             self.analysis_g9_plots.append(plot)
             self.analysis_g9_curves.append(curve)
             self.analysis_g9_template_curves.append({})
@@ -2338,7 +2439,7 @@ class MainWindow(QMainWindow):
         self.analysis_strip_plot.setLabel('bottom', 'time (s)', **{'font-size': '7pt'})
         self.analysis_strip_refline = self.analysis_strip_plot.addLine(
             y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
-        self.analysis_strip_curve = self.analysis_strip_plot.plot([], [], pen=pg.mkPen('b', width=1))
+        self.analysis_strip_curve = self.analysis_strip_plot.plot([], [], pen=pg.mkPen('k', width=1))
         self.analysis_strip_template_lines = {}
         v.addWidget(self.analysis_strip_glw)
         return box
@@ -2617,7 +2718,16 @@ class MainWindow(QMainWindow):
             color = pg.intColor(i, hues=max(len(sigs), 9))
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(prev_checked.get(key, Qt.CheckState.Unchecked))
+            # Signatures captured in this app session default to *checked* so
+            # they're on the charts the moment they're saved (v1.38); anything
+            # else (a loaded reference corpus, a reopened file) defaults to
+            # unchecked so a 30-capture corpus doesn't flood every plot. The
+            # default only ever applies to a key's first appearance -- once an
+            # item exists, prev_checked preserves whatever it was set to, so
+            # unticking a fresh capture sticks across Save/Delete reloads.
+            default = (Qt.CheckState.Checked if key in self._sig_autocheck_keys
+                       else Qt.CheckState.Unchecked)
+            item.setCheckState(prev_checked.get(key, default))
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setForeground(QBrush(color))
             item.setToolTip('{0} @{1} ({2})  amp={3:.3f}mV  splithalf={4:.3f}mV  SNR={5:.2f}  quality={6}'.format(
@@ -3176,10 +3286,25 @@ class MainWindow(QMainWindow):
         self._sig_last_stats = self._compute_sig_stats()
         self._set_sig_readout_from_stats(self._sig_last_stats)
 
+    @staticmethod
+    def _hl_span(text, colour):
+        return '<span style="background-color:{0};">&nbsp;{1}&nbsp;</span>'.format(colour, text)
+
     def _set_sig_readout_from_stats(self, stats):
         """Renders the readout label from a stats dict (or None). Split from
         _update_sig_readout so the training air-acquire can display a stats
-        snapshot after the slots have already been shifted (v1.33)."""
+        snapshot after the slots have already been shifted (v1.33).
+
+        v1.38: each parameter carries its own green/amber/red background
+        instead of the whole label going yellow on quality != 'ok'. "Is this a
+        good capture?" was previously mental arithmetic against constants that
+        live in pimd_features; the bands now come from the Green-when
+        spinboxes, defaulted from those same constants.
+
+        NOTE (deliberate, flagged): the amplitude bands read "more signal is
+        better", so an intentional *air* capture -- where a large Amp/Mean|Δ|
+        is the bad outcome -- will still colour green. Inverting the sense for
+        target_id == 'air' is a separate decision, not made here."""
         if stats is None:
             self.lbl_sig_readout.setText('Amp: —  Mean|Δ|: —  Splithalf: —  SNR: —  Quality: —')
             self.lbl_sig_readout.setStyleSheet('')
@@ -3187,14 +3312,44 @@ class MainWindow(QMainWindow):
             self.lbl_sig_readout.setText('Error: {0}'.format(stats['error']))
             self.lbl_sig_readout.setStyleSheet(self.MY_RED)
         else:
+            amp = stats['plateau_amp_mV']
+            mean_abs = stats['amp_mean_abs_mV']
             splithalf = stats['splithalf_floor']
-            snr = stats['plateau_amp_mV'] / splithalf if splithalf > 1e-9 else float('inf')
+            snr = amp / splithalf if splithalf > 1e-9 else float('inf')
+
+            def amplitude_colour(value, threshold):
+                if value >= threshold:
+                    return _HL_GREEN
+                return _HL_YELLOW if value >= threshold / 2.0 else _HL_RED
+
+            amp_col = amplitude_colour(amp, self.sp_sig_q_amp_mv.value())
+            mean_col = amplitude_colour(mean_abs, self.sp_sig_q_mean_mv.value())
+
+            # Splithalf and SNR are the same quantity read two ways, so they
+            # share one verdict rather than disagreeing on screen.
+            ratio = self.sp_sig_q_split_ratio.value()
+            if splithalf <= ratio * amp:
+                noise_col = _HL_GREEN
+            elif splithalf <= 1.5 * ratio * amp:
+                noise_col = _HL_YELLOW
+            else:
+                noise_col = _HL_RED
+
+            quality = stats['quality']
+            quality_col = _HL_GREEN if quality == 'ok' else _HL_YELLOW
+
             note = '' if stats['used_air_after'] else '  (single air anchor — flat baseline)'
             self.lbl_sig_readout.setText(
-                'Amp(L2): {0:.3f}mV  Mean|Δ|: {1:.3f}mV  Splithalf: {2:.3f}mV  SNR: {3:.1f}  '
-                'Quality: {4}{5}'.format(stats['plateau_amp_mV'], stats['amp_mean_abs_mV'], splithalf,
-                                          snr, stats['quality'], note))
-            self.lbl_sig_readout.setStyleSheet('' if stats['quality'] == 'ok' else self.MY_YELLOW)
+                'Amp(L2): {0}  Mean|Δ|: {1}  Splithalf: {2}  SNR: {3}  Quality: {4}{5}'.format(
+                    self._hl_span('{0:.3f}mV'.format(amp), amp_col),
+                    self._hl_span('{0:.3f}mV'.format(mean_abs), mean_col),
+                    self._hl_span('{0:.3f}mV'.format(splithalf), noise_col),
+                    self._hl_span('{0:.1f}'.format(snr), noise_col),
+                    self._hl_span(quality, quality_col),
+                    note))
+            # Spans carry the colour now -- a label-wide stylesheet would
+            # paint the gaps between them too.
+            self.lbl_sig_readout.setStyleSheet('')
 
     def _update_sig_capture_gating(self):
         if not hasattr(self, 'pb_sig_train_ignore'):
@@ -3208,7 +3363,6 @@ class MainWindow(QMainWindow):
         self.sig_offset_y_mm.setEnabled(has_file)
         self.sig_medium.setEnabled(has_file)
         self.sig_repeat_idx.setEnabled(has_file)
-        self.sig_notes.setEnabled(has_file)
         self.sp_sig_capture_n.setEnabled(has_file)
         self.sp_sig_settle_mv.setEnabled(has_file)
         self.sp_sig_detect_mv.setEnabled(has_file)
@@ -3243,6 +3397,7 @@ class MainWindow(QMainWindow):
         self._editable_sig_session_id = 'gui_{0}'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
         self._editable_sig_seq = 0
         self._editable_repeat_counts = {}
+        self._sig_autocheck_keys.clear()
         self._reset_sig_capture_state()
         self._merge_template_list({}, source='editable')
         self._update_sig_mode_label()
@@ -3277,6 +3432,10 @@ class MainWindow(QMainWindow):
             return
         self._editable_sig_path = path
         self._editable_sig_session_id = 'gui_{0}'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
+        # Forget this session's auto-check marks: the file's existing captures
+        # should come back exactly as they are on disk (unticked), including
+        # any saved earlier in this session and then deliberately unticked.
+        self._sig_autocheck_keys.clear()
         self._reset_sig_capture_state()
         self._reload_editable_signature_list()
         self._update_sig_mode_label()
@@ -3374,7 +3533,8 @@ class MainWindow(QMainWindow):
         if target_id != 'air' and target_id not in self._targets:
             self.statusBar().showMessage(
                 "Target '{0}' is no longer in the registry (removed/renamed since it was "
-                "selected) -- reload targets and pick again.".format(target_id))
+                "selected) -- restart ClassViz to pick up registry edits, then pick "
+                "again.".format(target_id))
             return
         short_name = self._targets[target_id].short_name if target_id in self._targets else ''
 
@@ -3412,6 +3572,13 @@ class MainWindow(QMainWindow):
             writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
             for row in rows:
                 writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
+        # Mark it for auto-check *before* the reload rebuilds the list, so the
+        # new row lands ticked and _merge_template_list's closing
+        # _refresh_analysis_overlays() draws its overlay straight away. This
+        # covers the automated Training cycle too (which saves through here),
+        # by design -- everything captured this session is on the charts, and
+        # "Clear signatures" is the way back out.
+        self._sig_autocheck_keys.add((self._editable_sig_session_id, capture_id))
         self._reload_editable_signature_list()
         if self._analysis_training_active:
             # Keep the session running: the raw slots were cleared when the
@@ -3987,10 +4154,10 @@ class MainWindow(QMainWindow):
         parse_mark_label()/segment_from_marks() keep working unchanged on
         pre-v1.32 sessions with no 'mark_target:' companion). `placement`:
         dict with distance_mm, long_axis, face_normal, offset_x_mm,
-        offset_y_mm, medium, repeat_idx, notes. csv-quotes the field portion
-        (notes may contain commas) with lineterminator='\\n' so no stray '\\r'
-        lands in the session CSV -- pimd_features.parse_mark_target_line()
-        parses this exact format."""
+        offset_y_mm, medium, repeat_idx, notes (always '' since v1.38 dropped
+        the entry box -- the field itself stays). csv-quotes the field portion
+        with lineterminator='\\n' so no stray '\\r' lands in the session CSV --
+        pimd_features.parse_mark_target_line() parses this exact format."""
         ts = datetime.fromtimestamp(time.time()).isoformat()
         buf = io.StringIO()
         csv.writer(buf, lineterminator='\n').writerow([
@@ -4324,7 +4491,6 @@ class MainWindow(QMainWindow):
                 self.sig_offset_x_mm.setValue(int(s.get('sig_offset_x_mm', 0)))
                 self.sig_offset_y_mm.setValue(int(s.get('sig_offset_y_mm', 0)))
                 self.sig_medium.setCurrentText(s.get('sig_medium', 'air'))
-                self.sig_notes.setText(s.get('sig_notes', ''))
 
             self.cb_hm_norm.setCurrentIndex(int(s.get('analysis_hm_norm_idx', 0)))
             self.cb_hm_scale_auto.setChecked(bool(s.get('analysis_hm_scale_auto', True)))
@@ -4354,6 +4520,23 @@ class MainWindow(QMainWindow):
             self.sp_sig_settle_mv.setValue(float(s.get('sig_settle_mv', 1.0)))
             self.sp_sig_detect_mv.setValue(float(s.get('sig_detect_mv', 0.5)))
             self.cb_sig_train_override.setChecked(bool(s.get('sig_train_override', True)))
+
+            # Readout green/amber/red bands -- each spinbox keeps whatever
+            # default _build_sig_row3_readout_save() derived from
+            # pimd_features when the key is absent.
+            self.sp_sig_q_amp_mv.setValue(
+                float(s.get('sig_q_amp_mv', self.sp_sig_q_amp_mv.value())))
+            self.sp_sig_q_mean_mv.setValue(
+                float(s.get('sig_q_mean_mv', self.sp_sig_q_mean_mv.value())))
+            self.sp_sig_q_split_ratio.setValue(
+                float(s.get('sig_q_split_ratio', self.sp_sig_q_split_ratio.value())))
+
+            # Analysis left-column split (signature list vs heatmap). Length
+            # check guards a settings file written by a build with a different
+            # child count.
+            left_sizes = s.get('analysis_left_split_sizes')
+            if isinstance(left_sizes, list) and len(left_sizes) == self.analysis_left_split.count():
+                self.analysis_left_split.setSizes([int(x) for x in left_sizes])
 
             # Stats-tab Std colour thresholds + Training-tab settle window.
             self.sp_std_lower.setValue(float(s.get('std_lower', 0.50)))
@@ -4434,7 +4617,12 @@ class MainWindow(QMainWindow):
             'sig_offset_x_mm': self.sig_offset_x_mm.value(),
             'sig_offset_y_mm': self.sig_offset_y_mm.value(),
             'sig_medium':      self.sig_medium.currentText(),
-            'sig_notes':       self.sig_notes.text(),
+
+            'sig_q_amp_mv':       self.sp_sig_q_amp_mv.value(),
+            'sig_q_mean_mv':      self.sp_sig_q_mean_mv.value(),
+            'sig_q_split_ratio':  self.sp_sig_q_split_ratio.value(),
+
+            'analysis_left_split_sizes': self.analysis_left_split.sizes(),
         }
         try:
             os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)

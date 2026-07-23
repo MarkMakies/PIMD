@@ -1,3 +1,95 @@
+### src/pimd_classviz.py — v1.38 — Analysis-tab capture ergonomics
+
+Seven bench annoyances from using the Analysis tab as the primary capture
+workbench (it grew into that role over v1.31–v1.37, but its layout still
+reflected the older heatmap-first arrangement). No acquisition, wire-format or
+profile-geometry change — DESIGN §11 untouched; `pimd_features.py` is read-only
+here, imported for its constants only.
+
+**(1) Shrinkable heatmap / growable signature list.** The heatmap owned a fixed
+share of the left column (`addWidget(..., stretch=1)`) while the signature list
+was capped at 46 px — ~2 visible rows, which made a 10+ capture corpus
+unpickable for overlays. The left column is now a vertical `QSplitter`
+(`self.analysis_left_split`): Controls/Signatures/Training above, heatmap below,
+default `[620, 380]`. The heatmap child is collapsible and `analysis_gw` gained
+a `setMinimumHeight(80)` so it can be dragged down to nothing; the controls
+child is not collapsible. The list's 46 px maximum became a *minimum* and it now
+takes the recovered space (`addWidget(..., stretch=1)` inside the Signatures
+group). Sizes persist as `analysis_left_split_sizes`, guarded by a child-count
+check on restore.
+
+**(2) New captures land checked.** A freshly saved signature was unchecked, so
+it wasn't on the charts until it had been found in that 2-row list. A new
+in-memory `self._sig_autocheck_keys` set records each `(session, capture_id)`
+saved this app session; `_merge_template_list` uses membership as the per-item
+*default* check state. Only a default — `prev_checked` still wins for any item
+already in the list, so unticking a fresh capture sticks across Save/Delete
+reloads. Loading a reference corpus or reopening a file is unaffected (they
+default unchecked), and the set is cleared on New file… / Open for editing… so
+switching away and back brings rows back as they are on disk. This deliberately
+covers the automated Training cycle too, which saves through the same handler —
+everything captured this session is on the charts, with "Clear signatures" as
+the way back out.
+
+**(3) Black live traces.** The four "current" curves (chart-2, the 8- and
+9-grids, the band-mean strip) were blue, the same visual family as whatever blue
+`pg.intColor()` handed a template overlay, making live-vs-corpus ambiguous.
+They're now black; overlays keep their intColor dashed pens.
+
+**(4) Emphasised Target combo.** `_build_target_placement_widget_set()` takes an
+`emphasise_target` kwarg, set only for the Analysis tab's inline capture set:
+bold 12 pt label + combo, 300×30 minimum. That one combo decides what every Save
+writes into the corpus and picking the wrong one silently mislabels a capture —
+it shouldn't look like just another dropdown. The Training tab's Placement
+dialog keeps the plain look.
+
+**(5) Per-parameter quality colouring.** The readout was one flat string whose
+*whole* label went yellow when `quality != 'ok'`, so "is this a good capture?"
+meant mental arithmetic against constants living in `pimd_features`. Each field
+now carries its own green/amber/red `<span>` background (QLabel renders HTML;
+the palette rgb strings are factored into module-level `_HL_GREEN/_HL_YELLOW/
+_HL_RED` that the `MY_*` stylesheet constants are now built from, so the two
+can't drift). Bands come from three new "Green when:" spinboxes, defaulted from
+`pimd_features` and persisted as `sig_q_amp_mv` / `sig_q_mean_mv` /
+`sig_q_split_ratio`: Amp(L2) ≥ `AIR_THRESHOLD_MV_DEFAULT × √n_channels` (the L2
+equivalent of the air threshold, per the L2 ≈ √n·mean|·| relation documented in
+`compute_plateau_stats`); Mean|Δ| ≥ `AIR_THRESHOLD_MV_DEFAULT` (literally "below
+this → air"); Splithalf ≤ `NOISY_RATIO_THRESHOLD` × Amp (the exact
+`quality_flags()` 'noisy' rule). Amplitudes amber at half-threshold; Splithalf
+and SNR share one verdict (same quantity, read two ways) with amber to 1.5× the
+ratio; Quality is green on 'ok', amber with the flag text otherwise. Editing a
+spinbox repaints the cached stats immediately. The None/'error' branches and the
+"single air anchor" note are unchanged. *Flagged, not addressed:* the bands read
+"more signal is better", so an intentional **air** capture — where a large
+Amp/Mean|Δ| is the bad outcome — still colours green; inverting the sense for
+`target_id == 'air'` is a separate decision.
+
+**(6) Notes box removed** from the shared placement widget set, so it's gone
+from both the Analysis tab and the Training Placement dialog — nothing was being
+typed into it. `_placement_from_widgets()` returns `'notes': ''`, so the key,
+the corpus `notes` column and the session dump's `# mark_target:` line keep
+their exact shape (verified: `pimd_features.parse_mark_target_line()` still
+round-trips the line). `sig_notes` is dropped from settings; a stale key in an
+existing settings file is ignored by `.get()`.
+
+**(7) Reload-targets button removed** along with `_on_reload_targets_registry_
+clicked()`. The registry is a slow-moving reference file, not worth a permanent
+control; `_load_targets_registry()` still runs at UI-build time. The
+dangling-target message on Save now says to restart ClassViz to pick up registry
+edits.
+
+Verified headless (`QT_QPA_PLATFORM=offscreen`, 63 checks across two scripts):
+UI builds; splitter collapses the heatmap to 0 and its sizes survive a restart;
+thresholds default from the `pimd_features` constants, persist, and repaint the
+readout live; good/mid/bad stats colour each field as specified; all four live
+curves are black; a real Save writes an unchanged CORPUS_HEADER with an empty
+`notes` column, is read back by `pimd_corpus_check.load_corpus()`, and lands
+**checked** in the list, while a file-switch round-trip brings it back
+unchecked. On-bench visual confirmation and live-capture colouring still to be
+done by Mark. (2026-07-23)
+
+---
+
 ### src/pimd_classviz.py — v1.37 — FIX Load signatures / Open for editing rejected the app's own files
 
 Both Analysis-tab load buttons delegated schema sniffing/reading to
