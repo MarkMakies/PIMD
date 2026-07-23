@@ -35,3 +35,15 @@ src/data/corpora/
 
 # Session dumps written by pimd_classviz.py (runtime capture data, not source)
 src/data/sessions/
+
+# Calibration profiles — only the current *operating* profile is tracked
+# (§10 firmware<->ML contract). delaycal writes candidates here routinely and
+# superseded locks are kept locally, so the directory is ignored by default:
+# locking a new operating profile is a deliberate act, so add it explicitly
+# (git add -f) and update this exception.
+src/data/profiles/*
+!src/data/profiles/cal_63_air_v2.json
+
+# Previous-epoch profile8b captures — kept on disk, not repo source
+# (their DESIGN.md §15 rows were dropped at Doc-rev 1.8)
+References/profile8b-*
