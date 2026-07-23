@@ -2,242 +2,159 @@
 """
 pimd_corpus_check.py — corpus-level acceptance checks for a PIMD signature corpus.
 
-Version: 1.4
-Changelog:
-  v1.4 (2026-07-14) — Loud rejection of the v1.32+ target-registry schema
-      (target_id/distance_mm columns, pimd_classviz.py v1.32 / pimd_features.py
-      v6): sniff_format() now detects it and raises SystemExit immediately,
-      naming the file and stating this tool doesn't support it yet -- without
-      this, such a file still passes the 'long'-format column check (pulse_us/
-      threshold_v/delta_mV are unchanged) and only fails much later with an
-      opaque KeyError inside load_long()'s groupby(['session','target',
-      'distance_cm']), since those two columns no longer exist. Deliberately
-      NOT a full migration: this tool's canary-consistency (CANARY-START/END
-      suffix matching) and repeat-consistency (REPEAT_MARK_RE/'(rpt)' suffix)
-      detection are both keyed off the old free-text target column, which the
-      new schema replaces with a stable target_id + a separate structured
-      repeat_idx column -- re-homing those checks is a separate, deliberately
-      deferred follow-up (see pimd_classviz.py v1.32's CHANGELOG entry). Old
-      target/distance_cm-schema files are completely unaffected -- every
-      existing check continues to run exactly as before.
-  v1.3 (2026-07-07) — Campaign 2 (rig change) support, four changes:
-      (A) check_canary() now detects canary rows by suffix match (any
-      '<base> CANARY-START'/'<base> CANARY-END' target, not just a bare
-      exact-match "CANARY-START"/"CANARY-END") -- train-s1.csv's
-      "copper pipe CANARY-START"/"copper pipe CANARY-END" rows were
-      silently invisible to the old exact-match check ("0 pairs found"),
-      even though the SNR check already proved both were captured. New
-      strip_canary_suffix() helper (replaces CANARY_LABELS) also emits a
-      'drift status' row per pair (protocol v2's drift-flag criterion:
-      either the shape-cos or amp-ratio check failing means the session is
-      drift-flagged and its 15cm rows get downgraded -- pimd_features.py's
-      quality column handles the actual downgrade, this just reports).
-      Canary rows are now also excluded from check_shape_invariance() and
-      check_falloff() (they only exist @5cm and would otherwise pollute
-      per-target checks if a session ever names one to look like a normal
-      target).
-      (B) New check_repeat_cross_session(): the same target+distance
-      captured in two different sessions (e.g. a capture plan revisiting
-      'copper pipe' in session s1 and again in s4) now gets its own
-      shape-cos/amp-ratio repeat-consistency rows, labelled with both
-      session IDs -- distinct from and additional to the existing
-      within-session '(rpt)' handling, which is unchanged.
-      (C) check_shape_invariance() adds a cos(10v15) metric row per target.
-      Extended objects (spanner, cast iron trivet, galvanized pipe) show a
-      real, repeatable near-field shape change at 5cm on this rig while
-      agreeing at 10/15cm -- blanket-FAILing that mislabels physics as
-      capture error. New verdict: cos(5,15) < 0.97 but cos(10,15) >= 0.97
-      now reports 'AMBER' (near-field @5, extended target?) instead of
-      'FAIL'; both low is still FAIL. The cos(5,15) roll-up row is now
-      report-only (no verdict); a new cos(10,15) roll-up row is the real
-      per-corpus gate. AMBER is its own status alongside PASS/FAIL/SKIP in
-      the summary line and never contributes to the exit code.
-      (D) Cross-campaign comparison (check_cross_campaign(), check 6) is now
-      gated behind an explicit `--baseline <corpus_csv>` CLI argument
-      (replaces the old ambiguous positional 2nd-corpus-file convention;
-      only the primary corpus gets the full acceptance suite, the baseline
-      is only ever used for the comparison itself). Default (no baseline):
-      prints one SKIP row, 'cross-campaign checks skipped (campaign 2; no
-      rig-1 baseline applicable)'. When given, results are labelled
-      '(informational, cross-rig)' and excluded from the exit-code gate --
-      a different rig/campaign is a reference point, not a same-rig
-      acceptance criterion. No absolute-mV thresholds anywhere in this file
-      assumed the old plateau_amp_mV convention (checked per pimd_features.py
-      v5's changelog) -- every amplitude-adjacent check here is already
-      ratio- or cosine-based, so nothing else needed changing for that.
-      Verified against train-s1.csv (session_20260707_143723): canary
-      shape-cos=0.9983/amp-ratio=0.952 now report real values (previously
-      invisible); spanner/trivet/galvanized cos(5,15) FAILs correctly flip
-      to AMBER (their cos(10,15) = 0.9887/0.9863/0.9963, all >= 0.97);
-      copper pipe/SNR/falloff rows are byte-for-byte identical to the
-      pre-this-change run (diffed directly); `--baseline
-      PIMD_target_corpus_signatures_v1.csv` runs without error (0 common
-      5cm target names -- v1 uses weight-suffixed names like "copper pipe
-      120g", a naming-convention mismatch, not a code defect; out of scope
-      to fix here).
-  v1.2 (2026-07-07) — Removed the solder-specific 5cm/15cm amplitude-ratio
-      sub-check from check 5 (distance falloff): it always printed a row
-      (PASS/FAIL when a "solder"-named target was present, else an
-      uninformative "n/a (no solder target)" SKIP for every corpus that
-      didn't happen to include one), which read as clutter/noise on any
-      corpus not built around that specific canary. The general per-target
-      falloff fit (n exponent, worst fit/measured ratio) still runs for
-      every target regardless of name, solder included. Removed
-      SOLDER_FALLOFF_MIN along with it.
-  v1.1 (2026-07-07) — Widened REPEAT_MARK_RE to accept an optional trailing
-      number inside the parens (e.g. '(rpt3)', '(rpt4)'), not just a bare
-      '(rpt)', so numbered repeat suffixes are also recognised
-      as repeat-consistency targets, not just a bare '(rpt)' -- companion to
-      pimd_features.py v4, which now auto-suffixes a session's 2nd+ visit to
-      the same (target, distance_cm) this way rather than leaving them
-      identically named (which load_corpus() correctly refused to accept:
-      "mixed cell counts ... refusing to mix profile geometries").
-  v1.0 (2026-07-04) — Initial version. Runs six checks against one or two
-      corpus CSVs (schema of PIMD_target_corpus_signatures.csv, long or wide
-      format, auto-detected):
-        1. shape distance-invariance — cosine(5cm,10cm) and cosine(5cm,15cm)
-           per capture, plus a per-corpus count passing cos(5,15) >= 0.97.
-        2. split-half SNR (plateau_amp_mV / splithalf_floor) per signature.
-        3. canary consistency — CANARY-START vs CANARY-END target rows,
-           matched per session and shared distance.
-        4. repeat consistency — targets marked '(rpt)' or 'REPEAT' vs their
-           best-matching base capture.
-        5. distance falloff — amp ~ r^-n log-log fit over 5/10/15 cm, worst
-           fit/measured ratio. (v1.2 removed a solder-specific 5cm/15cm
-           contamination-ratio sub-check that used to run here.)
-        6. cross-campaign repeatability — per-target 5cm shape cosine between
-           two corpora, only run when two corpus CSVs are given.
-      All checks run per corpus (each input CSV independently); check 6 is
-      the only cross-corpus comparison. Everything is printed as one flat
-      table (check, metric, value, pass band, PASS/FAIL/SKIP) and the process
-      exits nonzero if any row FAILs, so this can gate a capture day.
-      Plain numpy / pandas only (repo convention).
+Version: 1.5
+
+Reads the v1.32+ target-registry corpus schema (the CORPUS_HEADER schema that
+pimd_classviz.py's Training capture and pimd_features.py's corpus builder both
+write). The authoritative column list is pimd_features.CORPUS_HEADER_FIELDS;
+real files live at src/data/corpora/gui_signatures_*.csv. Capture identity is
+(session, capture_id); the *physical* identity used for cross-capture checks is
+the placement tuple (target_id, distance_mm, long_axis, face_normal,
+offset_x_mm, offset_y_mm, medium) -- mirrors pimd_classviz._placement_tuple_key.
+
+Distances are read from the data (whatever distance_mm values were captured),
+not hardcoded -- a target seen at >= 2 distances gets shape-invariance rows and
+at >= 3 distances a falloff fit. All distance labels are in mm.
+
+# History (full detail in CHANGELOG.md):
+#   v1.5 migrate to the v1.32+ target_id/distance_mm schema; retire canary check; repeats via repeat_idx
+#   v1.4 loud rejection of the v1.32+ schema (stopgap, superseded by v1.5)
+#   v1.3 campaign-2: canary suffix-match, cross-session repeat, cos(10,15) gate, --baseline gating
+#   v1.2 drop solder-specific 5/15cm falloff sub-check
+#   v1.1 widen REPEAT_MARK_RE to accept numbered (rptN) suffixes
+#   v1.0 initial six-check corpus acceptance suite (legacy target/distance_cm schema)
 
 Usage:
     python pimd_corpus_check.py <corpus_csv> [--baseline <baseline_corpus_csv>]
 """
 
 import argparse
+import csv
 import os
-import re
 import sys
 
 import numpy as np
 import pandas as pd
 
+import pimd_features
+import pimd_targets
+
 # --- pass bands (tunable in one place) --------------------------------------
 SHAPE_INVARIANCE_COS_MIN = 0.97
 SPLITHALF_SNR_MIN = 10.0
-CANARY_COS_MIN = 0.995
-CANARY_RATIO_BAND = (0.95, 1.05)
 REPEAT_COS_MIN = 0.995
 REPEAT_RATIO_BAND = (0.95, 1.05)
 FALLOFF_RATIO_BAND = (0.85, 1.15)
 CROSS_CAMPAIGN_COS_MIN = 0.99
 
-# A canary target name is '<base> CANARY-START'/'<base> CANARY-END' (base is
-# whatever object is used as the drift canary, e.g. 'copper pipe'; matched as
-# a suffix so it pairs correctly regardless of what the base object is named)
-# -- or, for backward compatibility, a bare 'CANARY-START'/'CANARY-END' with
-# no base at all.
-CANARY_SUFFIX_RE = re.compile(r'^(?:(?P<base>.+?)\s+)?CANARY-(?P<kind>START|END)$', re.IGNORECASE)
-REPEAT_MARK_RE = re.compile(r"\(rpt\d*\)|\brepeat(ed)?\b", re.IGNORECASE)
+# The physical-placement identity a repeat_idx increments against (mirror of
+# pimd_classviz._placement_tuple_key). PLACEMENT_FIELDS keys "the same
+# placement" (used by the repeat check); TARGET_FIELDS is the same minus
+# distance_mm and keys "the same physical target across distances" (used by the
+# shape-invariance and falloff checks).
+PLACEMENT_FIELDS = ('target_id', 'distance_mm', 'long_axis', 'face_normal',
+                    'offset_x_mm', 'offset_y_mm', 'medium')
+TARGET_FIELDS = tuple(f for f in PLACEMENT_FIELDS if f != 'distance_mm')
 
+# target_id values that are not physical objects and are excluded from the
+# object-centric checks (per-capture air anchors are captured separately and
+# already do the drift correction that the old canary check used to audit).
+NON_OBJECT_TARGET_IDS = frozenset({'', 'air'})
 
-def strip_canary_suffix(target):
-    """Returns (base, kind) if target is/ends with a CANARY-START or
-    CANARY-END marker (case-insensitive; base is '' for a bare marker with no
-    object name), else None. kind is 'START' or 'END'."""
-    m = CANARY_SUFFIX_RE.match(target.strip())
-    if not m:
-        return None
-    return (m.group('base') or '').strip(), m.group('kind').upper()
+CHECK_ORDER = ["shape-invariance", "splithalf-snr", "repeat-consistency",
+               "distance-falloff", "cross-campaign"]
 
-CHECK_ORDER = ["shape-invariance", "splithalf-snr", "canary-consistency",
-               "repeat-consistency", "distance-falloff", "cross-campaign"]
+CORPUS_FIELDS = pimd_features.CORPUS_HEADER_FIELDS
+REQUIRED_FIELDS = set(CORPUS_FIELDS)
 
 
 # -----------------------------------------------------------------------------
-# Loading (long or wide format, auto-detected)
+# Loading (v1.32+ CORPUS_HEADER schema only)
 # -----------------------------------------------------------------------------
 
-def sniff_format(path):
-    with open(path) as f:
-        header = None
+def _read_header(path):
+    with open(path, newline='') as f:
         for line in f:
             if line.startswith('#'):
                 continue
-            header = line.rstrip('\n')
-            break
-    if header is None:
-        raise SystemExit(f"{path}: empty file")
-    cols = header.split(',')
-    if 'target_id' in cols and 'distance_mm' in cols:
-        # v1.32+ target-registry schema (pimd_classviz.py / pimd_features.py v6)
-        # still has pulse_us/threshold_v/delta_mV, so without this check it
-        # would silently misclassify as 'long' below and fail much later with
-        # an opaque KeyError inside load_long()'s groupby(['session','target',
-        # 'distance_cm']) -- those columns no longer exist. This tool doesn't
-        # yet understand the new schema (canary/repeat detection are keyed off
-        # the old free-text target column) -- loud rejection now, not a silent
-        # crash later.
-        raise SystemExit(
-            f"{path}: v1.32+ target-registry schema (target_id/distance_mm columns) -- "
-            "pimd_corpus_check.py does not yet support this schema (still expects the "
-            "legacy target/distance_cm columns). No migration path is implemented yet.")
-    if {'pulse_us', 'threshold_v', 'delta_mV'} <= set(cols):
-        return 'long'
-    if any(re.match(r'c\d+$', c) for c in cols):
-        return 'wide'
-    raise SystemExit(f"{path}: unrecognized corpus CSV schema (header: {header})")
-
-
-def dist_key(distance_cm):
-    return 'NA' if pd.isna(distance_cm) else int(distance_cm)
-
-
-def load_long(path):
-    df = pd.read_csv(path, comment='#')
-    sigs = {}
-    for (session, target, distance_cm), g in df.groupby(
-            ['session', 'target', 'distance_cm'], dropna=False):
-        g = g.sort_values(['pulse_us', 'threshold_v'], ascending=[True, False])
-        sigs[(session, target, dist_key(distance_cm))] = dict(
-            shape=g['delta_mV'].to_numpy(dtype=float),
-            amp=float(g['plateau_amp_mV'].iloc[0]),
-            splithalf=float(g['splithalf_floor'].iloc[0]),
-            quality=str(g['quality'].iloc[0]),
-        )
-    return sigs
-
-
-def load_wide(path):
-    df = pd.read_csv(path, comment='#')
-    c_cols = sorted((c for c in df.columns if re.match(r'c\d+$', c)),
-                     key=lambda c: int(c[1:]))
-    sigs = {}
-    for _, r in df.iterrows():
-        sigs[(r['session'], r['target'], dist_key(r['distance_cm']))] = dict(
-            shape=r[c_cols].to_numpy(dtype=float),
-            amp=float(r['plateau_amp_mV']),
-            splithalf=float(r['splithalf_floor']),
-            quality=str(r['quality']),
-        )
-    return sigs
+            return next(csv.reader([line]))
+    return None
 
 
 def load_corpus(path):
-    fmt = sniff_format(path)
-    sigs = load_long(path) if fmt == 'long' else load_wide(path)
-    n_cells = {len(s['shape']) for s in sigs.values()}
+    """Reads a v1.32+ gui_signatures_*.csv into one signature dict per capture,
+    keyed on (session, capture_id) -- the same regrouping/sort as
+    pimd_classviz._scan_editable_signature_file (sort each capture's cell rows
+    by pulse_us, then descending threshold_v). Rejects the legacy
+    target/distance_cm schema with a clear message (support intentionally
+    dropped in v1.5 -- there is no legacy corpus left to validate)."""
+    header = _read_header(path)
+    if header is None:
+        raise SystemExit(f"{path}: empty file")
+    cols = set(header)
+
+    if 'target_id' not in cols or 'distance_mm' not in cols:
+        if 'target' in cols or 'distance_cm' in cols:
+            raise SystemExit(
+                f"{path}: legacy target/distance_cm corpus schema -- "
+                "pimd_corpus_check.py v1.5 only reads the v1.32+ target-registry "
+                "schema (target_id/distance_mm columns; see "
+                "pimd_features.CORPUS_HEADER_FIELDS). Legacy-schema support was "
+                "intentionally dropped; there is no legacy corpus left to validate.")
+        raise SystemExit(
+            f"{path}: unrecognized corpus CSV schema (header: {','.join(header)})")
+
+    missing = REQUIRED_FIELDS - cols
+    if missing:
+        raise SystemExit(
+            f"{path}: v1.32+ schema is missing required columns "
+            f"{sorted(missing)} (expected pimd_features.CORPUS_HEADER_FIELDS).")
+
+    idx = {name: i for i, name in enumerate(header)}
+    groups, order = {}, []
+    with open(path, newline='') as f:
+        reader = csv.reader(line for line in f if not line.startswith('#'))
+        next(reader, None)   # header row
+        for parts in reader:
+            if not parts:
+                continue
+            key = (parts[idx['session']], parts[idx['capture_id']])
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(parts)
+
+    sigs = []
+    for key in order:
+        rows = sorted(groups[key],
+                      key=lambda p: (float(p[idx['pulse_us']]), -float(p[idx['threshold_v']])))
+        first = rows[0]
+
+        def field(name, row=first):
+            return row[idx[name]]
+
+        sigs.append(dict(
+            session=field('session'), capture_id=field('capture_id'),
+            target_id=field('target_id'), short_name=field('short_name'),
+            distance_mm=int(round(float(field('distance_mm')))),
+            long_axis=field('long_axis'), face_normal=field('face_normal'),
+            offset_x_mm=field('offset_x_mm'), offset_y_mm=field('offset_y_mm'),
+            medium=field('medium'), repeat_idx=int(float(field('repeat_idx'))),
+            shape=np.array([float(p[idx['delta_mV']]) for p in rows], dtype=float),
+            amp=float(field('plateau_amp_mV')),
+            splithalf=float(field('splithalf_floor')),
+            quality=field('quality'),
+        ))
+
+    n_cells = {len(s['shape']) for s in sigs}
     if len(n_cells) > 1:
-        raise SystemExit(f"{path}: mixed cell counts across rows {sorted(n_cells)} "
+        raise SystemExit(f"{path}: mixed cell counts across captures {sorted(n_cells)} "
                           "-- refusing to mix profile geometries (DESIGN §11)")
     return sigs
 
 
 # -----------------------------------------------------------------------------
-# Row helpers
+# Row / key helpers
 # -----------------------------------------------------------------------------
 
 def cosine(u, v):
@@ -255,72 +172,104 @@ def tag(corpus_label, session):
     return f'{corpus_label}:{session}'
 
 
+def label_of(sig):
+    return sig['short_name'] or sig['target_id']
+
+
+def placement_key(sig):
+    return tuple(str(sig[f]) for f in PLACEMENT_FIELDS)
+
+
+def target_key(sig):
+    return tuple(str(sig[f]) for f in TARGET_FIELDS)
+
+
+def one_per_distance(sigs):
+    """Groups object captures by physical target (TARGET_FIELDS) into
+    {target_key -> {distance_mm -> sig}}, keeping one signature per distance --
+    preferring the base placement (repeat_idx == 1) so repeats never
+    double-count in the distance-keyed checks."""
+    by_target = {}
+    for s in sigs:
+        if s['target_id'] in NON_OBJECT_TARGET_IDS:
+            continue
+        grp = by_target.setdefault(target_key(s), {})
+        d = s['distance_mm']
+        cur = grp.get(d)
+        if cur is None or (s['repeat_idx'] == 1 and cur['repeat_idx'] != 1):
+            grp[d] = s
+    return by_target
+
+
 # -----------------------------------------------------------------------------
 # Check 1 — shape distance-invariance
 # -----------------------------------------------------------------------------
 
 def check_shape_invariance(sigs, corpus_label):
     rows = []
-    by_capture = {}
-    for (session, target, d), s in sigs.items():
-        if strip_canary_suffix(target) is not None:
-            continue  # canaries only exist @5cm and are checked separately
-        by_capture.setdefault((session, target), {})[d] = s['shape']
+    gate_pass = gate_total = 0
+    report_pass = report_total = 0
 
-    pass_1015 = total_1015 = 0
-    pass_515 = total_515 = 0
-    for (session, target), by_d in sorted(by_capture.items()):
-        if 5 not in by_d:
+    for _, grp in sorted(one_per_distance(sigs).items()):
+        dists = sorted(grp)
+        if len(dists) < 2:
             continue
-        v5 = by_d[5]
-        c_10 = cosine(v5, by_d[10]) if 10 in by_d else None
-        c_15 = cosine(v5, by_d[15]) if 15 in by_d else None
-        c_1015 = cosine(by_d[10], by_d[15]) if (10 in by_d and 15 in by_d) else None
+        near, far = dists[0], dists[-1]
+        mid = dists[1] if len(dists) >= 3 else None
+        lbl = label_of(grp[near])
+        where = f'{lbl} [{tag(corpus_label, grp[near]["session"])}]'
 
-        if c_10 is not None:
-            status = 'PASS' if c_10 >= SHAPE_INVARIANCE_COS_MIN else 'FAIL'
-            rows.append(mkrow('shape-invariance',
-                               f'cos(5v10) {target} [{tag(corpus_label, session)}]',
-                               f'{c_10:.4f}', f'>= {SHAPE_INVARIANCE_COS_MIN}', status))
+        c_nf = cosine(grp[near]['shape'], grp[far]['shape'])
+        c_mf = cosine(grp[mid]['shape'], grp[far]['shape']) if mid is not None else None
 
-        if c_15 is not None:
-            total_515 += 1
-            pass_515 += (c_15 >= SHAPE_INVARIANCE_COS_MIN)
-            metric = f'cos(5v15) {target} [{tag(corpus_label, session)}]'
-            if c_15 >= SHAPE_INVARIANCE_COS_MIN:
+        if mid is not None:
+            c_nm = cosine(grp[near]['shape'], grp[mid]['shape'])
+            rows.append(mkrow('shape-invariance', f'cos({near}v{mid}mm) {where}',
+                               f'{c_nm:.4f}', f'>= {SHAPE_INVARIANCE_COS_MIN}',
+                               'PASS' if c_nm >= SHAPE_INVARIANCE_COS_MIN else 'FAIL'))
+            # near-vs-far is report-only: an extended object can genuinely
+            # change shape at the nearest distance (near-field) while agreeing
+            # at mid/far -- that's physics, not a capture defect, so it's
+            # AMBER'd rather than failed when the far-field pair still agrees.
+            metric = f'cos({near}v{far}mm) {where}'
+            if c_nf >= SHAPE_INVARIANCE_COS_MIN:
                 status = 'PASS'
-            elif c_1015 is not None and c_1015 >= SHAPE_INVARIANCE_COS_MIN:
-                # Extended objects genuinely change shape at 5cm on this rig
-                # (near-field effect) while agreeing at 10/15cm -- that's
-                # physics, not a capture defect, so it's flagged rather than
-                # failed outright.
+            elif c_mf is not None and c_mf >= SHAPE_INVARIANCE_COS_MIN:
                 status = 'AMBER'
-                metric += ' (near-field @5, extended target?)'
+                metric += ' (near-field @near, extended target?)'
             else:
                 status = 'FAIL'
-            rows.append(mkrow('shape-invariance', metric,
-                               f'{c_15:.4f}', f'>= {SHAPE_INVARIANCE_COS_MIN}', status))
+            rows.append(mkrow('shape-invariance', metric, f'{c_nf:.4f}', 'report only', status))
+            report_total += 1
+            report_pass += (status == 'PASS')
 
-        if c_1015 is not None:
-            status = 'PASS' if c_1015 >= SHAPE_INVARIANCE_COS_MIN else 'FAIL'
-            rows.append(mkrow('shape-invariance',
-                               f'cos(10v15) {target} [{tag(corpus_label, session)}]',
-                               f'{c_1015:.4f}', f'>= {SHAPE_INVARIANCE_COS_MIN}', status))
-            total_1015 += 1
-            pass_1015 += (status == 'PASS')
+            s_mf = 'PASS' if c_mf >= SHAPE_INVARIANCE_COS_MIN else 'FAIL'
+            rows.append(mkrow('shape-invariance', f'cos({mid}v{far}mm) {where}',
+                               f'{c_mf:.4f}', f'>= {SHAPE_INVARIANCE_COS_MIN}', s_mf))
+            gate_total += 1
+            gate_pass += (s_mf == 'PASS')
+        else:
+            # Only two distances -- no near-field/far-field separation is
+            # possible, so the single pair is the gate directly.
+            s_nf = 'PASS' if c_nf >= SHAPE_INVARIANCE_COS_MIN else 'FAIL'
+            rows.append(mkrow('shape-invariance', f'cos({near}v{far}mm) {where}',
+                               f'{c_nf:.4f}', f'>= {SHAPE_INVARIANCE_COS_MIN}', s_nf))
+            gate_total += 1
+            gate_pass += (s_nf == 'PASS')
 
-    if total_1015:
+    if gate_total:
         rows.append(mkrow('shape-invariance',
-                           f'targets with cos(10,15) >= {SHAPE_INVARIANCE_COS_MIN} [{corpus_label}]',
-                           f'{pass_1015}/{total_1015}', f'{total_1015}/{total_1015}',
-                           'PASS' if pass_1015 == total_1015 else 'FAIL'))
-    if total_515:
-        # Informational only now -- see the cos(10,15) roll-up above for the
-        # real gate; the 0.97 cos(5,15) band is compact-target-only on this
-        # rig (extended targets can legitimately fail it near-field).
+                           f'targets with far-field shape cos >= {SHAPE_INVARIANCE_COS_MIN} [{corpus_label}]',
+                           f'{gate_pass}/{gate_total}', f'{gate_total}/{gate_total}',
+                           'PASS' if gate_pass == gate_total else 'FAIL'))
+    if report_total:
         rows.append(mkrow('shape-invariance',
-                           f'targets with cos(5,15) >= {SHAPE_INVARIANCE_COS_MIN} [{corpus_label}]',
-                           f'{pass_515}/{total_515}', 'report only', 'PASS'))
+                           f'targets with near-field shape cos >= {SHAPE_INVARIANCE_COS_MIN} [{corpus_label}]',
+                           f'{report_pass}/{report_total}', 'report only', 'PASS'))
+    if not gate_total and not report_total:
+        rows.append(mkrow('shape-invariance',
+                           f'targets captured at >= 2 distances [{corpus_label}]',
+                           '0', 'n/a (informational)', 'SKIP'))
     return rows
 
 
@@ -330,8 +279,8 @@ def check_shape_invariance(sigs, corpus_label):
 
 def check_splithalf_snr(sigs, corpus_label):
     rows = []
-    for (session, target, d), s in sorted(sigs.items(), key=lambda kv: (kv[0][1], kv[0][2])):
-        metric = f'{target} @{d}cm [{tag(corpus_label, session)}]'
+    for s in sorted(sigs, key=lambda s: (label_of(s), s['distance_mm'], s['session'])):
+        metric = f'{label_of(s)} @{s["distance_mm"]}mm [{tag(corpus_label, s["session"])}]'
         if s['splithalf'] <= 0:
             rows.append(mkrow('splithalf-snr', metric, 'n/a (splithalf=0)',
                                f'>= {SPLITHALF_SNR_MIN}', 'SKIP'))
@@ -344,170 +293,59 @@ def check_splithalf_snr(sigs, corpus_label):
 
 
 # -----------------------------------------------------------------------------
-# Check 3 — canary consistency
+# Check 3 — repeat consistency (via repeat_idx)
 # -----------------------------------------------------------------------------
-
-def check_canary(sigs, corpus_label):
-    rows = []
-    by_session_base = {}
-    for (session, target, d), s in sigs.items():
-        parsed = strip_canary_suffix(target)
-        if parsed is None:
-            continue
-        base, kind = parsed
-        by_session_base.setdefault((session, base), {}).setdefault(kind, {})[d] = s
-
-    found = False
-    for (session, base), kinds in sorted(by_session_base.items()):
-        start, end = kinds.get('START'), kinds.get('END')
-        if not start or not end:
-            continue
-        for d in sorted(set(start) & set(end), key=str):
-            found = True
-            s_start, s_end = start[d], end[d]
-            c = cosine(s_start['shape'], s_end['shape'])
-            ratio = (s_end['amp'] / s_start['amp']) if s_start['amp'] else np.nan
-            status_c = 'PASS' if c > CANARY_COS_MIN else 'FAIL'
-            status_r = ('PASS' if CANARY_RATIO_BAND[0] <= ratio <= CANARY_RATIO_BAND[1]
-                        else 'FAIL')
-            base_tag = f'"{base}" ' if base else ''
-            where = f'{base_tag}[{tag(corpus_label, session)}] @{d}cm'
-            rows.append(mkrow('canary-consistency', f'shape cos {where}',
-                               f'{c:.4f}', f'> {CANARY_COS_MIN}', status_c))
-            rows.append(mkrow('canary-consistency', f'amp ratio {where}',
-                               f'{ratio:.3f}',
-                               f'{CANARY_RATIO_BAND[0]}-{CANARY_RATIO_BAND[1]}', status_r))
-            # Protocol v2's drift-flag criterion: either check failing means
-            # the session is drift-flagged and its 15cm rows get downgraded
-            # (pimd_features.py's quality column handles the actual downgrade
-            # -- this just reports the verdict for a human to see up front).
-            drift_flagged = status_c == 'FAIL' or status_r == 'FAIL'
-            rows.append(mkrow('canary-consistency', f'drift status {where}',
-                               'DRIFT-FLAGGED -- 15cm rows downgraded' if drift_flagged else 'ok',
-                               'n/a', 'FAIL' if drift_flagged else 'PASS'))
-
-    if not found:
-        rows.append(mkrow('canary-consistency',
-                           f'CANARY-START/END pairs found [{corpus_label}]',
-                           '0', 'n/a (informational)', 'SKIP'))
-    return rows
-
-
-# -----------------------------------------------------------------------------
-# Check 4 — repeat consistency
-# -----------------------------------------------------------------------------
-
-def find_repeat_base(target, base_candidates):
-    """Match a '(rpt)'/REPEAT-marked target name to its base capture.
-
-    Tries an exact match on the marker-stripped name first (e.g. 'widget
-    (rpt)' -> 'widget'). Falls back to matching by first word + a shared
-    digit-bearing token (e.g. 'brass block 370g (rpt)' -> 'brass 370g'),
-    since real corpus naming isn't always a clean suffix strip -- returns
-    None (unresolved) rather than guessing when that fallback isn't unique.
-    """
-    stripped = re.sub(r'\s{2,}', ' ', REPEAT_MARK_RE.sub('', target)).strip()
-    if stripped in base_candidates:
-        return stripped
-    words = target.split()
-    if not words:
-        return None
-    first = words[0].lower()
-    weight_tokens = [w for w in words if any(ch.isdigit() for ch in w)]
-    if not weight_tokens:
-        return None
-    candidates = [t for t in base_candidates
-                  if t.split() and t.split()[0].lower() == first
-                  and any(wt in t for wt in weight_tokens)]
-    return candidates[0] if len(candidates) == 1 else None
-
 
 def check_repeat(sigs, corpus_label):
+    """Repeat visits are now structured: within a placement (PLACEMENT_FIELDS),
+    repeat_idx == 1 is the base and repeat_idx >= 2 are repeats of that same
+    placement -- captured in the same session or a later one, it makes no
+    difference here since the placement tuple is session-independent. Compares
+    each repeat's shape cosine / amp ratio against the base."""
     rows = []
-    all_targets = sorted({t for (_, t, _) in sigs})
-    repeat_targets = [t for t in all_targets if REPEAT_MARK_RE.search(t)]
-    if not repeat_targets:
-        rows.append(mkrow('repeat-consistency',
-                           f'repeat-labelled targets found [{corpus_label}]',
-                           '0', 'n/a (informational)', 'SKIP'))
-        return rows
+    by_placement = {}
+    for s in sigs:
+        if s['target_id'] in NON_OBJECT_TARGET_IDS:
+            continue
+        by_placement.setdefault(placement_key(s), []).append(s)
 
-    base_candidates = [t for t in all_targets if t not in repeat_targets]
-    by_target = {}
-    for (session, target, d), s in sigs.items():
-        by_target.setdefault(target, {})[d] = (session, s)
-
-    for rt in repeat_targets:
-        base = find_repeat_base(rt, base_candidates)
-        if base is None:
+    found = False
+    for _, caps in sorted(by_placement.items()):
+        reps = [c for c in caps if c['repeat_idx'] >= 2]
+        if not reps:
+            continue
+        found = True
+        lbl, d = label_of(caps[0]), caps[0]['distance_mm']
+        bases = [c for c in caps if c['repeat_idx'] == 1]
+        if not bases:
             rows.append(mkrow('repeat-consistency',
-                               f'base capture for "{rt}" [{corpus_label}]',
+                               f'base (repeat_idx==1) for "{lbl}" @{d}mm [{corpus_label}]',
                                'not found', 'n/a', 'SKIP'))
             continue
-        rep_by_d, base_by_d = by_target.get(rt, {}), by_target.get(base, {})
-        for d in sorted(set(rep_by_d) & set(base_by_d), key=str):
-            (sess_r, sr), (sess_b, sb) = rep_by_d[d], base_by_d[d]
-            c = cosine(sr['shape'], sb['shape'])
-            ratio = (sr['amp'] / sb['amp']) if sb['amp'] else np.nan
+        base = min(bases, key=lambda c: c['capture_id'])
+        for rep in sorted(reps, key=lambda c: c['repeat_idx']):
+            c = cosine(rep['shape'], base['shape'])
+            ratio = (rep['amp'] / base['amp']) if base['amp'] else np.nan
             status_c = 'PASS' if c > REPEAT_COS_MIN else 'FAIL'
             status_r = ('PASS' if REPEAT_RATIO_BAND[0] <= ratio <= REPEAT_RATIO_BAND[1]
                         else 'FAIL')
-            where = f'"{rt}" vs "{base}" @{d}cm [{corpus_label}]'
+            where = (f'"{lbl}" @{d}mm rpt{rep["repeat_idx"]} vs base '
+                     f'[{tag(corpus_label, rep["session"])}]')
             rows.append(mkrow('repeat-consistency', f'shape cos {where}',
                                f'{c:.4f}', f'> {REPEAT_COS_MIN}', status_c))
             rows.append(mkrow('repeat-consistency', f'amp ratio {where}',
                                f'{ratio:.3f}',
                                f'{REPEAT_RATIO_BAND[0]}-{REPEAT_RATIO_BAND[1]}', status_r))
-    return rows
-
-
-def check_repeat_cross_session(sigs, corpus_label):
-    """A capture plan can revisit the same target+distance in an entirely
-    separate session (e.g. 'copper pipe' captured in full in session s1 and
-    again in session s4) rather than as a same-session '(rpt)' revisit --
-    check_repeat() above only ever compares within-session names, so this is
-    a distinct, additional comparison: same (target, distance_cm), different
-    session, matched by exact target-name equality (so it never overlaps
-    with '(rpt)'-suffixed names, which are always within-session)."""
-    rows = []
-    by_target_distance = {}
-    for (session, target, d), s in sigs.items():
-        if strip_canary_suffix(target) is not None:
-            continue
-        by_target_distance.setdefault((target, d), {})[session] = s
-
-    found = False
-    for (target, d), by_session in sorted(by_target_distance.items(),
-                                           key=lambda kv: (kv[0][0], str(kv[0][1]))):
-        sessions = sorted(by_session)
-        if len(sessions) < 2:
-            continue
-        for i in range(len(sessions)):
-            for j in range(i + 1, len(sessions)):
-                found = True
-                sess_a, sess_b = sessions[i], sessions[j]
-                sa, sb = by_session[sess_a], by_session[sess_b]
-                c = cosine(sa['shape'], sb['shape'])
-                ratio = (sb['amp'] / sa['amp']) if sa['amp'] else np.nan
-                status_c = 'PASS' if c > REPEAT_COS_MIN else 'FAIL'
-                status_r = ('PASS' if REPEAT_RATIO_BAND[0] <= ratio <= REPEAT_RATIO_BAND[1]
-                            else 'FAIL')
-                where = f'"{target}" @{d}cm ({sess_a} vs {sess_b}) [{corpus_label}]'
-                rows.append(mkrow('repeat-consistency', f'cross-session shape cos {where}',
-                                   f'{c:.4f}', f'> {REPEAT_COS_MIN}', status_c))
-                rows.append(mkrow('repeat-consistency', f'cross-session amp ratio {where}',
-                                   f'{ratio:.3f}',
-                                   f'{REPEAT_RATIO_BAND[0]}-{REPEAT_RATIO_BAND[1]}', status_r))
 
     if not found:
         rows.append(mkrow('repeat-consistency',
-                           f'cross-session repeat captures found [{corpus_label}]',
+                           f'repeat captures (repeat_idx >= 2) found [{corpus_label}]',
                            '0', 'n/a (informational)', 'SKIP'))
     return rows
 
 
 # -----------------------------------------------------------------------------
-# Check 5 — distance falloff
+# Check 4 — distance falloff
 # -----------------------------------------------------------------------------
 
 def fit_falloff(distances, amps):
@@ -524,17 +362,14 @@ def fit_falloff(distances, amps):
 
 def check_falloff(sigs, corpus_label):
     rows = []
-    by_capture = {}
-    for (session, target, d), s in sigs.items():
-        if strip_canary_suffix(target) is not None:
-            continue  # canaries only exist @5cm -- no falloff fit possible/meaningful
-        by_capture.setdefault((session, target), {})[d] = s['amp']
-
-    for (session, target), by_d in sorted(by_capture.items()):
-        if not {5, 10, 15} <= set(by_d):
+    any_target = False
+    for _, grp in sorted(one_per_distance(sigs).items()):
+        dists = sorted(grp)
+        if len(dists) < 3:
             continue
-        where = f'{target} [{tag(corpus_label, session)}]'
-        fit = fit_falloff([5, 10, 15], [by_d[5], by_d[10], by_d[15]])
+        any_target = True
+        where = f'{label_of(grp[dists[0]])} [{tag(corpus_label, grp[dists[0]]["session"])}]'
+        fit = fit_falloff(dists, [grp[d]['amp'] for d in dists])
         if fit is None:
             rows.append(mkrow('distance-falloff', f'n (exponent) {where}',
                                'n/a (non-positive amp)', 'report only', 'SKIP'))
@@ -546,31 +381,54 @@ def check_falloff(sigs, corpus_label):
             rows.append(mkrow('distance-falloff', f'worst fit/measured ratio {where}',
                                f'{worst:.3f}',
                                f'{FALLOFF_RATIO_BAND[0]}-{FALLOFF_RATIO_BAND[1]}', status))
+    if not any_target:
+        rows.append(mkrow('distance-falloff',
+                           f'targets captured at >= 3 distances [{corpus_label}]',
+                           '0', 'n/a (informational)', 'SKIP'))
     return rows
 
 
 # -----------------------------------------------------------------------------
-# Check 6 — cross-campaign repeatability (only with two corpora)
+# Check 5 — cross-campaign repeatability (only with --baseline)
 # -----------------------------------------------------------------------------
 
-def check_cross_campaign(sigs_a, label_a, sigs_b, label_b):
+def _cross_campaign_shapes(sigs):
+    """One shape per (target_id, distance_mm), preferring the base placement --
+    keyed by the *stable* target_id so it survives short_name edits between
+    campaigns."""
+    out = {}
+    for _, grp in one_per_distance(sigs).items():
+        for d, s in grp.items():
+            key = (s['target_id'], d)
+            cur = out.get(key)
+            if cur is None or (s['repeat_idx'] == 1 and cur[1] != 1):
+                out[key] = (s['shape'], s['repeat_idx'])
+    return {k: v[0] for k, v in out.items()}
+
+
+def check_cross_campaign(sigs_a, label_a, sigs_b, label_b, targets):
     """Compares the primary corpus (sigs_a) against a --baseline corpus
-    (sigs_b, e.g. a prior campaign/rig). Informational, cross-rig only --
-    never a same-rig acceptance gate (see main()'s exit-code computation)."""
+    (sigs_b, e.g. a prior campaign/rig), per (target_id, distance_mm) shape
+    cosine. Informational, cross-rig only -- never a same-rig acceptance gate
+    (see main()'s exit-code computation). `targets` (the registry, possibly
+    empty) is only used to enrich labels with material_class."""
     rows = []
-    a5 = {t: s['shape'] for (_, t, d), s in sigs_a.items() if d == 5}
-    b5 = {t: s['shape'] for (_, t, d), s in sigs_b.items() if d == 5}
-    common = sorted(set(a5) & set(b5))
+    a = _cross_campaign_shapes(sigs_a)
+    b = _cross_campaign_shapes(sigs_b)
+    common = sorted(set(a) & set(b))
     if not common:
         rows.append(mkrow('cross-campaign',
-                           f'5cm targets common to {label_a} and {label_b} (informational, cross-rig)',
-                           '0', 'n/a', 'SKIP'))
+                           f'(target_id, distance) pairs common to {label_a} and {label_b} '
+                           '(informational, cross-rig)', '0', 'n/a', 'SKIP'))
         return rows
-    for t in common:
-        c = cosine(a5[t], b5[t])
+    for (target_id, d) in common:
+        c = cosine(a[(target_id, d)], b[(target_id, d)])
         status = 'PASS' if c >= CROSS_CAMPAIGN_COS_MIN else 'FAIL'
+        mat = targets[target_id].material_class if target_id in targets else None
+        lbl = f'"{target_id}"' + (f' ({mat})' if mat else '')
         rows.append(mkrow('cross-campaign',
-                           f'5cm cos "{t}" ({label_a} vs {label_b}) (informational, cross-rig)',
+                           f'shape cos {lbl} @{d}mm ({label_a} vs {label_b}) '
+                           '(informational, cross-rig)',
                            f'{c:.4f}', f'>= {CROSS_CAMPAIGN_COS_MIN}', status))
     return rows
 
@@ -579,10 +437,22 @@ def check_cross_campaign(sigs_a, label_a, sigs_b, label_b):
 # CLI
 # -----------------------------------------------------------------------------
 
+def load_registry():
+    """Best-effort registry load for label enrichment only -- a missing or
+    broken registry must not stop an acceptance run, so failures degrade to an
+    empty dict (labels then fall back to bare target_id)."""
+    try:
+        targets, _issues = pimd_targets.load_targets()
+        return targets
+    except (OSError, ValueError):
+        return {}
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(
-        description='Corpus-level acceptance checks for a PIMD signature corpus.')
-    p.add_argument('corpus_csv', help='corpus CSV to check (long or wide format)')
+        description='Corpus-level acceptance checks for a PIMD signature corpus '
+                    '(v1.32+ target-registry schema).')
+    p.add_argument('corpus_csv', help='corpus CSV to check (v1.32+ CORPUS_HEADER schema)')
     p.add_argument('--baseline', metavar='CORPUS_CSV', default=None,
                     help="a second corpus (e.g. a prior campaign/rig's baseline) for "
                          'cross-campaign shape comparison. Informational only -- never '
@@ -599,22 +469,21 @@ def main(argv=None):
 
     label = os.path.splitext(os.path.basename(args.corpus_csv))[0]
     sigs = load_corpus(args.corpus_csv)
+    targets = load_registry()
 
     rows = []
     rows += check_shape_invariance(sigs, label)
     rows += check_splithalf_snr(sigs, label)
-    rows += check_canary(sigs, label)
     rows += check_repeat(sigs, label)
-    rows += check_repeat_cross_session(sigs, label)
     rows += check_falloff(sigs, label)
 
     if args.baseline:
         baseline_label = os.path.splitext(os.path.basename(args.baseline))[0]
         baseline_sigs = load_corpus(args.baseline)
-        rows += check_cross_campaign(sigs, label, baseline_sigs, baseline_label)
+        rows += check_cross_campaign(sigs, label, baseline_sigs, baseline_label, targets)
     else:
         rows.append(mkrow('cross-campaign',
-                           'cross-campaign checks skipped (campaign 2; no rig-1 baseline applicable)',
+                           'cross-campaign checks skipped (no --baseline corpus given)',
                            'n/a', 'n/a', 'SKIP'))
 
     df = pd.DataFrame(rows, columns=['check', 'metric', 'value', 'pass_band', 'status'])

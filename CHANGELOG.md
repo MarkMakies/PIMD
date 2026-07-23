@@ -263,6 +263,50 @@ functional change. (2026-07-15)
 
 ---
 
+### src/pimd_corpus_check.py — v1.5 — migrate to the v1.32+ target-registry schema
+
+Real migration onto the v1.32+ `target_id`/`distance_mm` corpus schema that
+pimd_classviz.py (Training capture) and pimd_features.py (corpus builder) both
+write, replacing v1.4's deliberate stopgap `SystemExit` rejection of it. The
+tool now reads that schema exclusively — legacy `target`/`distance_cm` files are
+cleanly rejected with a message stating support was intentionally dropped (the
+previous-epoch corpora were reset, so there is nothing legacy left to validate).
+`load_corpus()` regroups per-cell rows into one signature per `(session,
+capture_id)` and sorts each capture's cells by `pulse_us` then descending
+`threshold_v` — the same regrouping as `pimd_classviz._scan_editable_signature_
+file()` — and asserts the header carries `pimd_features.CORPUS_HEADER_FIELDS`.
+The old `sniff_format`/`load_long`/`load_wide`/`dist_key` and the wide-format
+path are gone.
+
+Check changes: (1) the **canary-consistency check is retired entirely**
+(`check_canary`/`strip_canary_suffix`/`CANARY_SUFFIX_RE`/`CANARY_*` removed, plus
+its `CHECK_ORDER` entry) — per-capture air-before/after bracketing now does the
+drift *correction* automatically in `pimd_features`, so the canary's audit role
+is subsumed by the structured repeat check. (2) **Repeat consistency now keys
+off the `repeat_idx` column**, not a `(rpt)` name suffix: captures are grouped by
+the physical placement tuple `(target_id, distance_mm, long_axis, face_normal,
+offset_x_mm, offset_y_mm, medium)` (mirror of `_placement_tuple_key`),
+`repeat_idx == 1` is the base and `repeat_idx >= 2` are repeats compared against
+it; this subsumes the old within-session and cross-session repeat checks in one
+(the placement tuple is session-independent). A repeat with no base emits a
+clear SKIP. `REPEAT_MARK_RE`/`find_repeat_base`/`check_repeat_cross_session` are
+gone. (3) **Distances are data-driven** — a physical target (placement minus
+distance) seen at ≥2 distances gets shape-invariance rows, ≥3 gets a falloff fit;
+the hardcoded 5/10/15 cm logic is generalised to whatever `distance_mm` values
+were captured, with a near-field/far-field split preserving v1.3's AMBER verdict
+and all labels in mm. (4) **Cross-campaign** keys by the stable `target_id` (not
+free-text name) per `(target_id, distance_mm)`, and joins the registry
+(`pimd_targets.load_targets`, best-effort/optional) for a material-class label.
+
+Verified: `py_compile` clean; runs against the real
+`src/data/corpora/gui_signatures_*.csv` files printing the check table with no
+`SystemExit` and no canary rows; the `repeat_idx` repeat path, orphan-repeat
+SKIP, cross-campaign `--baseline` match, distance-falloff (r^-2 fixture → n=2.00)
+and the AMBER near-field path were each exercised; a legacy `target`/
+`distance_cm` file is cleanly rejected. (2026-07-22)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-15
