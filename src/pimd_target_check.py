@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Target Registry (pimd_targets.py) v2
+# PIMD Target Registry Check (pimd_target_check.py) v3
 # — loads and validates data/targets/targets_v1.csv, the human-maintained
 #   registry of physical target objects captured by the PIMD detector. Shared
 #   by pimd_classviz.py's Analysis tab and pimd_features.py's corpus builder
@@ -20,6 +20,7 @@
 # measurements that this tool can't second-guess.
 #
 # History (full detail in CHANGELOG.md):
+#   v3 renamed pimd_targets.py -> pimd_target_check.py (import contract change only)
 #   v2 registry relocated to data/targets/targets_v1.csv (out of data/training_lists/)
 #   v1 initial version
 ###############################################################################

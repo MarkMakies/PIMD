@@ -9,7 +9,7 @@
 # produced by ClassViz's "Record Session" feature, or gui_signatures_*.csv
 # files produced directly by the Analysis tab's quick-capture (the primary
 # corpus source since pimd_classviz.py v1.32) -- joins each row's target_id
-# against the target registry (pimd_targets.py), enforces that a single
+# against the target registry (pimd_target_check.py), enforces that a single
 # corpus build never spans more than one profile geometry (DESIGN §10/§11),
 # and emits one row per (capture, cell) -- see the module docstring below for
 # the exact column list.
@@ -31,7 +31,7 @@ gui_signatures_*.csv, one row per (capture, cell)):
   session          -- session/file stem the capture came from
   capture_id       -- '<session>_cNN', unique per capture press
   captured_at      -- ISO-8601 local time the capture completed
-  target_id        -- registry key (pimd_targets.py), or 'air'
+  target_id        -- registry key (pimd_target_check.py), or 'air'
   short_name       -- denormalised from the registry at write time (display only; join on target_id)
   distance_mm      -- int, coil face -> nearest target surface
   long_axis        -- x|y|z|na, direction the registry's dim_a points
@@ -81,7 +81,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-import pimd_targets
+import pimd_target_check
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOOL_VERSION = 'pimd_features.py v7'
@@ -990,8 +990,8 @@ def build_arg_parser():
                          'delta_mV columns). Only populated from session-dump inputs.')
     p.add_argument('--append', action='store_true',
                     help='Append to --out/--out-wide if they already exist (default: refuse if they exist).')
-    p.add_argument('--registry', default=pimd_targets.DEFAULT_REGISTRY_PATH,
-                    help='Target registry CSV (default: {0}).'.format(pimd_targets.DEFAULT_REGISTRY_PATH))
+    p.add_argument('--registry', default=pimd_target_check.DEFAULT_REGISTRY_PATH,
+                    help='Target registry CSV (default: {0}).'.format(pimd_target_check.DEFAULT_REGISTRY_PATH))
     p.add_argument('--air-threshold-mv', type=float, dest='air_threshold_mv', default=AIR_THRESHOLD_MV_DEFAULT)
     p.add_argument('--settle-s', type=float, dest='settle_s', default=SETTLE_S_DEFAULT)
     p.add_argument('--changepoint-window-s', type=float, dest='changepoint_window_s',
@@ -1010,7 +1010,7 @@ def main(argv=None):
     args = build_arg_parser().parse_args(argv)
 
     try:
-        targets, reg_issues = pimd_targets.load_targets(args.registry)
+        targets, reg_issues = pimd_target_check.load_targets(args.registry)
     except OSError as e:
         raise SystemExit('Could not read target registry {0}: {1}'.format(args.registry, e))
     reg_errors = [i for i in reg_issues if i.severity == 'error']
@@ -1018,7 +1018,7 @@ def main(argv=None):
         for i in reg_errors:
             print('[REGISTRY ERROR] {0}'.format(i), file=sys.stderr)
         raise SystemExit('Target registry {0} has {1} error(s) -- fix it before building a '
-                          'corpus (see: python pimd_targets.py --registry {0}).'.format(
+                          'corpus (see: python pimd_target_check.py --registry {0}).'.format(
                               args.registry, len(reg_errors)))
     for i in reg_issues:
         if i.severity == 'warning':

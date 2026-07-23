@@ -99,7 +99,7 @@ except ImportError:
 
 import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
-import pimd_targets        # noqa: E402 — target registry, shared with pimd_features
+import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
 APP_VERSION = '1.39'
 
@@ -115,7 +115,7 @@ DEFAULT_PORT = '/dev/ttyACM0'
 PROFILES_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
 SESSIONS_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
 CORPORA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'corpora')
-TARGETS_REGISTRY_PATH = pimd_targets.DEFAULT_REGISTRY_PATH   # single source of truth
+TARGETS_REGISTRY_PATH = pimd_target_check.DEFAULT_REGISTRY_PATH   # single source of truth
 SUPPLY_CHOICES = ['battery', 'psu']
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
@@ -294,9 +294,9 @@ class MainWindow(QMainWindow):
         self._editable_sig_seq        = 0      # running per-file capture_id sequence, reset on New/Open
         self._editable_repeat_counts  = {}     # placement tuple -> count seen, for repeat_idx auto-increment
 
-        # Target registry (pimd_targets.py) -- backs the Analysis tab's inline
+        # Target registry (pimd_target_check.py) -- backs the Analysis tab's inline
         # capture widgets.
-        self._targets        = {}    # dict[target_id -> pimd_targets.Target]
+        self._targets        = {}    # dict[target_id -> pimd_target_check.Target]
         self._target_issues   = []
 
         # Analysis tab — automated auto-detect training cycle (v1.34). A
@@ -1181,7 +1181,7 @@ class MainWindow(QMainWindow):
         file, so a mid-session reload was never worth a permanent control;
         restart ClassViz to pick up registry edits."""
         try:
-            targets, issues = pimd_targets.load_targets(TARGETS_REGISTRY_PATH)
+            targets, issues = pimd_target_check.load_targets(TARGETS_REGISTRY_PATH)
         except OSError as e:
             self._targets, self._target_issues = {}, []
             self.statusBar().showMessage(
@@ -1202,12 +1202,12 @@ class MainWindow(QMainWindow):
         if errors:
             self.statusBar().showMessage(
                 'Target registry: {0} usable target(s), {1} error(s), {2} warning(s) '
-                '-- see dialog / run pimd_targets.py for detail'.format(
+                '-- see dialog / run pimd_target_check.py for detail'.format(
                     len(targets), len(errors), len(warnings)))
         elif warnings:
             self.statusBar().showMessage(
                 'Target registry loaded: {0} target(s), {1} warning(s) (run '
-                'pimd_targets.py for detail)'.format(len(targets), len(warnings)))
+                'pimd_target_check.py for detail)'.format(len(targets), len(warnings)))
         else:
             self.statusBar().showMessage('Target registry loaded: {0} target(s)'.format(len(targets)))
         self._repopulate_target_combos()

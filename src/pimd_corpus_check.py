@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 import pimd_features
-import pimd_targets
+import pimd_target_check
 
 # --- pass bands (tunable in one place) --------------------------------------
 SHAPE_INVARIANCE_COS_MIN = 0.97
@@ -473,7 +473,7 @@ def load_registry():
     broken registry must not stop an acceptance run, so failures degrade to an
     empty dict (labels then fall back to bare target_id)."""
     try:
-        targets, _issues = pimd_targets.load_targets()
+        targets, _issues = pimd_target_check.load_targets()
         return targets
     except (OSError, ValueError):
         return {}
