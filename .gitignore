@@ -15,8 +15,8 @@ assets
 ML/
 
 # Previous-epoch ML tools — kept locally, not repo source (2026-07-13 epoch reset)
-# (pimd_corpus_check.py re-tracked 2026-07-15 — v1.4 is maintained against the
-#  current schema regime and its re-home onto the new columns is planned work)
+# (pimd_corpus_check.py re-tracked 2026-07-15 — v1.5 reads the current v1.32+
+#  target_id/distance_mm corpus schema)
 src/pimd_classify.py
 src/pimd_v2_findings.py
 
@@ -32,3 +32,6 @@ src/data/stats*
 
 # Corpus captures — not tracked for now (rebuild in progress, 2026-07-15)
 src/data/corpora/
+
+# Session dumps written by pimd_classviz.py (runtime capture data, not source)
+src/data/sessions/
