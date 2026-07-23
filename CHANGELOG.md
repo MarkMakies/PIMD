@@ -1,3 +1,73 @@
+### src/pimd_target_check.py — v3 — renamed from pimd_targets.py
+
+Module renamed `pimd_targets.py` → `pimd_target_check.py`, aligning it with
+`pimd_corpus_check.py` (the two validators of the two human/tool data contracts).
+`git mv` plus a mechanical `pimd_targets` → `pimd_target_check` rewrite across the
+three consumers — `pimd_classviz.py`, `pimd_features.py`, `pimd_corpus_check.py` —
+covering the `import`, every qualified call (`load_targets`,
+`DEFAULT_REGISTRY_PATH`) and the user-facing strings that name the CLI. No
+behaviour change: the import contract is the only thing that moved, so the
+consumers are **not** version-bumped (CLAUDE.md: version tracks functional
+change). The module keeps its dual library + CLI role — the new name reads
+checker-ish, but it is still what classviz and features import at runtime to
+validate the registry.
+
+Verified: all four PC tools `py_compile` clean; `python pimd_target_check.py`
+loads the 22-target registry with no issues; `pimd_features.py --help` resolves
+its `--registry` default through the renamed module; `pimd_corpus_check.py` runs a
+real corpus to a full table; the four headless suites pass 115/115.
+(2026-07-23)
+
+---
+
+### Repo hygiene — profiles, profile8b captures and a stray delaycal CSV
+
+Three tracking changes, all keeping files on disk except where noted:
+
+- **`src/data/profiles/` is now tracked by exception.** Only the current
+  operating profile, `cal_63_air_v2.json`, is in git; `cal_63_air_v1.json`,
+  `cal_72_air_v2.json` and `cal_72_air_v3.json` are untracked but retained
+  locally. `.gitignore` uses `src/data/profiles/*` + `!…/cal_63_air_v2.json`
+  rather than listing the three, because delaycal writes candidate profiles into
+  that directory routinely — the default should be "not repo source". Locking a
+  new operating profile is a deliberate act: `git add -f` it and move the
+  exception.
+- **`References/profile8b-*` (3 previous-epoch captures) untracked**, kept on
+  disk. Their DESIGN.md §15 rows were already dropped at Doc-rev 1.8, so they
+  were tracked but uncited — flagged in the 1.9 consolidation pass.
+- **`src/data/delaycal_1706-104844.csv` deleted.** A stray 2026-06-17 sweep
+  output that predates the epoch reset; `src/data/delaycal*` was already
+  gitignored, so it was only still tracked because it was added before that rule.
+
+(2026-07-23)
+
+---
+
+### DESIGN.md — 1.9.1 — post-consolidation corrections
+
+Human-directed, read-only rule suspended per §18. Follows the four changes above:
+§15's registry row becomes `src/pimd_target_check.py` (**v3**, noting the former
+name) and the classviz row's reference to it follows; the `src/data/profiles/` row
+records the new track-by-exception policy. Doc-rev bumped 1.9 → 1.9.1 with the
+existing history preserved. Nothing else touched — §3 and §17 remain untouched, as
+in the 1.9 pass. (2026-07-23)
+
+---
+
+### USAGE.md — v1.6 — rename follow-through + stale version fixes
+
+`pimd_targets` → `pimd_target_check` (v3) in the §1 pipeline diagram, the §6
+heading and the §6 body/CLI examples. Two stale references corrected while there:
+classviz v1.35 → v1.39 in the §1 diagram and the §5 heading, and the §5 Analysis
+bullet no longer lists the `notes` placement field (removed at classviz v1.38) —
+it now names the v1.38 per-parameter green/amber/red readout instead. (2026-07-23)
+
+---
+
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-07-23
+
 ### src/pimd_corpus_check.py — v1.6 — FIX air captures aborted the whole run
 
 An **air** capture legitimately has no distance: classviz forces
@@ -539,7 +609,6 @@ and the AMBER near-field path were each exercised; a legacy `target`/
 
 ---
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-15
 

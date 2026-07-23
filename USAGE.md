@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.5
+# PIMD — Usage Guide (USAGE.md) v1.6
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,12 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.6 2026-07-23 pimd_targets.py renamed pimd_target_check.py (v2 → v3) — §1
+                diagram and §6 heading/body follow. Stale version references
+                corrected: classviz v1.35 → v1.39 in the §1 diagram and the §5
+                heading. Dropped the removed `notes` placement field from the
+                §5 Analysis bullet and named the v1.38 per-parameter quality
+                readout.
 v1.5 2026-07-23 classviz v1.36 → v1.39, targets v1 → v2. Training Session tab
                 removed (all capture is now the Analysis tab's Training group)
                 — §5 bullet dropped and the intent line reworded. Target
@@ -51,11 +57,11 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.25)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.35)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.39)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │
                      ▼
-          src/pimd_features.py (v7) + src/pimd_targets.py (v1)
+          src/pimd_features.py (v7) + src/pimd_target_check.py (v3)
                — registry-validated training-corpus builder ──► ML corpus
 ```
 
@@ -165,7 +171,7 @@ Settings persist in `src/data/delaycal_settings.json`.
 
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.35)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.39)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -184,8 +190,9 @@ validated against the target registry.
 - **Stats tab:** per-cell Latest / Mean / Std with green/yellow/red thresholds.
 - **Analysis tab:** live comparison charts, a **Signatures** group (signature file
   management, registry-validated target combo from `targets_v1.csv` via
-  `pimd_targets.py`, structured placement fields — distance_mm, axes, offsets,
-  medium, repeat_idx, notes — readout and Save/Delete) and a **Training** group
+  `pimd_target_check.py`, structured placement fields — distance_mm, axes, offsets,
+  medium, repeat_idx — a per-parameter green/amber/red readout and Save/Delete)
+  and a **Training** group
   (v1.35): an automated auto-detect capture cycle. Press **Start Training**; two
   status areas show **A** = state, naming air vs target (yellow SETTLING → blue
   COLLECTING with a frames-left countdown → green ACQUIRED; the leading air keeps
@@ -217,7 +224,7 @@ persist in `src/data/classviz_settings.json` (written on close only).
 
 ---
 
-## 6. Corpus pipeline — pimd_features (v7) + pimd_targets (v1)
+## 6. Corpus pipeline — pimd_features (v7) + pimd_target_check (v3)
 
 **Intent.** Offline CLI stage that turns classviz output into the ML training
 corpus, enforcing the two contracts that make the corpus trustworthy: every row
@@ -225,13 +232,13 @@ joins a **registry-validated target** with structured placement, and every corpu
 build is **geometry-guarded** so frames from different profile geometries can never
 mix (DESIGN §10 invariant).
 
-**Operation — `pimd_targets.py` (registry).**
+**Operation — `pimd_target_check.py` (registry).**
 - Loads and validates `src/data/targets/targets_v1.csv` — the human-authored
   registry of physical target objects (id, material, shape, dims, mass, …). Read
   only; the registry is human-owned data and is never written by tooling.
 - Hard errors (duplicate/malformed `target_id`, bad enum, unparseable numeric) vs
   warnings (unsorted dims, implausible mass, …). CLI:
-  `python pimd_targets.py [--registry PATH]` — prints the target table and every
+  `python pimd_target_check.py [--registry PATH]` — prints the target table and every
   issue; exit 1 on any error. Shared by classviz (capture-time validation) and
   features (corpus-build validation), so both agree on what a valid target is.
 
