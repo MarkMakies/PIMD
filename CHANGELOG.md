@@ -1,3 +1,34 @@
+### src/pimd_classviz.py — v1.41 — FIX Space-forced placement skipped the removal wait
+
+Reported from the bench: on a target weak enough to need the Space override to get
+out of `await_target`, the cycle jumped straight from the acquired target into the
+trailing-air phase, with no chance to lift the target off the coil.
+
+Deterministic, not intermittent. Both auto-detect transitions test the same
+quantity — `_current_dev_from_air()`, mean |Δ| between the live settle window and
+the locked leading air — against Detect: placement on `dev > Detect`, removal on
+`dev < Detect`. The override is only ever needed because a target's |Δ| *never*
+crosses Detect, so the removal test is already satisfied the moment `await_remove`
+is entered, and the first settled frame advances to `air_trail`. Every target that
+needs the manual placement was therefore guaranteed to skip the removal wait, and
+any signature saved from that cycle has target frames in its trailing air —
+corrupting the split-half floor and the SNR.
+
+Fixed by latching the reason: `_sig_enter_target(manual=True)` from the Space
+handler records that auto-detect never saw this target, and `await_remove` then
+ignores the `dev < Detect` transition and waits for Space. Instruction B reads
+"Remove target, then press Space" in that mode. The latch clears at every cycle
+boundary (`_sig_finish_air_trail`, abort, start, reset), so a cycle whose placement
+*was* auto-detected keeps full automation — that path is unaffected, since a
+present target holds `dev` above Detect and cannot mis-fire on entry.
+
+Untick-mid-cycle guard: once latched, Space keeps working for the rest of the cycle
+even if "Space override" is cleared, which otherwise leaves no way out of
+`await_remove` but the 30 s timeout abort. The countdown itself is unchanged — a
+manual removal must still be done inside the same 30 s window. (2026-07-23)
+
+---
+
 ### src/pimd_classviz.py — v1.40 — FIX capture_id reuse silently swallowed training saves
 
 Field failure during a targets_v1 training capture: four targets saved and listed

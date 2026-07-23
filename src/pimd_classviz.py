@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.40
+# PIMD Signature Visualiser (ClassViz) v1.41
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.41 FIX Space-forced target placement skipped the removal wait (auto-detect latch)
 #   v1.40 FIX capture_id reuse after a delete silently merged later saves into an existing capture
 #   v1.39 remove the Training Session tab (all capture now via the Analysis tab Training group)
 #   v1.38 Analysis: shrinkable heatmap split, auto-check new sigs, black live traces, quality colouring
@@ -102,7 +103,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.40'
+APP_VERSION = '1.41'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -316,6 +317,8 @@ class MainWindow(QMainWindow):
         self._sig_glitch_skipped = 0    # glitch frames excluded from the current window (v1.31)
         self._sig_air_ref      = None   # np mV vector: median of the locked leading air (auto-detect ref)
         self._sig_await_deadline = None # wall-clock; 30 s guard for await_target/await_remove
+        self._sig_target_manual = False # placement was forced by Space, so auto-detect can't
+                                        # see this target -- removal must be manual too (v1.41)
         self._sig_decide_pending = False  # a computed signature is awaiting Save/Ignore
         self._sig_decide_flash_on = False # flash phase for the Save/Ignore buttons
         self._sig_await_flash_on = False  # flash phase for the place/remove countdown (B)
@@ -2329,6 +2332,7 @@ class MainWindow(QMainWindow):
         self._sig_last_stats = None
         self._sig_air_ref    = None
         self._sig_await_deadline = None
+        self._sig_target_manual = False
         self._clear_sig_decide()
         self._update_sig_readout()
         self._analysis_training_active = True
@@ -2368,12 +2372,15 @@ class MainWindow(QMainWindow):
                         'Training: leading air not ready yet (wait for green)')
                     return
             self._sig_lock_leading_air()
-        elif not override:
+        elif not override and not self._sig_target_manual:
+            # a manual placement latches manual for the rest of the cycle:
+            # auto-detect is off for the removal, so unticking the checkbox
+            # mid-cycle must not strand the operator in a 30 s timeout
             self.statusBar().showMessage(
                 'Training: auto-detecting — enable "Space override" to advance manually')
             return
         elif phase == 'await_target':
-            self._sig_enter_target()
+            self._sig_enter_target(manual=True)
         elif phase == 'target':
             self._sig_finish_target()
         elif phase == 'await_remove':
@@ -2430,8 +2437,15 @@ class MainWindow(QMainWindow):
             return ''
         return self.MY_RED if remaining <= 5 else self.MY_YELLOW
 
-    def _sig_enter_target(self):
+    def _sig_enter_target(self, manual=False):
+        """manual=True means Space forced the placement because auto-detect
+        never fired -- i.e. this target's |Δ| from air stays under Detect. The
+        removal test is that same comparison inverted, so it would read
+        'removed' on the first settled frame of await_remove and skip the
+        removal wait entirely (v1.40 field failure). Latch it and require
+        Space to leave await_remove as well."""
         self._stop_await_flash()
+        self._sig_target_manual = manual
         self._sig_train_phase = 'target'
         self._sig_await_deadline = None
         self._sig_train_restart_buffer()
@@ -2466,7 +2480,9 @@ class MainWindow(QMainWindow):
         self._sig_air_before = None
         self._sig_target     = None
         self._sig_air_after  = None
-        # roll straight into the next leading air (same deque, no reset)
+        # roll straight into the next leading air (same deque, no reset);
+        # the next cycle re-arms auto-detect from scratch
+        self._sig_target_manual = False
         self._sig_train_phase = 'air_lead'
         self._sig_start_sig_decide()
         self._update_sig_train_indicator()
@@ -2481,6 +2497,7 @@ class MainWindow(QMainWindow):
         self._sig_air_after  = None
         self._sig_air_ref    = None
         self._sig_await_deadline = None
+        self._sig_target_manual = False
         self._stop_await_flash()
         self._sig_train_phase = 'air_lead'
         self._sig_train_restart_buffer()
@@ -2544,7 +2561,12 @@ class MainWindow(QMainWindow):
                     if phase == 'await_target' and dev > self.sp_sig_detect_mv.value():
                         self._sig_enter_target()
                         return
-                    if phase == 'await_remove' and dev < self.sp_sig_detect_mv.value():
+                    # ...but only when auto-detect saw the target go on. If
+                    # placement was forced by Space, dev never exceeded Detect
+                    # in the first place, so dev < Detect here means nothing
+                    # and the operator must Space out of await_remove.
+                    if (phase == 'await_remove' and not self._sig_target_manual
+                            and dev < self.sp_sig_detect_mv.value()):
                         self._sig_enter_air_trail()
                         return
             self._update_sig_train_indicator(settle_mv)
@@ -2620,7 +2642,8 @@ class MainWindow(QMainWindow):
             b_text = 'Profiling target…'
         elif phase == 'await_remove':
             rem = self._sig_await_remaining()
-            b_text = 'Remove target now — {0}s'.format(rem)
+            b_text = ('Remove target, then press Space — {0}s' if self._sig_target_manual
+                      else 'Remove target now — {0}s').format(rem)
             b_style = self._await_flash_style(rem)
         elif phase == 'air_trail':
             b_text = 'Final air…'
@@ -2688,6 +2711,7 @@ class MainWindow(QMainWindow):
         self._sig_glitch_skipped = 0
         self._sig_air_ref        = None
         self._sig_await_deadline = None
+        self._sig_target_manual  = False
         self._sig_air_before = None
         self._sig_air_after  = None
         self._sig_target     = None
