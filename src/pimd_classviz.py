@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.39
+# PIMD Signature Visualiser (ClassViz) v1.40
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.40 FIX capture_id reuse after a delete silently merged later saves into an existing capture
 #   v1.39 remove the Training Session tab (all capture now via the Analysis tab Training group)
 #   v1.38 Analysis: shrinkable heatmap split, auto-check new sigs, black live traces, quality colouring
 #   v1.37 FIX Load signatures / Open for editing rejected the app's own v1.32+ files (schema dispatch)
@@ -101,7 +102,7 @@ import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.39'
+APP_VERSION = '1.40'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -2963,7 +2964,20 @@ class MainWindow(QMainWindow):
         for sig in sigs.values():
             key = self._placement_tuple_key(sig)
             self._editable_repeat_counts[key] = self._editable_repeat_counts.get(key, 0) + 1
-        self._editable_sig_seq = len(sigs)
+        # Resume numbering above the highest _cNN already in the file, NOT at
+        # len(sigs) -- a deleted capture leaves a gap, and counting would then
+        # hand the next save an id that already exists. Duplicate ids don't
+        # error: the append succeeds, _scan_editable_signature_file() folds the
+        # rows into the existing capture, len() stays put, and every further
+        # save silently merges into the same id (v1.39 field failure).
+        self._editable_sig_seq = max(
+            [self._capture_id_seq(cid) for _, cid in sigs] or [0])
+
+    @staticmethod
+    def _capture_id_seq(capture_id):
+        """Trailing _cNN sequence number of a capture_id, 0 if unparseable."""
+        tail = capture_id.rsplit('_c', 1)[-1]
+        return int(tail) if tail.isdigit() else 0
 
     def _update_sig_mode_label(self):
         if self._editable_sig_path is None:
@@ -3004,8 +3018,11 @@ class MainWindow(QMainWindow):
         short_name = self._targets[target_id].short_name if target_id in self._targets else ''
 
         existing = self._scan_editable_signature_file(self._editable_sig_path)
-        if existing:
-            existing_len = len(next(iter(existing.values()))['shape'])
+        for sig in existing.values():
+            # every capture, not just the first -- a short/long shape means
+            # either a mixed profile geometry or an id collision that folded
+            # two captures together, and both must block the save
+            existing_len = len(sig['shape'])
             if existing_len != self._n_channels:
                 self.statusBar().showMessage(
                     "Refusing to save: file has {0}-channel signatures, live profile has {1} channels "
@@ -3023,8 +3040,15 @@ class MainWindow(QMainWindow):
             medium=placement['medium'], repeat_idx=placement['repeat_idx'], notes=placement['notes'],
             is_air=(target_id == 'air'), start_idx=0, end_idx=0)
 
+        # Last line of defence against a reused capture_id (see
+        # _reload_editable_signature_list): a collision would append the rows
+        # into an existing capture, where the scan folds them together and the
+        # save vanishes from the list. Skip past anything already in the file.
         self._editable_sig_seq += 1
         capture_id = '{0}_c{1:02d}'.format(self._editable_sig_session_id, self._editable_sig_seq)
+        while (self._editable_sig_session_id, capture_id) in existing:
+            self._editable_sig_seq += 1
+            capture_id = '{0}_c{1:02d}'.format(self._editable_sig_session_id, self._editable_sig_seq)
         captured_at = datetime.now().isoformat()
 
         rows = pimd_features.build_rows(

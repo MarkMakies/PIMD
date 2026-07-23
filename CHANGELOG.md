@@ -1,3 +1,38 @@
+### src/pimd_classviz.py — v1.40 — FIX capture_id reuse silently swallowed training saves
+
+Field failure during a targets_v1 training capture: four targets saved and listed
+fine, then the fifth (and every one after it) vanished — Save Sig cleared the
+readout as if it had worked, but nothing appeared in the signature list.
+
+The rows *were* written. `_reload_editable_signature_list()` set the next capture
+sequence number to `len(sigs)`, the count of captures in the file. That is only
+equal to the highest `_cNN` while the numbering is gap-free. Deleting a capture
+opens a gap, after which the count hands the next save an id that already exists.
+Nothing rejects a duplicate: the append succeeds, `_scan_editable_signature_file()`
+groups on `(session, capture_id)` and folds the new rows into the existing capture,
+`len(sigs)` doesn't move — so the same id is reissued forever and every subsequent
+save disappears into it. In the failing file `c05` had accumulated 4 × 63 = 252
+rows under one id.
+
+Three changes. The sequence number now resumes above the highest `_cNN` actually
+present (`_capture_id_seq()` parses the trailing index) rather than counting
+captures, so a gap is harmless. `_on_sig_save_clicked()` additionally skips past any
+id already in the file before writing, so a collision cannot happen even if the
+seed is wrong. And the pre-save channel-count check now walks every capture instead
+of sampling only the first — a folded capture has a wrong-length shape, so that
+check now catches an already-corrupted file (it previously passed, because the
+first capture was intact).
+
+The affected corpus (`gui_signatures_targets_v1_20260723.csv`) was repaired in
+place: the three orphaned captures — brass gear, and two crank-handle repeats —
+were reissued as `c06`/`c07`/`c08` by regrouping on `captured_at`, and the second
+crank-handle capture got `repeat_idx` 2 (both had been written as repeat 1, since
+the repeat auto-increment reads the same merged scan). No measurement data was
+lost; only `capture_id` and one `repeat_idx` changed. Original kept as `.bak`
+alongside. (2026-07-23)
+
+---
+
 ### .gitignore / DESIGN.md 1.9.2 — superseded profiles listed individually
 
 The profiles rule was `src/data/profiles/*` plus `!src/data/profiles/cal_63_air_v2.json`.
