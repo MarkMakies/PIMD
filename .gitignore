@@ -36,6 +36,11 @@ src/data/corpora/
 # Session dumps written by pimd_classviz.py (runtime capture data, not source)
 src/data/sessions/
 
+# Scratch captures from the Shape Space tab — unregistered objects grabbed for
+# exploration, never corpus material (their target_ids are not in targets_v1.csv,
+# and a corpus build hard-errors on those by design)
+src/data/scratch/
+
 # Superseded calibration profiles — kept on disk, not repo source. Only the
 # current *operating* profile is tracked (§10 firmware<->ML contract); it is
 # cal_63_air_v2.json, which is deliberately absent from this list.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.41
+# PIMD Signature Visualiser (ClassViz) v1.42
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.42 new Shape Space tab (feature-space scatter + docks) + scratch captures
 #   v1.41 FIX Space-forced target placement skipped the removal wait (auto-detect latch)
 #   v1.40 FIX capture_id reuse after a delete silently merged later saves into an existing capture
 #   v1.39 remove the Training Session tab (all capture now via the Analysis tab Training group)
@@ -84,14 +85,15 @@ from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
 from PyQt6.QtGui import QBrush, QColor, QFont  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
-    QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 import pyqtgraph as pg  # noqa: E402
+from pyqtgraph.dockarea import Dock, DockArea  # noqa: E402 — Shape Space tab layout
 
 try:
     import pyqtgraph.opengl as gl
@@ -101,9 +103,10 @@ except ImportError:
 
 import pimd_corpus_check  # noqa: E402 — Analysis tab signature-overlay loader
 import pimd_features       # noqa: E402 — Analysis tab signature capture/save
+import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.41'
+APP_VERSION = '1.42'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -117,8 +120,73 @@ DEFAULT_PORT = '/dev/ttyACM0'
 PROFILES_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
 SESSIONS_DIR       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
 CORPORA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'corpora')
+# Shape Space scratch captures -- deliberately NOT data/corpora/: those ids are
+# unregistered, and pimd_features' corpus build hard-errors on an unknown
+# target_id. That guard is intentional; a scratch object gets promoted by
+# registering it in targets_v1.csv and recapturing it properly.
+SCRATCH_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'scratch')
 TARGETS_REGISTRY_PATH = pimd_target_check.DEFAULT_REGISTRY_PATH   # single source of truth
 SUPPLY_CHOICES = ['battery', 'psu']
+SCRATCH_ID_PREFIX = 'scratch_'
+SCRATCH_MEDIA = ['air', 'soil', 'sand', 'water', 'other']
+
+# -- Shape Space tab -------------------------------------------------------
+# (key, menu label). 'custom' reads the control bar's band-range spin pair;
+# everything else is a fixed pimd_shape feature. Used for both axis combos
+# and, with SHAPE_COLOUR_EXTRA appended, the Colour-by combo.
+SHAPE_AXES = [
+    ('early',    'early mean'),
+    ('mid',      'mid mean'),
+    ('late',     'late mean'),
+    ('custom',   'custom band range'),
+    ('crossing', 'crossing µs (log)'),
+    ('decay',    'decay persistence'),
+    ('log_amp',  'log₁₀ amplitude'),
+]
+SHAPE_COLOUR_EXTRA = [('family', 'family'), ('distance', 'distance'), ('none', 'none')]
+# Axes whose values are pulse widths in µs -- plotted as log10 with the
+# profile's own pulse ladder as ticks (see _shape_axis_ticks). pyqtgraph's
+# PlotItem.setLogMode only transforms PlotDataItems, not the bare
+# ScatterPlotItems this tab draws, so the log transform is done on the values.
+SHAPE_LOG_US_AXES = ('crossing',)
+# Axes that are signed band-range means of the unit shape, so 0 is the
+# meaningful "no signal" origin. While the air reference is rolling the live
+# dot is pinned there rather than drawn at its computed position: the residual
+# is ~0 in magnitude but its unit shape still has a definite direction (the
+# reference's half-window drift lag), which parks the dot at a consistent
+# off-centre spot -- measured, right inside the non-ferrous cluster. On the
+# other axes 0 is not the origin of anything, so the dot is hidden instead.
+SHAPE_CENTRED_AXES = ('early', 'mid', 'late', 'custom')
+
+SHAPE_FAMILY_COLOURS = {
+    'non_ferrous':      '#1f77b4',
+    'crossover':        '#9467bd',
+    'ferrous':          '#d62728',
+    pimd_shape.LOW_SNR: '#999999',
+}
+SHAPE_GATE_DEFAULT  = pimd_shape.DEFAULT_SNR_GATE
+SHAPE_TRAIL_DEFAULT = 30
+SHAPE_TRAIL_MAX     = 500   # deque cap; the spinbox slices the last N of it
+# Air-reference age beyond which the gauge reads amber. Far shorter than a
+# static baseline's 600 s would suggest: at the DESIGN §3 drift rate a 60 s-old
+# locked reference has already accumulated ~1 mV/cell, the same order as a weak
+# target, so a lock older than this is worth re-arming before trusting.
+SHAPE_AIR_AMBER_S   = 60.0
+# Air-buffer frames. Deliberately much shorter than the Analysis tab's
+# capture-window default (120): that window is for a stationary corpus capture
+# bracketed by air on BOTH sides, where length buys noise. A rolling reference
+# is single-ended, so its median sits half a window in the PAST and that lag is
+# baked straight into every measurement as drift. Measured against a spanner @
+# 60 mm on a drifting air simulation, family read correctly out to a 15 s hold
+# at 20-40 frames and was already wrong at 5 s by 80-120 frames.
+SHAPE_AIR_N_DEFAULT      = 40
+# Live/settle window, frames. Much shorter than the Stats tab's 50 (≈15 s at
+# the ~3.3 Hz sweep rate): the settle metric only reads "settled" once the
+# whole window sits inside one state, so a 50-frame window means a target does
+# not register for 15 s — by which time drift has already spoiled the reading.
+# 15 frames ≈ 4.5 s, and the split-half noise floor over it is still ~0.5 mV
+# against a 39 mV target at 60 mm.
+SHAPE_WIN_N_DEFAULT      = 15
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
 
@@ -174,6 +242,24 @@ _R = int(Qt.AlignmentFlag.AlignRight) | int(Qt.AlignmentFlag.AlignVCenter)
 _C = int(Qt.AlignmentFlag.AlignCenter)
 
 
+def _hl_qcolor(css_rgb):
+    """QColor from one of the _HL_* 'rgb(r, g, b)' strings above. Those are
+    CSS -- fine for stylesheets and <span> backgrounds, but pyqtgraph's
+    mkBrush/mkColor rejects them. Parsed here rather than duplicated as hex
+    literals so the colours still have exactly one definition."""
+    body = css_rgb[css_rgb.index('(') + 1:css_rgb.index(')')]
+    return QColor(*(int(v) for v in body.split(',')))
+
+
+def _hl_ink(css_rgb):
+    """Same hue, darkened for use as a STROKE. The _HL_* colours are
+    backgrounds -- _HL_YELLOW is a pale rgb(249,240,107) that reads well as a
+    fill behind dark text but is close to invisible as a 2 px line on
+    pyqtgraph's white canvas. Derived rather than hard-coded so the fill and
+    the stroke stay the same colour."""
+    return _hl_qcolor(css_rgb).darker(160)
+
+
 def _fmt(uv):
     """µV → mV string with 3 d.p."""
     return '{0:.3f}'.format(uv / 1000.0)
@@ -182,6 +268,75 @@ def _fmt(uv):
 def _csv_default_path():
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     return os.path.join(data_dir, 'signatures_{0}.csv'.format(date.today().strftime('%Y%m%d')))
+
+
+class ScratchDialog(QDialog):
+    """Save Scratch… — the small form behind a quick capture of an
+    unregistered object. Deliberately not the Analysis tab's structured
+    placement widget set: a scratch object has no registry row, so long_axis /
+    face_normal / offsets have nothing to be measured against and are written
+    as 'na'/0 rather than invented."""
+
+    def __init__(self, parent, air2_available, default_distance_mm=50):
+        super().__init__(parent)
+        self.setWindowTitle('Save scratch capture')
+        form = QFormLayout(self)
+
+        self.le_label = QLineEdit()
+        self.le_label.setPlaceholderText('e.g. rusty hinge')
+        form.addRow('Label (required):', self.le_label)
+
+        self.le_note = QLineEdit()
+        form.addRow('Note:', self.le_note)
+
+        self.cb_no_distance = QCheckBox('unknown / not measured')
+        self.sp_distance = QSpinBox()
+        self.sp_distance.setRange(0, 2000)
+        self.sp_distance.setValue(int(default_distance_mm))
+        self.sp_distance.setSuffix(' mm')
+        self.cb_no_distance.toggled.connect(lambda on: self.sp_distance.setEnabled(not on))
+        dist_row = QHBoxLayout()
+        dist_row.addWidget(self.sp_distance)
+        dist_row.addWidget(self.cb_no_distance)
+        form.addRow('Distance:', dist_row)
+
+        self.cb_medium = QComboBox()
+        self.cb_medium.addItems(SCRATCH_MEDIA)
+        form.addRow('Medium:', self.cb_medium)
+
+        self.cb_anchor = QComboBox()
+        self.cb_anchor.addItem('static baseline (flat, quick)', 'flat')
+        self.cb_anchor.addItem('last training capture (air/target/air)', 'air2')
+        if not air2_available:
+            # Disabled rather than hidden: the option is real, it just needs a
+            # completed Analysis-tab cycle, and saying so is more useful than
+            # silently offering one choice.
+            model_item = self.cb_anchor.model().item(1)
+            if model_item is not None:
+                model_item.setEnabled(False)
+            self.cb_anchor.setToolTip(
+                'Two-anchor (drift-corrected) capture needs a completed, unsaved '
+                'Training cycle on the Analysis tab.')
+        form.addRow('Air anchor:', self.cb_anchor)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save |
+                                    QDialogButtonBox.StandardButton.Cancel)
+        self._save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        self._save_button.setEnabled(False)
+        self.le_label.textChanged.connect(
+            lambda text: self._save_button.setEnabled(bool(text.strip())))
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        return {
+            'label': self.le_label.text().strip(),
+            'note': self.le_note.text().strip(),
+            'distance_mm': None if self.cb_no_distance.isChecked() else self.sp_distance.value(),
+            'medium': self.cb_medium.currentText(),
+            'anchor': self.cb_anchor.currentData(),
+        }
 
 
 class MainWindow(QMainWindow):
@@ -340,6 +495,48 @@ class MainWindow(QMainWindow):
         # _append_mark machinery and the _recording/_session_paused flags).
         self._analysis_session_recording = False
 
+        # Shape Space tab — feature-space view of the SAME signature store the
+        # Analysis tab loads into (self._analysis_templates); no second loader,
+        # no second copy of the captures. Per-capture features are cached
+        # because they only change when the store or the profile changes;
+        # anything that depends on the control bar (the custom band range) is
+        # derived at draw time from the cached unit shape instead.
+        self._shape_feat_cache   = {}     # template key -> feature dict
+        self._shape_selected_key = None   # clicked scatter point
+        self._shape_live         = None   # feature dict for the current frame, or None
+        # Live feature dicts, appended once per W frame in process_packet so
+        # the trail is already populated when the tab is first shown. Only
+        # gated frames go in -- below the gate the shape is normalised noise
+        # and a trail would make it look like a real trajectory.
+        self._shape_trail        = deque(maxlen=SHAPE_TRAIL_MAX)
+        self._shape_geom_warned  = False  # one §11 geometry message per store load
+
+        # Shape Space air reference — its OWN, deliberately not the shared
+        # _get_current_baseline(). A one-shot static air capture cannot serve
+        # this tab: thermal drift (DESIGN §3 ≈ −50 µV/s, §14.1 heavy bands
+        # −20…−31 mV) accumulates into the delta as a large *coherent* term,
+        # and the SNR gate cannot catch that by construction — splithalf is a
+        # short-timescale scatter statistic, so drift inflates amp while
+        # leaving splithalf flat. Simulated at the documented rate against a
+        # fresh static baseline, coil in air, the frame reads SNR 8.6 after
+        # 30 s and 67 after 4½ minutes: the dot goes confidently coloured and
+        # wanders on nothing at all. Referencing recent air instead cancels
+        # the drift, which is the same reason the Analysis tab's Training
+        # cycle brackets every target with air (DESIGN §17.5).
+        #
+        # Two modes, and Space is the only thing that moves between them:
+        #   'air'      every frame feeds the rolling buffer and the reference
+        #              is its running median, so the live delta is ~0 by
+        #              construction and the cursor sits at the origin.
+        #   'measure'  the last 'frames' of air were snapshotted as a fixed
+        #              reference; the cursor moves against it.
+        # Nothing here auto-detects a target arriving or leaving — an earlier
+        # revision did, and it is gone by direction.
+        self._shape_air_mode   = 'air'
+        self._shape_air_buf    = None    # deque(maxlen=Air frames) of mV frames
+        self._shape_air_ref    = None    # np vector, mV
+        self._shape_air_ref_ts = None    # wall time the reference was snapshotted
+
         self._setup_colormaps()
         self._build_ui()
         QApplication.instance().installEventFilter(self)
@@ -404,6 +601,19 @@ class MainWindow(QMainWindow):
         else:
             self._cell_labels = ['d{0}'.format(j) for j in range(n_cells)]
             self._nominal_baseline_uv = np.zeros((n_bands, n_cells))
+        # Cells sorted threshold_v DESCENDING -- with _pulse_sort_order below,
+        # this is what puts a live frame into pimd_shape's vector convention
+        # (band-major, pulse ascending, thresholds high->low), the same order
+        # the corpus rows are sorted into on save. Live and stored shapes are
+        # only comparable because both go through these two reindexes.
+        if self._has_threshold_v:
+            thr = bands[0]['threshold_v']
+            self._cell_sort_order = [int(j) for j in
+                                      np.argsort([-float(v) for v in thr], kind='stable')]
+            self._threshold_v_sorted = [float(thr[j]) for j in self._cell_sort_order]
+        else:
+            self._cell_sort_order = list(range(n_cells))
+            self._threshold_v_sorted = [float('nan')] * n_cells
         # Analysis tab: bands sorted pulse_us ascending. Raw protocol/profile
         # band order is NOT reliably pulse-ascending -- the live default
         # CLASSIFY_EP profile is actually pulse-*descending* (40->5us) -- so
@@ -442,6 +652,17 @@ class MainWindow(QMainWindow):
         self._ch_glitch_buf  = None
         self._ch_glitch_pos  = 0
 
+        # Shape Space state is invalidated BEFORE anything redraws: the cached
+        # features and the live trail were computed under the old geometry,
+        # and _refresh_analysis_overlays() below reaches the Shape Space
+        # panels, which would otherwise repopulate from the stale cache.
+        if hasattr(self, 'shape_scatter'):
+            self._shape_invalidate_features()
+            self._shape_trail.clear()
+            self._shape_live = None
+            self._shape_selected_key = None
+            self._shape_air_restart()   # old-geometry air reference is unusable
+
         self._rebuild_heatmap_axes()
         self._rebuild_3d_surface()
         self._rebuild_stats_table()
@@ -454,7 +675,7 @@ class MainWindow(QMainWindow):
             self._apply_g9_scale()
             self._analysis_strip_reset_ts = 0.0
             self._reset_sig_capture_state()   # old raw arrays would mismatch the new n_channels
-            self._refresh_analysis_overlays()
+            self._refresh_analysis_overlays()  # tail-calls _shape_redraw_static()
         self.header_label.setText('Profile {0} — {1} ({2} bands × {3} cells)'.format(
             profile_idx, profile.get('name', '?'), self._n_bands, self._n_cells))
 
@@ -541,6 +762,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
         self.tabs.addTab(self._build_stats_tab(),   'Stats')
         self._analysis_tab_index = self.tabs.addTab(self._build_analysis_tab(), 'Analysis')
+        self._shape_tab_index = self.tabs.addTab(self._build_shape_tab(), 'Shape Space')
         layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
@@ -2177,6 +2399,7 @@ class MainWindow(QMainWindow):
                 # still old target/distance_cm schema -- see its own
                 # changelog entry for the v1.32-schema loud-rejection).
                 session, display_target, display_place = key[0], key[1], '{0}cm'.format(key[2])
+                target_id, distance_mm = key[1], str(int(float(key[2])) * 10)
             else:
                 # 'editable' source (this file's own _scan_editable_
                 # signature_file(), v1.32+ schema) -- key is (session,
@@ -2184,6 +2407,7 @@ class MainWindow(QMainWindow):
                 session, capture_id = key
                 display_target = sig.get('target_id') or capture_id
                 display_place = '{0}mm'.format(sig['distance_mm']) if sig.get('distance_mm') else 'air'
+                target_id, distance_mm = sig.get('target_id', ''), sig.get('distance_mm', '')
             label = '{0}{1} @{2}  amp={3:.0f} SNR={4:.1f} [{5}]'.format(
                 prefix, display_target, display_place, amp, snr, quality)
             color = pg.intColor(i, hues=max(len(sigs), 9))
@@ -2204,10 +2428,21 @@ class MainWindow(QMainWindow):
             item.setToolTip('{0} @{1} ({2})  amp={3:.3f}mV  splithalf={4:.3f}mV  SNR={5:.2f}  quality={6}'.format(
                 display_target, display_place, session, amp, splithalf, snr, quality))
             self.lw_analysis_templates.addItem(item)
+            # target_id/distance_mm/geometry are carried through (v1.42) rather
+            # than only being formatted into `label`: the Shape Space tab plots
+            # from this same store and needs them as data, not display text.
+            # pulses_us/n_delays fall back to the live profile for any source
+            # that doesn't report its own geometry.
             self._analysis_templates[key] = {'shape': sig['shape'], 'color': color, 'label': label,
                                               'amp': amp, 'splithalf': splithalf, 'quality': quality,
-                                              'source': source, 'session': session}
+                                              'source': source, 'session': session,
+                                              'target_id': target_id, 'distance_mm': distance_mm,
+                                              'short_name': sig.get('short_name', ''),
+                                              'pulses_us': sig.get('pulses_us') or list(self._pulse_us_sorted),
+                                              'n_delays': sig.get('n_delays') or self._n_cells,
+                                              'profile_name': sig.get('profile_name', '')}
         self.lw_analysis_templates.blockSignals(False)
+        self._shape_invalidate_features()
         self._refresh_analysis_overlays()
 
     def _on_clear_signatures_clicked(self):
@@ -2289,6 +2524,11 @@ class MainWindow(QMainWindow):
             line = pg.InfiniteLine(pos=val, angle=0, pen=pen)
             self.analysis_strip_plot.addItem(line)
             self.analysis_strip_template_lines[key] = line
+
+        # Shape Space draws from the same store and the same checked set, so
+        # it refreshes on exactly the same events (load, (un)check, clear,
+        # profile change) rather than needing its own set of hooks.
+        self._shape_redraw_static()
 
     # -- Signature capture (air-before / target / air-after) ----------------
 
@@ -2515,11 +2755,16 @@ class MainWindow(QMainWindow):
         self._sig_train_status = 'settling'
         self._update_sig_train_indicator()
 
-    def _current_settle_mv(self):
-        """Mean per-channel rolling std in mV over the Stats tab's window --
-        the v1.31 settle-gate metric, unchanged. None if <2 frames buffered
-        (treated as not settled)."""
-        n_win  = self.sp_stats_window.value()
+    def _current_settle_mv(self, n_win=None):
+        """Mean per-channel rolling std in mV over a window of frames -- the
+        v1.31 settle-gate metric, unchanged. None if <2 frames buffered
+        (treated as not settled).
+
+        `n_win` defaults to the Stats tab's window; the Shape Space tab passes
+        its own, much shorter one (a 50-frame window is 15 s at the sweep
+        rate, so a target appearing does not read settled for 15 s -- fine for
+        a corpus capture, far too slow for a live view)."""
+        n_win  = n_win or self.sp_stats_window.value()
         recent = list(self._rolling_buf)[-n_win:]
         if len(recent) < 2:
             return None
@@ -2955,8 +3200,16 @@ class MainWindow(QMainWindow):
         for key in order:
             rows = sorted(groups[key], key=lambda p: (float(p[idx['pulse_us']]), -float(p[idx['threshold_v']])))
             first = rows[0]
+            # The capture's OWN geometry, read off its rows rather than assumed
+            # from the live profile -- the Shape Space tab needs it to compute
+            # band-wise features, and to tell a genuinely different profile
+            # geometry from a merely different cell count (DESIGN §11).
+            pulses_us = sorted({float(p[idx['pulse_us']]) for p in rows})
+            n_bands   = len(pulses_us)
             sigs[key] = dict(
                 shape=np.array([float(p[idx['delta_mV']]) for p in rows]),
+                pulses_us=pulses_us,
+                n_delays=(len(rows) // n_bands) if n_bands else 0,
                 amp=float(first[idx['plateau_amp_mV']]), splithalf=float(first[idx['splithalf_floor']]),
                 quality=first[idx['quality']],
                 target_id=first[idx['target_id']], short_name=first[idx['short_name']],
@@ -2964,6 +3217,7 @@ class MainWindow(QMainWindow):
                 face_normal=first[idx['face_normal']], offset_x_mm=first[idx['offset_x_mm']],
                 offset_y_mm=first[idx['offset_y_mm']], medium=first[idx['medium']],
                 repeat_idx=first[idx['repeat_idx']],
+                profile_name=first[idx['profile_name']],
             )
         return sigs
 
@@ -3216,6 +3470,1557 @@ class MainWindow(QMainWindow):
                 'Recording{0}'.format(' (paused)' if self._session_paused else ''))
 
     # ------------------------------------------------------------------
+    # Tab 3 — Shape Space
+    # ------------------------------------------------------------------
+    # Human exploration of signature geometry: every loaded signature is a
+    # point in a selectable 2-D feature space, with the current frame moving
+    # through it as a live dot. The feature maths lives in pimd_shape.py (no
+    # Qt there, so a classifier can import the same functions); everything
+    # here is plumbing and drawing.
+    #
+    # Two rules the panels exist to enforce, both about not lying:
+    #   - below the SNR gate the unit shape is normalised NOISE. It still has
+    #     a family verdict and it still moves around the plane convincingly.
+    #     So below the gate the live dot goes grey, shrinks, and its trail is
+    #     suppressed, and gated-only is the default for every derived panel.
+    #   - family() is a SIGN test and decay_persistence() is a magnitude test.
+    #     A ferrite reads ferrous by sign and non-ferrous by decay. Both
+    #     readouts are shown; neither is allowed to overrule the other.
+
+    def _build_shape_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        layout.addWidget(self._build_shape_ctrl_bar())
+
+        # DockArea rather than nested QSplitters (what the Analysis tab uses):
+        # five panels that each want the whole screen at different moments, so
+        # they need to be floatable and re-orderable, not just resizable.
+        self.shape_dock_area = DockArea()
+        self.shape_docks = {}
+        for name, size, builder in (
+                ('Scatter',         (600, 500), self._build_shape_scatter_dock),
+                ('Gauges',          (400, 230), self._build_shape_gauges_dock),
+                ('Tile Inspector',  (400, 200), self._build_shape_tiles_dock),
+                ('Band Curves',     (400, 200), self._build_shape_curves_dock),
+                ('Crossing Ladder', (1000, 320), self._build_shape_ladder_dock)):
+            dock = Dock(name, size=size)
+            dock.addWidget(builder())
+            self.shape_docks[name] = dock
+        self._shape_apply_default_layout()
+        layout.addWidget(self.shape_dock_area, stretch=1)
+
+        self._shape_redraw_static()
+        self._update_shape_gating()
+        return w
+
+    def _shape_apply_default_layout(self):
+        """Scatter large on the left; right column top-to-bottom Gauges, Tile
+        Inspector, Band Curves; Crossing Ladder along the bottom, full width.
+        Also the 'Reset layout' target, so it has to work on docks that are
+        currently floating or already placed -- moveDock() handles both."""
+        # addDock() re-homes a dock that is already placed (it apoptoses the
+        # old container) and pulls a floated one back out of its temp window,
+        # so replaying the sequence is a complete re-layout -- no teardown
+        # needed, and this works identically on first build and on Reset.
+        area = self.shape_dock_area
+        d = self.shape_docks
+        area.addDock(d['Scatter'], 'left')
+        area.addDock(d['Gauges'], 'right', d['Scatter'])
+        area.addDock(d['Tile Inspector'], 'bottom', d['Gauges'])
+        area.addDock(d['Band Curves'], 'bottom', d['Tile Inspector'])
+        area.addDock(d['Crossing Ladder'], 'bottom')
+
+    def _on_shape_reset_layout(self):
+        self._shape_apply_default_layout()
+        self.statusBar().showMessage('Shape Space: layout reset to default')
+
+    def _shape_dock_state(self):
+        """DockArea.saveState() as JSON-serialisable data, or None. Wrapped
+        because a failure here must not cost the user every other setting in
+        the file -- _save_settings runs from closeEvent()."""
+        try:
+            return self.shape_dock_area.saveState()
+        except Exception:
+            return None
+
+    # -- Control bar --------------------------------------------------------
+
+    def _build_shape_ctrl_bar(self):
+        box = QGroupBox('Shape Space')
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(3)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        outer.addLayout(row)
+
+        row.addWidget(QLabel('X:'))
+        self.cb_shape_x = QComboBox()
+        row.addWidget(self.cb_shape_x)
+        row.addWidget(QLabel('Y:'))
+        self.cb_shape_y = QComboBox()
+        row.addWidget(self.cb_shape_y)
+        row.addWidget(QLabel('Colour:'))
+        self.cb_shape_colour = QComboBox()
+        row.addWidget(self.cb_shape_colour)
+        for key, label in SHAPE_AXES:
+            self.cb_shape_x.addItem(label, key)
+            self.cb_shape_y.addItem(label, key)
+            self.cb_shape_colour.addItem(label, key)
+        for key, label in SHAPE_COLOUR_EXTRA:
+            self.cb_shape_colour.addItem(label, key)
+        self.cb_shape_x.setCurrentIndex(0)          # early mean
+        self.cb_shape_y.setCurrentIndex(2)          # late mean -- the family plane
+        self.cb_shape_colour.setCurrentIndex(len(SHAPE_AXES))   # family
+        for cb in (self.cb_shape_x, self.cb_shape_y, self.cb_shape_colour):
+            cb.currentIndexChanged.connect(self._on_shape_axis_changed)
+
+        row.addWidget(QLabel('Custom bands:'))
+        self.sp_shape_band_lo = QSpinBox()
+        self.sp_shape_band_hi = QSpinBox()
+        for sp in (self.sp_shape_band_lo, self.sp_shape_band_hi):
+            sp.setRange(0, max(0, self._n_bands - 1))
+            sp.setMaximumWidth(48)
+            sp.valueChanged.connect(self._on_shape_custom_range_changed)
+            row.addWidget(sp)
+        self.sp_shape_band_hi.setValue(max(0, self._n_bands - 1))
+        self.sp_shape_band_lo.setToolTip(
+            'Inclusive band index range (0 = shortest pulse) behind the "custom band '
+            'range" axis/colour entry.')
+
+        row.addWidget(QLabel('SNR gate:'))
+        self.sp_shape_gate = QDoubleSpinBox()
+        self.sp_shape_gate.setRange(0.0, 1000.0)
+        self.sp_shape_gate.setDecimals(1)
+        self.sp_shape_gate.setSingleStep(0.5)
+        self.sp_shape_gate.setValue(SHAPE_GATE_DEFAULT)
+        self.sp_shape_gate.setMaximumWidth(70)
+        self.sp_shape_gate.setToolTip(
+            'Amp(L2)/splithalf below which a shape is not interpreted: stored captures '
+            'draw hollow, the live dot greys out and stops trailing.\nDefault 5.0 = '
+            '1/pimd_features.NOISY_RATIO_THRESHOLD, the same line that stamps a capture '
+            "'noisy'.")
+        self.sp_shape_gate.valueChanged.connect(self._on_shape_axis_changed)
+        row.addWidget(self.sp_shape_gate)
+
+        row.addWidget(QLabel('Trail:'))
+        self.sp_shape_trail = QSpinBox()
+        self.sp_shape_trail.setRange(0, SHAPE_TRAIL_MAX)
+        self.sp_shape_trail.setValue(SHAPE_TRAIL_DEFAULT)
+        self.sp_shape_trail.setMaximumWidth(60)
+        self.sp_shape_trail.setToolTip('Live-dot trail length, in frames.')
+        row.addWidget(self.sp_shape_trail)
+
+        row.addStretch(1)
+
+        # Same handler as the Analysis tab's button -- one loader, one store.
+        pb_load = QPushButton('Load signatures…')
+        pb_load.clicked.connect(self._on_load_signatures_clicked)
+        row.addWidget(pb_load)
+
+        self.pb_shape_air = QPushButton('Re-arm Air')
+        self.pb_shape_air.setToolTip(
+            'Drop the current air reference and start tracking fresh air.\n'
+            'This tab keeps its OWN air reference — it does not touch the shared static '
+            'baseline the Heatmap and Analysis tabs use.')
+        self.pb_shape_air.clicked.connect(self._on_shape_rearm_air)
+        row.addWidget(self.pb_shape_air)
+
+        self.pb_shape_scratch = QPushButton('Save Scratch…')
+        self.pb_shape_scratch.clicked.connect(self._on_shape_save_scratch)
+        row.addWidget(self.pb_shape_scratch)
+
+        pb_reset = QPushButton('Reset layout')
+        pb_reset.clicked.connect(self._on_shape_reset_layout)
+        row.addWidget(pb_reset)
+
+        # -- Row 2: air tracking ------------------------------------------
+        # Own spinboxes with their own persisted values, deliberately NOT
+        # shared with the Analysis tab's Training group: exploration wants a
+        # looser settle gate than corpus capture, and coupling them would mean
+        # loosening the gate to wave things around silently loosened the
+        # corpus too.
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+        outer.addLayout(row2)
+        row2.addWidget(QLabel('Air:'))
+
+        row2.addWidget(QLabel('window'))
+        self.sp_shape_win_n = QSpinBox()
+        self.sp_shape_win_n.setRange(4, 500)
+        self.sp_shape_win_n.setValue(SHAPE_WIN_N_DEFAULT)
+        self.sp_shape_win_n.setToolTip(
+            'Frames behind every live number on this tab: the shape itself, its split-half '
+            'noise floor, the settle metric and the |Δ|-from-air test.\n'
+            'Shorter responds faster and accumulates less drift; longer is quieter. This is '
+            'NOT the Stats tab\'s "Std dev N" — 50 frames there is ~15 s, so a target would '
+            'not read as settled for 15 s.')
+        row2.addWidget(self.sp_shape_win_n)
+
+        row2.addWidget(QLabel('frames'))
+        self.sp_shape_air_n = QSpinBox()
+        self.sp_shape_air_n.setRange(2, 2000)
+        self.sp_shape_air_n.setValue(SHAPE_AIR_N_DEFAULT)
+        self.sp_shape_air_n.setToolTip(
+            'Frames in the rolling air buffer. Longer = a quieter reference but a '
+            'slower response to drift, and longer before the air reads ready.')
+        row2.addWidget(self.sp_shape_air_n)
+
+        self.lbl_shape_air = QLabel('')
+        self.lbl_shape_air.setToolTip(
+            'Air state. Yellow = filling the air buffer, green = a full "frames" collected, '
+            'blue = measuring against the snapshot. Space is the only thing that switches.')
+        row2.addWidget(self.lbl_shape_air)
+        row2.addStretch(1)
+        self._shape_air_last_style = None
+        return box
+
+    def _on_shape_axis_changed(self, *_):
+        self._shape_redraw_static()
+
+    def _on_shape_custom_range_changed(self, *_):
+        """Keep lo <= hi without fighting the user mid-edit: nudge the other
+        spinbox rather than snapping back the one being typed into."""
+        lo, hi = self.sp_shape_band_lo.value(), self.sp_shape_band_hi.value()
+        if lo > hi:
+            other = self.sp_shape_band_hi if self.sender() is self.sp_shape_band_lo \
+                else self.sp_shape_band_lo
+            other.blockSignals(True)
+            other.setValue(lo if other is self.sp_shape_band_hi else hi)
+            other.blockSignals(False)
+        self._shape_redraw_static()
+
+    def _shape_custom_range(self):
+        lo, hi = self.sp_shape_band_lo.value(), self.sp_shape_band_hi.value()
+        hi = min(hi, self._n_bands - 1)
+        return min(lo, hi), hi
+
+    def _shape_gate(self):
+        return self.sp_shape_gate.value()
+
+    # -- Docks --------------------------------------------------------------
+
+    def _build_shape_scatter_dock(self):
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+
+        # Standing banner, not a transient status-bar line: while foreign
+        # geometries are on the plane the fact has to stay on screen, because
+        # the numbers look perfectly ordinary.
+        self.lbl_shape_foreign = QLabel('')
+        self.lbl_shape_foreign.setWordWrap(True)
+        self.lbl_shape_foreign.setStyleSheet(self.MY_YELLOW)
+        self.lbl_shape_foreign.setVisible(False)
+        v.addWidget(self.lbl_shape_foreign)
+
+        self.shape_scatter_gw = pg.GraphicsLayoutWidget()
+        self.shape_scatter_plot = self.shape_scatter_gw.addPlot()
+        self._style_compact(self.shape_scatter_plot)
+        self.shape_scatter_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.shape_scatter_plot.addItem(
+            pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#bbbbbb', width=1)))
+        self.shape_scatter_plot.addItem(
+            pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#bbbbbb', width=1)))
+
+        # Draw order matters: captures underneath, then the selection ring,
+        # then the trail, then the live dot on top of everything.
+        self.shape_scatter = pg.ScatterPlotItem(
+            pxMode=True, hoverable=True, hoverSize=15,
+            tip=lambda x, y, data: data['tip'] if isinstance(data, dict) else '')
+        self.shape_scatter.sigClicked.connect(self._on_shape_point_clicked)
+        self.shape_scatter_plot.addItem(self.shape_scatter)
+
+        # Bigger than the live dot (18) so the selection reads as a ring
+        # *around* a capture rather than competing with the live marker.
+        self.shape_sel_marker = pg.ScatterPlotItem(
+            pxMode=True, size=26, symbol='o', brush=None,
+            pen=pg.mkPen('#000000', width=2))
+        self.shape_scatter_plot.addItem(self.shape_sel_marker)
+
+        self.shape_trail_item = pg.ScatterPlotItem(pxMode=True, symbol='o', pen=None)
+        self.shape_scatter_plot.addItem(self.shape_trail_item)
+
+        self.shape_live_item = pg.ScatterPlotItem(pxMode=True, symbol='o')
+        self.shape_scatter_plot.addItem(self.shape_live_item)
+
+        self.lbl_shape_hint = pg.TextItem(anchor=(0.5, 0.5), color='#888888')
+        self.shape_scatter_plot.addItem(self.lbl_shape_hint)
+        v.addWidget(self.shape_scatter_gw, stretch=1)
+        return box
+
+    def _build_shape_curves_dock(self):
+        self.shape_curves_gw = pg.GraphicsLayoutWidget()
+        self.shape_curves_plot = self.shape_curves_gw.addPlot()
+        self._style_compact(self.shape_curves_plot, title='Band mean vs pulse width (self-normalised)')
+        self.shape_curves_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.shape_curves_plot.addItem(
+            pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#888888', width=1)))
+        self.shape_curves_plot.setYRange(-1.1, 1.1)
+        # Static curves (selection + checked signatures) are rebuilt wholesale,
+        # but only on load/selection/control changes. The live curve is a
+        # single persistent item updated in place: rebuilding 66 checked
+        # curves every redraw tick measured 65 ms against a 33 ms budget.
+        self._shape_curve_items = []
+        self.shape_curves_cross = pg.ScatterPlotItem(
+            pxMode=True, size=12, symbol='x', pen=pg.mkPen('#000000', width=2), brush=None)
+        self.shape_curves_plot.addItem(self.shape_curves_cross)
+        # Yellow, like every other live indicator on this tab.
+        self.shape_curves_live = self.shape_curves_plot.plot(
+            [], [], pen=pg.mkPen(_hl_ink(_HL_YELLOW), width=3))
+        self.shape_curves_live_cross = pg.ScatterPlotItem(
+            pxMode=True, size=14, symbol='x',
+            pen=pg.mkPen(_hl_ink(_HL_YELLOW), width=3), brush=None)
+        self.shape_curves_plot.addItem(self.shape_curves_live_cross)
+        return self.shape_curves_gw
+
+    def _build_shape_ladder_dock(self):
+        self.shape_ladder_gw = pg.GraphicsLayoutWidget()
+        self.shape_ladder_plot = self.shape_ladder_gw.addPlot()
+        self._style_compact(self.shape_ladder_plot, title='Crossing width by target (gated captures)')
+        self.shape_ladder_plot.showGrid(x=True, alpha=0.25)
+
+        # Sentinel rails: shaded, labelled, non-interactive. They are where
+        # CROSS_ALREADY_POS / CROSS_NEVER land, so a target that never crosses
+        # is visible as a fact rather than missing from the plot.
+        self.shape_ladder_rails = []
+        for colour in ('#d62728', '#1f77b4'):
+            # setAlpha, not an 8-digit hex string: Qt reads '#xxxxxxxx' as
+            # #AARRGGBB, so appending an alpha pair to an #RRGGBB silently
+            # yields a completely different colour.
+            fill = QColor(colour)
+            fill.setAlpha(34)
+            region = pg.LinearRegionItem(values=(0, 0), movable=False, brush=pg.mkBrush(fill),
+                                          pen=pg.mkPen(None))
+            region.setZValue(-10)
+            self.shape_ladder_plot.addItem(region)
+            self.shape_ladder_rails.append(region)
+        self.shape_ladder_rail_labels = []
+        for text, colour in (('positive by\nband 0', '#d62728'), ('never\ncrosses', '#1f77b4')):
+            item = pg.TextItem(text, anchor=(0.5, 0.0), color=colour)
+            item.setZValue(20)      # above the shaded rail it labels
+            self.shape_ladder_plot.addItem(item)
+            self.shape_ladder_rail_labels.append(item)
+
+        self.shape_ladder_points = pg.ScatterPlotItem(
+            pxMode=True, hoverable=True, hoverSize=14,
+            tip=lambda x, y, data: data['tip'] if isinstance(data, dict) else '')
+        self.shape_ladder_plot.addItem(self.shape_ladder_points)
+        # Live frame gets its own row at the top of the ladder, in the same
+        # visual language as the capture dots, plus a full-height line so its
+        # crossing can be read straight down against every target's dots. A
+        # bare vertical line on its own was too easy to mistake for grid.
+        self.shape_ladder_live = pg.InfiniteLine(
+            pos=0, angle=90, pen=pg.mkPen('#000000', width=2, style=Qt.PenStyle.DashLine))
+        self.shape_ladder_live.setVisible(False)
+        self.shape_ladder_plot.addItem(self.shape_ladder_live)
+        self.shape_ladder_live_pt = pg.ScatterPlotItem(
+            pxMode=True, hoverable=True, hoverSize=20,
+            tip=lambda x, y, data: data['tip'] if isinstance(data, dict) else '')
+        self.shape_ladder_live_pt.setZValue(15)
+        self.shape_ladder_plot.addItem(self.shape_ladder_live_pt)
+        self.shape_ladder_sep = pg.InfiniteLine(
+            pos=0, angle=0, pen=pg.mkPen('#999999', width=1, style=Qt.PenStyle.DotLine))
+        self.shape_ladder_sep.setVisible(False)
+        self.shape_ladder_plot.addItem(self.shape_ladder_sep)
+        self._shape_ladder_live_row = 0
+        return self.shape_ladder_gw
+
+    def _build_shape_tiles_dock(self):
+        self.shape_tiles_gw = pg.GraphicsLayoutWidget()
+        self.shape_tiles_plot = self.shape_tiles_gw.addPlot()
+        self.shape_tiles_plot.invertY(True)     # band 0 (shortest pulse) at the top
+        self._style_compact(self.shape_tiles_plot, title='Tile Inspector — no selection')
+        self.shape_tiles_img = pg.ImageItem()
+        self.shape_tiles_img.setColorMap(self.cm_div)   # red = positive/ferrous, blue = negative
+        self.shape_tiles_plot.addItem(self.shape_tiles_img)
+        return self.shape_tiles_gw
+
+    def _build_shape_gauges_dock(self):
+        """Four horizontal bars with numeric readouts. Each is its own mini
+        plot rather than one shared axis -- the four quantities have nothing
+        in common numerically, and each needs its own threshold line."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(4, 2, 4, 2)
+        v.setSpacing(1)
+        self.shape_gauges = {}
+        # (key, row label, unit shown after the value). The amplitude BAR is
+        # log₁₀ but its readout is plain mV, so the label — not the unit
+        # column — carries the "(log)" note.
+        specs = [
+            ('amp',      'Amp ‖Δ‖₂ (log)', ''),
+            ('snr',      'SNR',            ''),
+            ('settle',   'Settled',        'mV σ'),
+            ('baseline', 'Air age',        's'),
+        ]
+        for key, name, unit in specs:
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            lbl = QLabel(name)
+            lbl.setMinimumWidth(64)
+            row.addWidget(lbl)
+
+            # Height budget: the scale axis takes a fixed ~16 px and the
+            # GraphicsLayout's default margins another ~18, so a 24 px strip
+            # left the viewbox 4.5 px tall and the bar rendered as a hairline.
+            # Zero the margins and give each row up to 46 px -> ~28 px of
+            # viewbox. Min/max rather than setFixedHeight: four fixed 46 px
+            # rows put a 191 px floor under the whole dock, which the dock
+            # splitter then could not honour a saved layout against.
+            gw = pg.GraphicsLayoutWidget()
+            gw.setMinimumHeight(26)
+            gw.setMaximumHeight(46)
+            gw.ci.layout.setContentsMargins(0, 0, 0, 0)
+            gw.ci.layout.setSpacing(0)
+            plot = gw.addPlot()
+            plot.hideAxis('left')
+            plot.setMouseEnabled(x=False, y=False)
+            plot.hideButtons()
+            plot.setYRange(-0.5, 0.5, padding=0)
+            font = QFont()
+            font.setPointSize(7)
+            ax = plot.getAxis('bottom')
+            ax.setStyle(tickFont=font, tickLength=2)
+            ax.setHeight(16)
+            bar = pg.BarGraphItem(x0=[0], y=[0], height=0.8, width=[0], brush='#4caf50')
+            plot.addItem(bar)
+            gate_line = pg.InfiniteLine(pos=0, angle=90,
+                                        pen=pg.mkPen('#000000', width=1,
+                                                      style=Qt.PenStyle.DashLine))
+            plot.addItem(gate_line)
+            row.addWidget(gw, stretch=1)
+
+            value = QLabel('—')
+            value.setMinimumWidth(88)
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(value)
+            unit_lbl = QLabel(unit)
+            unit_lbl.setMinimumWidth(46 if unit else 0)
+            row.addWidget(unit_lbl)
+            v.addLayout(row)
+            self.shape_gauges[key] = {'plot': plot, 'bar': bar, 'gate': gate_line,
+                                       'value': value, 'unit': unit_lbl, 'unit_text': unit}
+        v.addStretch(1)
+        return w
+
+    # -- Features -----------------------------------------------------------
+
+    def _shape_invalidate_features(self):
+        self._shape_feat_cache = {}
+        self._shape_geom_warned = False
+
+    def _shape_feature_dict(self, vec, pulses_us, n_delays, amp, splithalf):
+        """The per-capture feature bundle every panel reads. `u` (the unit
+        shape) is kept so the custom-band-range axis can be recomputed at draw
+        time when the spinboxes move, without invalidating the whole cache."""
+        n_bands = len(pulses_us)
+        u = pimd_shape.unit_shape(vec)
+        early, mid, late = pimd_shape.default_band_ranges(n_bands)
+        snr = pimd_shape.snr(amp, splithalf)
+        return {
+            'vec': vec, 'u': u, 'pulses_us': pulses_us,
+            'n_bands': n_bands, 'n_delays': n_delays,
+            'early': pimd_shape.band_range_mean(u, early[0], early[1], n_bands, n_delays),
+            'mid':   pimd_shape.band_range_mean(u, mid[0], mid[1], n_bands, n_delays),
+            'late':  pimd_shape.band_range_mean(u, late[0], late[1], n_bands, n_delays),
+            'crossing': pimd_shape.crossing_us(vec, pulses_us, n_delays),
+            'decay':    pimd_shape.decay_persistence(vec, n_bands, n_delays),
+            'log_amp':  math.log10(amp) if amp > 0 else float('nan'),
+            'amp': amp, 'splithalf': splithalf, 'snr': snr,
+            'family': pimd_shape.family(vec, n_bands, n_delays),
+            # Defaults so a live-frame dict is structurally the same as a
+            # capture's. Both are correct for the live frame by definition:
+            # it is always on the live profile and is never a saved scratch.
+            'foreign': False, 'is_scratch': False,
+        }
+
+    def _shape_capture_features(self):
+        """Feature dicts for every loaded capture, keyed the same as
+        self._analysis_templates. Cached; the cache is dropped whenever the
+        store or the profile changes.
+
+        Captures from a DIFFERENT profile geometry are included, not skipped
+        (v1.42) -- but flagged `foreign` and drawn distinctly. The reasoning,
+        since this is the one place in the app that does mix geometries:
+
+        The overlay path in _refresh_analysis_overlays() must refuse, because
+        it plots raw cell-by-cell curves where cell index N is a different
+        (pulse, threshold) pair under a different profile -- superimposing
+        those is meaningless. These features are not that: every pimd_shape
+        function takes its geometry explicitly and normalises through it, so a
+        crossing width is µs either way and a family verdict is a sign either
+        way. They are comparable in KIND.
+
+        They are NOT calibrated against each other -- a crossing is
+        interpolated on that profile's own pulse ladder, and decay persistence
+        reads that profile's own threshold columns -- so every foreign point
+        is marked in the scatter, the ladder and the tile, and the Scatter dock
+        carries a standing banner naming the count. This is a human
+        exploration view, not a dataset: DESIGN §10's "frames from different
+        profile geometries must never be mixed in one dataset" governs corpus
+        builds, and nothing here writes one. Scratch saves still refuse a
+        geometry mismatch outright.
+
+        Genuinely unusable captures (a shape that isn't a rectangular
+        n_bands x n_delays, or too few bands/delays for the features to be
+        defined) are still dropped."""
+        unusable = 0
+        for key, tpl in self._analysis_templates.items():
+            if key in self._shape_feat_cache:
+                continue
+            pulses_us = list(tpl.get('pulses_us') or self._pulse_us_sorted)
+            n_delays  = int(tpl.get('n_delays') or self._n_cells)
+            vec = np.asarray(tpl['shape'], dtype=float)
+            try:
+                feat = self._shape_feature_dict(
+                    vec, pulses_us, n_delays, tpl['amp'], tpl['splithalf'])
+            except ValueError:
+                unusable += 1
+                self._shape_feat_cache[key] = None
+                continue
+            target_id = tpl.get('target_id') or ''
+            foreign = (len(pulses_us) != self._n_bands or n_delays != self._n_cells
+                       or (tpl.get('profile_name') or self._profile.get('name'))
+                       != self._profile.get('name'))
+            feat.update({
+                'key': key, 'label': tpl['label'], 'target_id': target_id,
+                'short_name': tpl.get('short_name', ''),
+                'distance_mm': tpl.get('distance_mm', ''),
+                'quality': tpl.get('quality', ''), 'session': tpl.get('session', ''),
+                'is_scratch': target_id.startswith(SCRATCH_ID_PREFIX),
+                'profile_name': tpl.get('profile_name', ''),
+                'geom': '{0}×{1}'.format(len(pulses_us), n_delays),
+                'foreign': foreign,
+            })
+            self._shape_feat_cache[key] = feat
+        if unusable and not self._shape_geom_warned:
+            self._shape_geom_warned = True
+            self.statusBar().showMessage(
+                'Shape Space: dropped {0} capture(s) whose cell count is not a rectangular '
+                'band × delay geometry'.format(unusable))
+        return {k: v for k, v in self._shape_feat_cache.items()
+                if v is not None and k in self._analysis_templates}
+
+    # -- Air reference ------------------------------------------------------
+    # Two modes, toggled by Space and by nothing else. See the block comment
+    # on _shape_air_mode in __init__.
+    #
+    # A previous revision auto-froze the reference when mean |Δ| crossed a
+    # Detect threshold and auto-released when it fell back, with a settle gate
+    # in front of both. All of that is gone by direction. One measured fact is
+    # worth keeping as to why it was never going to be reliable anyway: an
+    # absolute |Δ| against a frozen reference cannot detect removal under
+    # drift, because after a long hold the accumulated drift exceeds the
+    # target's own |Δ| — a spanner @60 mm reads |Δ| 2.8 mV while 150 s of
+    # drift reads 5.2 mV, so taking the object away makes |Δ| go *up*.
+
+    def _shape_air_held(self):
+        return self._shape_air_mode == 'measure'
+
+    def _shape_air_restart(self):
+        """Back to air mode with a fresh, empty buffer.
+
+        The buffer is cleared rather than kept: the counter restarting at 0
+        and the indicator going back to yellow is what makes the mode change
+        unambiguous at a glance, and anything collected during a measurement
+        had a target in front of the coil."""
+        self._shape_air_mode   = 'air'
+        self._shape_air_buf    = deque(maxlen=max(2, self.sp_shape_air_n.value()))
+        self._shape_air_ref    = None
+        self._shape_air_ref_ts = None
+        self._shape_trail.clear()
+
+    def _shape_air_ingest(self, now, raw, glitch_mask):
+        """Per-W-frame air tracking, called from process_packet before the
+        live features are computed (they read the reference this maintains).
+
+        In 'measure' this does nothing at all -- the reference is frozen and
+        only Space moves the mode."""
+        if self._shape_air_buf is None or self._shape_air_buf.maxlen != max(
+                2, self.sp_shape_air_n.value()):
+            # Picks up a changed Air-frames value; deque(maxlen) is immutable.
+            old = list(self._shape_air_buf or [])
+            self._shape_air_buf = deque(old, maxlen=max(2, self.sp_shape_air_n.value()))
+
+        if self._shape_air_held():
+            return
+
+        # Glitch frames stay excluded. That is the existing 64-frame
+        # ADC-artifact median filter (440-880 mV bit-truncation events), not
+        # one of the removed thresholds -- one of those in the reference would
+        # corrupt every subsequent measurement.
+        if not glitch_mask.any():
+            self._shape_air_buf.append(raw / 1000.0)
+        if len(self._shape_air_buf) >= 2:
+            self._shape_air_ref = np.median(np.array(self._shape_air_buf, dtype=float), axis=0)
+            self._shape_air_ref_ts = now
+
+    def _on_shape_air_space(self):
+        """Space on the Shape Space tab -- the only thing that changes mode.
+
+        air -> measure: snapshot the last 'frames' of air as a fixed
+        reference and start showing cursor movement against it.
+        measure -> air: back to rolling air, buffer cleared."""
+        if self._shape_air_held():
+            self._shape_air_restart()
+            self.statusBar().showMessage('Shape Space: back to air capture')
+            return
+        n = len(self._shape_air_buf or ())
+        if n < 2:
+            self.statusBar().showMessage(
+                'Shape Space: need at least 2 air frames to take a reference '
+                '(have {0})'.format(n))
+            return
+        # The reference is already the buffer's running median; measure mode
+        # simply stops it being refreshed. Timestamp it here so the Air-age
+        # gauge counts from the snapshot rather than from the last update.
+        self._shape_air_mode   = 'measure'
+        self._shape_air_ref_ts = time.time()
+        self._shape_trail.clear()
+        cap = self._shape_air_buf.maxlen
+        self.statusBar().showMessage(
+            'Shape Space: air reference taken on {0} frame(s){1} — Space returns to '
+            'air'.format(n, '' if n >= cap else ' (thin: {0} of {1})'.format(n, cap)))
+
+    def _shape_air_status(self):
+        """(text, stylesheet) for the air status label. Three states on the
+        Training group's colour ladder: yellow while the air buffer fills,
+        green once it holds a full 'frames', blue while measuring."""
+        buf = self._shape_air_buf
+        n, cap = (len(buf), buf.maxlen) if buf is not None else (0, 0)
+        if self._shape_air_held():
+            return ('MEASURING — Space for air', self.MY_BLUE)
+        if n < cap:
+            return ('AIR {0}/{1}'.format(n, cap), self.MY_YELLOW)
+        return ('AIR {0}/{1} — Space to measure'.format(n, cap), self.MY_GREEN)
+
+    # -- Live frame ---------------------------------------------------------
+
+    def _shape_live_window(self):
+        """(vec, splithalf) for the current frame, in mV -- BOTH derived from
+        the same window, mirroring pimd_features.compute_plateau_stats():
+        `vec` is the window's per-cell median minus the Shape Space AIR
+        REFERENCE (not the shared static baseline — see the _shape_air_mode
+        comment in __init__ for why a one-shot baseline cannot work here), and
+        `splithalf` is the L2 of the two half-medians' difference, halved.
+        (None, None) if there is no reference or too few frames.
+
+        While the reference is rolling it is the median of very nearly these
+        same frames, so `vec` is ~0 by construction and the dot sits at the
+        centre. That is the intended idle state, not a degenerate one.
+
+        The single window is the whole point, and it is worth spelling out
+        because getting it wrong is silent. Amplitude and noise must be
+        averaged over the SAME number of frames or their ratio is not an SNR.
+        An earlier version took `vec` from _compute_analysis_matrix() (a mean
+        over the Analysis tab's Avg-N frames, default 1) while the noise came
+        from a 50-frame split-half: that inflates the ratio by roughly
+        sqrt(N_window / N_avg), and bench-level air noise then cleared the 5.0
+        gate on its own -- the live dot would have gone confidently coloured
+        on nothing at all, which is exactly what the gate exists to prevent.
+
+        `vec` is returned in pimd_shape's convention (band-major, pulse
+        ascending, thresholds high->low), so live and stored shapes are
+        directly comparable."""
+        n_win  = self.sp_shape_win_n.value()
+        recent = list(self._rolling_buf)[-n_win:]
+        if len(recent) < 4:
+            return None, None
+        ref = self._shape_air_ref
+        if ref is None:
+            return None, None
+        mat = np.array([arr for _, arr in recent], dtype=float) / 1000.0
+        if mat.shape[1] != ref.size:
+            return None, None
+        delta = np.median(mat, axis=0) - ref
+        vec = delta.reshape(self._n_bands, self._n_cells)[
+            self._pulse_sort_order][:, self._cell_sort_order].reshape(-1)
+        # The reference cancels in the half-difference, so the noise floor is
+        # taken on the raw frames.
+        half = len(mat) // 2
+        splithalf = float(np.linalg.norm(
+            np.median(mat[:half], axis=0) - np.median(mat[half:], axis=0)) / 2.0)
+        return vec, splithalf
+
+    def _shape_ingest_frame(self):
+        """Per-W-frame live feature update, called from process_packet. Cheap
+        (one reshape + a handful of reductions over n_channels values at the
+        ~3 Hz sweep rate), and done regardless of which tab is visible so the
+        trail is already populated when Shape Space is first shown.
+
+        Only frames taken in 'measure' mode join the trail: in 'air' the
+        reference is the running median of very nearly these same frames, so
+        the cursor is pinned at the origin and a trail would say nothing."""
+        vec, splithalf = self._shape_live_window()
+        if vec is None or splithalf is None:
+            self._shape_live = None
+            return
+        try:
+            feat = self._shape_feature_dict(
+                vec, list(self._pulse_us_sorted), self._n_cells,
+                pimd_shape.amp_l2(vec), splithalf)
+        except ValueError:
+            self._shape_live = None
+            return
+        held = self._shape_air_held()
+        feat['air_mode'] = self._shape_air_mode
+        # Kept for the gauges and the hover tip; it no longer decides anything
+        # about how the live frame is DRAWN -- the cursor is always yellow.
+        feat['gated'] = feat['snr'] >= self._shape_gate()
+        self._shape_live = feat
+        if held:
+            self._shape_trail.append(feat)
+        else:
+            self._shape_trail.clear()
+
+    # -- Axis / colour dispatch ---------------------------------------------
+
+    def _shape_axis_value(self, feat, key):
+        """Feature value for an axis/colour key. 'custom' is derived here (not
+        cached) so the band-range spinboxes take effect immediately."""
+        if key == 'custom':
+            lo, hi = self._shape_custom_range()
+            return pimd_shape.band_range_mean(
+                feat['u'], lo, hi, feat['n_bands'], feat['n_delays'])
+        if key == 'distance':
+            try:
+                return float(feat['distance_mm'])
+            except (TypeError, ValueError):
+                return float('nan')
+        return feat.get(key, float('nan'))
+
+    def _shape_plot_value(self, feat, key):
+        """Axis value in PLOT coordinates -- log10 for the pulse-width axes,
+        whose ticks are relabelled back to µs by _shape_axis_ticks()."""
+        val = self._shape_axis_value(feat, key)
+        if key in SHAPE_LOG_US_AXES:
+            return math.log10(val) if val and val > 0 else float('nan')
+        return val
+
+    def _shape_axis_ticks(self, key):
+        """Tick spec for a plot axis, or None to leave pyqtgraph's automatic
+        ticks alone. The crossing axis gets the profile's own pulse ladder
+        plus a label on each sentinel rail, so 'never crosses' reads as a
+        stated outcome instead of an unexplained cluster at 200."""
+        if key not in SHAPE_LOG_US_AXES:
+            return None
+        ticks = [(math.log10(pimd_shape.CROSS_ALREADY_POS), '≤{0:.0f}\n(pos)'.format(
+            self._pulse_us_sorted[0]))]
+        ticks += [(math.log10(p), '{0:.0f}'.format(p)) for p in self._pulse_us_sorted]
+        ticks.append((math.log10(pimd_shape.CROSS_NEVER), 'never'))
+        return [ticks]
+
+    def _shape_axis_label(self, key):
+        for k, label in SHAPE_AXES + SHAPE_COLOUR_EXTRA:
+            if k == key:
+                return label
+        return key
+
+    def _rebuild_shape_axes(self):
+        """Reapply axis labels/ticks and resize the custom-band spinboxes to
+        the live profile. Called on build and on every profile change."""
+        if not hasattr(self, 'sp_shape_band_lo'):
+            return
+        hi_max = max(0, self._n_bands - 1)
+        for sp in (self.sp_shape_band_lo, self.sp_shape_band_hi):
+            sp.blockSignals(True)
+            sp.setRange(0, hi_max)
+            sp.blockSignals(False)
+        if self.sp_shape_band_hi.value() == 0:
+            self.sp_shape_band_hi.blockSignals(True)
+            self.sp_shape_band_hi.setValue(hi_max)
+            self.sp_shape_band_hi.blockSignals(False)
+
+        x_key = self.cb_shape_x.currentData()
+        y_key = self.cb_shape_y.currentData()
+        for axis_name, key in (('bottom', x_key), ('left', y_key)):
+            axis = self.shape_scatter_plot.getAxis(axis_name)
+            axis.setTicks(self._shape_axis_ticks(key))
+            # pyqtgraph's auto SI prefix is left ON (its default, and what
+            # every other plot in this file uses): band-range means are ~0.1,
+            # so the axis renders them x1000 and says so in the label. Turning
+            # it off with enableAutoSIPrefix(False) does NOT clear the scale
+            # already latched into autoSIPrefixScale -- it only stops the
+            # label disclosing it, which is strictly worse.
+            axis.setLabel(self._shape_axis_label(key), **{'font-size': '7pt'})
+
+        # Band Curves and the Crossing Ladder both live on the log-µs axis.
+        for plot in (self.shape_curves_plot, self.shape_ladder_plot):
+            ax = plot.getAxis('bottom')
+            ax.setTicks(self._shape_axis_ticks('crossing'))
+            ax.setLabel('Pulse width (µs)', **{'font-size': '7pt'})
+
+    # -- Drawing ------------------------------------------------------------
+
+    def _shape_colour_for(self, feat, colour_key, gated, lo=None, hi=None):
+        if not gated:
+            return QColor(SHAPE_FAMILY_COLOURS[pimd_shape.LOW_SNR])
+        if colour_key == 'none':
+            return QColor('#1f77b4')
+        if colour_key == 'family':
+            return QColor(SHAPE_FAMILY_COLOURS.get(feat['family'], '#666666'))
+        val = self._shape_axis_value(feat, colour_key)
+        if not np.isfinite(val) or lo is None or hi is None or hi <= lo:
+            return QColor('#666666')
+        return self.cm_seq.map((val - lo) / (hi - lo), mode='qcolor')
+
+    def _shape_redraw_static(self):
+        """Everything that only changes when the store, the selection or a
+        control-bar setting changes -- axes, capture points, the ladder, the
+        tile. Cheap enough to just run on those events rather than per frame."""
+        if not hasattr(self, 'shape_scatter'):
+            return
+        self._rebuild_shape_axes()
+        self._update_shape_scatter_captures()
+        self._update_shape_ladder()
+        self._update_shape_tile()
+        self._update_shape_curves()
+
+    def _update_shape_scatter_captures(self):
+        feats = self._shape_capture_features()
+        x_key = self.cb_shape_x.currentData()
+        y_key = self.cb_shape_y.currentData()
+        colour_key = self.cb_shape_colour.currentData()
+        gate = self._shape_gate()
+
+        # Continuous colour-by needs the range over the drawn set first.
+        lo = hi = None
+        if colour_key not in ('family', 'none'):
+            vals = [self._shape_axis_value(f, colour_key) for f in feats.values()]
+            vals = [v for v in vals if np.isfinite(v)]
+            if vals:
+                lo, hi = min(vals), max(vals)
+
+        spots = []
+        for key, feat in feats.items():
+            x = self._shape_plot_value(feat, x_key)
+            y = self._shape_plot_value(feat, y_key)
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            gated = feat['snr'] >= gate
+            colour = self._shape_colour_for(feat, colour_key, gated, lo, hi)
+            spots.append({
+                'pos': (x, y),
+                'size': 11 if feat['is_scratch'] else 9,
+                # Symbol = (other profile?, scratch object?) -- see _SHAPE_SYMBOLS.
+                'symbol': self._shape_marker_symbol(feat),
+                # Filled = gated, hollow = below gate (the app's existing
+                # convention for "this number is trustworthy").
+                'brush': pg.mkBrush(colour) if gated else None,
+                'pen': self._shape_marker_pen(colour, feat['foreign']),
+                'data': {'key': key, 'tip': self._shape_tip(feat)},
+            })
+        self.shape_scatter.setData(spots)
+        self._update_shape_foreign_banner(feats)
+
+        empty = not spots
+        self.lbl_shape_hint.setVisible(empty)
+        if empty:
+            self.lbl_shape_hint.setText(
+                'No signatures loaded — use "Load signatures…" above\n'
+                '(shares the Analysis tab\'s loaded set)')
+            self.shape_scatter_plot.setXRange(-1, 1)
+            self.shape_scatter_plot.setYRange(-1, 1)
+            self.lbl_shape_hint.setPos(0, 0)
+        else:
+            # Re-enable auto-range: the empty-state setXRange/setYRange above
+            # latches the view off auto, and the feature axes have wildly
+            # different natural scales (early mean spans ~0.2, crossing µs
+            # spans ~1.4 decades) -- an axis change with a latched view puts
+            # every point off screen.
+            self.shape_scatter_plot.enableAutoRange()
+        self._update_shape_selection_marker()
+
+    # Marker shape carries the two "this is not an ordinary corpus capture"
+    # facts, because colour is spoken for (family / colour-by) and fill is
+    # spoken for (gated). A dashed outline alone was tried first and reads
+    # fine on a hollow marker but is nearly invisible on a filled 9 px one,
+    # so shape does the work and the dash is kept as reinforcement.
+    #   (foreign, scratch) -> symbol
+    _SHAPE_SYMBOLS = {
+        (False, False): 'o',      # circle  — live profile, registered target
+        (False, True):  'star',   # star    — live profile, scratch object
+        (True,  False): 's',      # square  — other profile, registered target
+        (True,  True):  'd',      # diamond — other profile, scratch object
+    }
+
+    @classmethod
+    def _shape_marker_symbol(cls, feat):
+        return cls._SHAPE_SYMBOLS[(bool(feat['foreign']), bool(feat['is_scratch']))]
+
+    @staticmethod
+    def _shape_marker_pen(colour, foreign):
+        """Outline for a capture marker; dashed for a foreign geometry, to
+        reinforce the symbol (and to stay legible on hollow, below-gate
+        markers where the fill can't help)."""
+        return (pg.mkPen(colour, width=2, style=Qt.PenStyle.DashLine) if foreign
+                else pg.mkPen(colour, width=2))
+
+    def _update_shape_foreign_banner(self, feats):
+        """Names the foreign geometries actually on screen. Counts and profile
+        names, not a generic warning: 'these 12 came from cal_72_air_v3 (8×9)'
+        is actionable, 'some data may differ' is not."""
+        if not hasattr(self, 'lbl_shape_foreign'):
+            return
+        groups = {}
+        for feat in feats.values():
+            if not feat['foreign']:
+                continue
+            key = (feat['profile_name'] or 'unnamed profile', feat['geom'])
+            groups[key] = groups.get(key, 0) + 1
+        self.lbl_shape_foreign.setVisible(bool(groups))
+        if not groups:
+            return
+        parts = ['{0} from {1} ({2})'.format(n, name, geom)
+                 for (name, geom), n in sorted(groups.items())]
+        self.lbl_shape_foreign.setText(
+            '⚠ Mixed profile geometries — {0}, drawn as squares (diamonds if scratch) '
+            'with dashed outlines. Live profile is {1} ({2}×{3}), drawn as circles '
+            '(stars if scratch). Features are comparable in kind but NOT calibrated '
+            'across ladders: a crossing width is interpolated on its own profile\'s '
+            'pulse ladder, and decay persistence reads its own threshold '
+            'columns.'.format(' · '.join(parts), self._profile.get('name', '?'),
+                              self._n_bands, self._n_cells))
+
+    @staticmethod
+    def _shape_tip(feat):
+        cross = feat['crossing']
+        if cross == pimd_shape.CROSS_NEVER:
+            cross_txt = 'never'
+        elif cross == pimd_shape.CROSS_ALREADY_POS:
+            cross_txt = 'already positive'
+        else:
+            cross_txt = '{0:.1f} µs'.format(cross)
+        tip = ('{0} @{1}\nfamily: {2}   crossing: {3}\ndecay: {4:.2f}\n'
+               'amp: {5:.2f} mV   SNR: {6:.1f}\nquality: {7}'.format(
+                   feat['target_id'] or '?',
+                   '{0} mm'.format(feat['distance_mm']) if feat['distance_mm'] else 'air',
+                   feat['family'], cross_txt, feat['decay'], feat['amp'], feat['snr'],
+                   feat['quality'] or '?'))
+        if feat['foreign']:
+            tip += '\n⚠ other profile: {0} ({1}) — not calibrated against the live one'.format(
+                feat['profile_name'] or 'unnamed', feat['geom'])
+        return tip
+
+    def _update_shape_selection_marker(self):
+        feats = self._shape_capture_features()
+        feat = feats.get(self._shape_selected_key)
+        if feat is None:
+            self.shape_sel_marker.setData([])
+            return
+        x = self._shape_plot_value(feat, self.cb_shape_x.currentData())
+        y = self._shape_plot_value(feat, self.cb_shape_y.currentData())
+        if np.isfinite(x) and np.isfinite(y):
+            self.shape_sel_marker.setData([{'pos': (x, y)}])
+        else:
+            self.shape_sel_marker.setData([])
+
+    def _on_shape_point_clicked(self, _item, points, _ev=None):
+        if not len(points):
+            return
+        data = points[0].data()
+        if not isinstance(data, dict):
+            return
+        self._shape_selected_key = data['key']
+        self._update_shape_selection_marker()
+        self._update_shape_tile()
+        self._update_shape_curves()
+
+    def _update_shape_live_scatter(self):
+        """Live cursor + trail.
+
+        The cursor is ALWAYS yellow and always the same size, in both modes.
+        It deliberately carries no family colour and no gated/ungated tint:
+        the family verdict belongs to the loaded captures it is being compared
+        against, and a cursor that changes colour as it moves reads as the
+        instrument asserting something it has not been asked to assert."""
+        feat = self._shape_live
+        x_key = self.cb_shape_x.currentData()
+        y_key = self.cb_shape_y.currentData()
+        if feat is None:
+            self.shape_live_item.setData([])
+            self.shape_trail_item.setData([])
+            return
+        held = self._shape_air_held()
+        if not held:
+            # Air mode: the reference is the running median of very nearly
+            # these frames, so the delta is ~0 -- pin to the origin where that
+            # is the meaningful "no signal" point, and hide it where it isn't
+            # (see SHAPE_CENTRED_AXES). Its computed position is not zero: the
+            # residual's unit shape still has a definite direction from the
+            # reference's half-window drift lag, which parked it inside the
+            # non-ferrous cluster.
+            if x_key not in SHAPE_CENTRED_AXES or y_key not in SHAPE_CENTRED_AXES:
+                self.shape_live_item.setData([])
+                self.shape_trail_item.setData([])
+                return
+            x = y = 0.0
+        else:
+            x = self._shape_plot_value(feat, x_key)
+            y = self._shape_plot_value(feat, y_key)
+        if not (np.isfinite(x) and np.isfinite(y)):
+            self.shape_live_item.setData([])
+            self.shape_trail_item.setData([])
+            return
+
+        yellow = _hl_qcolor(_HL_YELLOW)
+        self.shape_live_item.setData([{
+            'pos': (x, y), 'size': 16, 'symbol': 'o',
+            'brush': pg.mkBrush(yellow), 'pen': pg.mkPen('#000000', width=2)}])
+
+        n_trail = self.sp_shape_trail.value()
+        if not held or n_trail <= 0:
+            self.shape_trail_item.setData([])
+            return
+        trail = list(self._shape_trail)[-n_trail:]
+        spots = []
+        for i, tf in enumerate(trail):
+            tx = self._shape_plot_value(tf, x_key)
+            ty = self._shape_plot_value(tf, y_key)
+            if not (np.isfinite(tx) and np.isfinite(ty)):
+                continue
+            frac = (i + 1) / len(trail)          # oldest faintest
+            colour = QColor(yellow)
+            colour.setAlpha(int(30 + 170 * frac))
+            spots.append({'pos': (tx, ty), 'size': 4 + 5 * frac,
+                          'brush': pg.mkBrush(colour), 'pen': None})
+        self.shape_trail_item.setData(spots)
+
+    @staticmethod
+    def _shape_band_curve(feat):
+        """(xs, ys) for one band-mean profile: log10 pulse widths against band
+        means normalised to their own max |value|, so shapes compare without
+        amplitude drowning the picture. None if the shape is all zero."""
+        means = pimd_shape.band_means(feat['vec'], feat['n_bands'], feat['n_delays'])
+        peak = float(np.max(np.abs(means)))
+        if peak <= 0:
+            return None
+        return [math.log10(p) for p in feat['pulses_us']], means / peak
+
+    def _update_shape_curves(self):
+        """Static half of the Band Curves dock: the selected capture (bold) and
+        the checked signatures. Rebuilt on load/selection/control changes only
+        -- see _update_shape_curves_live() for the per-tick half."""
+        if not hasattr(self, 'shape_curves_plot'):
+            return
+        for item in self._shape_curve_items:
+            self.shape_curves_plot.removeItem(item)
+        self._shape_curve_items = []
+
+        feats = self._shape_capture_features()
+        # Selection first (drawn bold), then whatever is checked in the shared
+        # signature list -- the same "what am I comparing" control the
+        # Analysis tab's overlays use.
+        keys = []
+        if self._shape_selected_key in feats:
+            keys.append(self._shape_selected_key)
+        for key in self._checked_template_keys():
+            if key in feats and key not in keys:
+                keys.append(key)
+
+        cross_spots = []
+        for i, key in enumerate(keys):
+            feat = feats[key]
+            curve_xy = self._shape_band_curve(feat)
+            if curve_xy is None:
+                continue
+            colour = QColor(SHAPE_FAMILY_COLOURS.get(feat['family'], '#666666'))
+            width = 3 if i == 0 and key == self._shape_selected_key else 1
+            # Dashed here too, and for a sharper reason than elsewhere: a
+            # foreign curve's points sit on ITS pulse ladder, so its vertices
+            # need not line up with the live profile's x ticks at all.
+            pen = pg.mkPen(colour, width=width,
+                           style=Qt.PenStyle.DashLine if feat['foreign'] else Qt.PenStyle.SolidLine)
+            self._shape_curve_items.append(self.shape_curves_plot.plot(*curve_xy, pen=pen))
+            cross = feat['crossing']
+            if cross not in (pimd_shape.CROSS_NEVER, pimd_shape.CROSS_ALREADY_POS):
+                cross_spots.append({'pos': (math.log10(cross), 0.0)})
+        self.shape_curves_cross.setData(cross_spots)
+
+    def _update_shape_curves_live(self):
+        """Live half of the Band Curves dock -- one persistent curve item
+        updated in place, so a tick costs the same whether 1 or 66 signatures
+        are checked. Drawn only in 'measure': in air mode the band profile is
+        the normalised shape of a ~0 delta, i.e. noise."""
+        if not hasattr(self, 'shape_curves_live'):
+            return
+        live = self._shape_live
+        curve_xy = self._shape_band_curve(live) if (
+            live is not None and self._shape_air_held()) else None
+        if curve_xy is None:
+            self.shape_curves_live.setData([], [])
+            self.shape_curves_live_cross.setData([])
+            return
+        self.shape_curves_live.setData(*curve_xy)
+        cross = live['crossing']
+        self.shape_curves_live_cross.setData(
+            [{'pos': (math.log10(cross), 0.0)}]
+            if cross not in (pimd_shape.CROSS_NEVER, pimd_shape.CROSS_ALREADY_POS) else [])
+
+    def _update_shape_ladder(self):
+        """One row per target, sorted by median crossing width; one dot per
+        gated capture. Below-gate captures are left out entirely -- an
+        ungated crossing width is a coin toss, and putting it on the ladder
+        would imply an ordering that isn't there."""
+        if not hasattr(self, 'shape_ladder_plot'):
+            return
+        feats = self._shape_capture_features()
+        gate = self._shape_gate()
+        by_target = {}
+        for feat in feats.values():
+            if feat['snr'] < gate:
+                continue
+            by_target.setdefault(feat['target_id'] or '?', []).append(feat)
+
+        x_lo = math.log10(pimd_shape.CROSS_ALREADY_POS)
+        x_hi = math.log10(pimd_shape.CROSS_NEVER)
+        order = sorted(by_target, key=lambda t: float(
+            np.median([f['crossing'] for f in by_target[t]])))
+        spots, ticks = [], []
+        for row, target in enumerate(order):
+            ticks.append((row, target))
+            for feat in by_target[target]:
+                colour = QColor(SHAPE_FAMILY_COLOURS.get(feat['family'], '#666666'))
+                spots.append({
+                    'pos': (math.log10(feat['crossing']), row),
+                    'size': 10, 'symbol': self._shape_marker_symbol(feat),
+                    'brush': pg.mkBrush(colour),
+                    'pen': self._shape_marker_pen(QColor('#333333'), feat['foreign']),
+                    'data': {'tip': self._shape_tip(feat)},
+                })
+        # Reserve the top row for the live frame and label it, so there is
+        # somewhere for the live dot to sit even before any target is
+        # presented -- an empty row reads as "nothing live", which is honest;
+        # a missing row reads as a bug.
+        n_rows = max(1, len(order))
+        self._shape_ladder_live_row = n_rows
+        ticks.append((n_rows, '▶ LIVE'))
+        self.shape_ladder_points.setData(spots)
+        self.shape_ladder_plot.getAxis('left').setTicks([ticks])
+        self.shape_ladder_plot.setYRange(-0.7, n_rows + 0.5, padding=0)
+        self.shape_ladder_plot.setXRange(x_lo - 0.04, x_hi + 0.04, padding=0)
+        self.shape_ladder_sep.setPos(n_rows - 0.5)
+        self.shape_ladder_sep.setVisible(True)
+
+        # Rails sit just outside the real pulse ladder, on the sentinel values.
+        first, last = math.log10(self._pulse_us_sorted[0]), math.log10(self._pulse_us_sorted[-1])
+        self.shape_ladder_rails[0].setRegion((x_lo - 0.04, (x_lo + first) / 2.0))
+        self.shape_ladder_rails[1].setRegion(((last + x_hi) / 2.0, x_hi + 0.04))
+        self.shape_ladder_rail_labels[0].setText(
+            'positive by\n{0:.0f} µs'.format(self._pulse_us_sorted[0]))
+        # Anchored just under the top of the target rows -- row 0 is the
+        # bottom row, and n_rows is now the LIVE row, so n_rows - 0.6 is clear
+        # of both the capture dots and the live marker.
+        label_y = n_rows - 0.6
+        self.shape_ladder_rail_labels[0].setPos((x_lo - 0.04 + (x_lo + first) / 2.0) / 2.0, label_y)
+        self.shape_ladder_rail_labels[1].setPos(((last + x_hi) / 2.0 + x_hi + 0.04) / 2.0, label_y)
+
+        self._update_shape_ladder_live()
+
+    def _update_shape_ladder_live(self):
+        """Live frame on the ladder: a marker on the reserved LIVE row plus a
+        matching full-height line down through the target rows. Cheap enough
+        to run every redraw tick (two setData calls), which is why it is split
+        out of _update_shape_ladder()'s static rebuild.
+
+        Yellow, like every other live indicator, and shown only in 'measure':
+        in air mode the crossing width of a ~0 delta is meaningless, and
+        putting it on an ordered ladder would imply a rank that isn't there."""
+        if not hasattr(self, 'shape_ladder_live_pt'):
+            return
+        live = self._shape_live
+        show_live = live is not None and self._shape_air_held()
+        self.shape_ladder_live.setVisible(bool(show_live))
+        if not show_live:
+            self.shape_ladder_live_pt.setData([])
+            return
+        x = math.log10(live['crossing'])
+        colour = _hl_ink(_HL_YELLOW)
+        self.shape_ladder_live.setPos(x)
+        self.shape_ladder_live.setPen(pg.mkPen(colour, width=2, style=Qt.PenStyle.DashLine))
+        cross = live['crossing']
+        if cross == pimd_shape.CROSS_NEVER:
+            cross_txt = 'never crosses'
+        elif cross == pimd_shape.CROSS_ALREADY_POS:
+            cross_txt = 'already positive at {0:.0f} µs'.format(self._pulse_us_sorted[0])
+        else:
+            cross_txt = '{0:.1f} µs'.format(cross)
+        self.shape_ladder_live_pt.setData([{
+            'pos': (x, self._shape_ladder_live_row),
+            'size': 16, 'symbol': 'd',
+            # Bright fill behind a black outline, matching the scatter cursor;
+            # the darker ink is only for the unfilled dashed line.
+            'brush': pg.mkBrush(_hl_qcolor(_HL_YELLOW)), 'pen': pg.mkPen('#000000', width=2),
+            'data': {'tip': 'LIVE frame\nfamily: {0}\ncrossing: {1}\ndecay: {2:.2f}\n'
+                             'amp: {3:.2f} mV   SNR: {4:.1f}'.format(
+                                 live['family'], cross_txt, live['decay'],
+                                 live['amp'], live['snr'])},
+        }])
+
+    def _update_shape_tile(self):
+        """The selected capture's raw cell matrix, self-normalised on a
+        diverging map (red positive/ferrous, blue negative)."""
+        if not hasattr(self, 'shape_tiles_img'):
+            return
+        feats = self._shape_capture_features()
+        feat = feats.get(self._shape_selected_key)
+        if feat is None:
+            self.shape_tiles_img.clear()
+            self.shape_tiles_plot.setTitle('Tile Inspector — click a scatter point', size='7pt')
+            return
+        matrix = np.asarray(feat['vec'], dtype=float).reshape(feat['n_bands'], feat['n_delays'])
+        lim = float(np.max(np.abs(matrix)))
+        if lim <= 0:
+            lim = 1.0
+        self.shape_tiles_img.setImage(matrix.T, levels=(-lim, lim))
+        # A foreign tile's own axes are drawn below, so the title has to say
+        # whose ladder they are -- the picture is otherwise indistinguishable
+        # from a live-profile capture.
+        title = '{0} @{1} — amp {2:.2f} mV, SNR {3:.1f}, {4} [{5}]'.format(
+            feat['target_id'] or '?',
+            '{0} mm'.format(feat['distance_mm']) if feat['distance_mm'] else 'air',
+            feat['amp'], feat['snr'], feat['quality'] or '?', feat['session'])
+        if feat['foreign']:
+            title += '  ⚠ {0} ({1}), not the live profile'.format(
+                feat['profile_name'] or 'other profile', feat['geom'])
+        self.shape_tiles_plot.setTitle(title, size='7pt')
+
+        ax_l = self.shape_tiles_plot.getAxis('left')
+        ax_l.setTicks([[(i + 0.5, '{0:.0f}µs'.format(p))
+                        for i, p in enumerate(feat['pulses_us'])]])
+        ax_l.setLabel('Pulse width', **{'font-size': '7pt'})
+        ax_b = self.shape_tiles_plot.getAxis('bottom')
+        # Threshold labels come from the LIVE profile, so they are only
+        # truthful for a capture on that same ladder.
+        if feat['foreign']:
+            ax_b.setTicks(None)
+            ax_b.setLabel('Threshold column (own ladder)', **{'font-size': '7pt'})
+        elif len(self._threshold_v_sorted) == feat['n_delays']:
+            ax_b.setTicks([[(j + 0.5, '{0:.2f}V'.format(v))
+                            for j, v in enumerate(self._threshold_v_sorted)]])
+            ax_b.setLabel('Threshold', **{'font-size': '7pt'})
+        else:
+            ax_b.setTicks(None)
+        self.shape_tiles_plot.setXRange(0, feat['n_delays'], padding=0)
+        self.shape_tiles_plot.setYRange(0, feat['n_bands'], padding=0)
+
+    def _shape_set_gauge(self, key, value, lo, hi, threshold, text, good_above=True,
+                         unit=None):
+        """`unit` overrides the row's fixed unit suffix -- pass '' when the
+        readout is a word rather than a number, so 'air mode' does not render
+        as 'air mode s'."""
+        g = self.shape_gauges[key]
+        g['unit'].setText(g['unit_text'] if unit is None else unit)
+        if value is None or not np.isfinite(value):
+            g['bar'].setOpts(x0=[lo], width=[0])
+            g['value'].setText('—')
+            g['plot'].setXRange(lo, hi, padding=0)
+            g['gate'].setVisible(False)
+            return
+        clamped = min(max(value, lo), hi)
+        if threshold is None:
+            # Informational gauge: no pass/fail, so no gate line and a neutral
+            # bar rather than a green/red verdict nobody asked for.
+            brush = QColor('#9e9e9e')
+        else:
+            ok = (value >= threshold) if good_above else (value <= threshold)
+            brush = _hl_qcolor(_HL_GREEN if ok else _HL_RED)
+        g['bar'].setOpts(x0=[lo], width=[clamped - lo], brush=brush)
+        g['plot'].setXRange(lo, hi, padding=0)
+        g['gate'].setVisible(threshold is not None)
+        if threshold is not None:
+            g['gate'].setPos(min(max(threshold, lo), hi))
+        g['value'].setText(text)
+
+    def _update_shape_gauges(self):
+        """Amplitude / SNR / settledness / air age. Every input is an existing
+        per-frame statistic (_current_settle_mv, the air reference timestamp,
+        the Analysis tab's Green-when Amp threshold) -- nothing is recomputed
+        here on its own terms. The settle and air thresholds are this tab's
+        own, matching the gate the air state machine actually applies."""
+        if not hasattr(self, 'shape_gauges'):
+            return
+        feat = self._shape_live
+        gate = self._shape_gate()
+
+        amp_threshold = self.sp_sig_q_amp_mv.value()
+        if feat is None:
+            self._shape_set_gauge('amp', None, -2, 3, math.log10(max(amp_threshold, 1e-3)), '')
+            self._shape_set_gauge('snr', None, 0, max(20.0, gate * 2), gate, '')
+        else:
+            log_amp = feat['log_amp']
+            self._shape_set_gauge(
+                'amp', log_amp, -2, 3, math.log10(max(amp_threshold, 1e-3)),
+                '{0:.2f} mV'.format(feat['amp']))
+            self._shape_set_gauge(
+                'snr', feat['snr'], 0, max(20.0, gate * 2), gate,
+                '∞' if not np.isfinite(feat['snr']) else '{0:.1f}'.format(feat['snr']))
+
+        settle_mv = self._current_settle_mv(self.sp_shape_win_n.value())
+        # Informational only -- there is no settle threshold on this tab any
+        # more, so no gate line and no pass/fail colour. Still worth showing:
+        # "is the rig quiet right now" is useful context for a reading.
+        self._shape_set_gauge(
+            'settle', settle_mv, 0, max((settle_mv or 0.0) * 2, 1.0), None,
+            '' if settle_mv is None else '{0:.3f}'.format(settle_mv))
+
+        # Age of the SNAPSHOT. In air mode the reference is refreshed every
+        # frame, so an age would be meaningless -- the bar goes empty and the
+        # readout says which mode it is in.
+        if self._shape_air_held() and self._shape_air_ref_ts is not None:
+            age = time.time() - self._shape_air_ref_ts
+            text = '{0:.0f}'.format(age)
+        else:
+            age, text = None, 'air mode'
+        self._shape_set_gauge(
+            'baseline', age, 0, SHAPE_AIR_AMBER_S * 1.5, SHAPE_AIR_AMBER_S,
+            text, good_above=False, unit=None if age is not None else '')
+        if age is None:
+            self.shape_gauges['baseline']['value'].setText(text)
+
+    def _update_shape_live(self):
+        """Per-redraw refresh of everything the live frame drives. The static
+        panels (capture points, ladder rows, tile) are NOT rebuilt here --
+        they only change on load/selection/control changes."""
+        self._update_shape_air_status()
+        self._update_shape_live_scatter()
+        self._update_shape_curves_live()
+        self._update_shape_ladder_live()
+        self._update_shape_gauges()
+        self._update_shape_gating()
+
+    def _update_shape_air_status(self):
+        """Air status label. Stylesheet is only touched on a state change --
+        the same churn guard the Training group's indicator uses."""
+        if not hasattr(self, 'lbl_shape_air'):
+            return
+        text, style = self._shape_air_status()
+        self.lbl_shape_air.setText(text)
+        if style != self._shape_air_last_style:
+            self.lbl_shape_air.setStyleSheet(style)
+            self._shape_air_last_style = style
+
+    def _update_shape_gating(self):
+        if not hasattr(self, 'pb_shape_scratch'):
+            return
+        self.pb_shape_scratch.setEnabled(self._shape_scratch_blocker() is None)
+
+    def _shape_scratch_blocker(self):
+        """None when a scratch capture can be taken, else the reason why not
+        (used both to gate the button and to explain it in the status bar).
+
+        Deliberately only two conditions: measure mode, and enough frames
+        since the snapshot. No hidden SNR or settledness threshold greys the
+        button out -- you save what you can see, and a thin or noisy capture
+        is stamped honestly by pimd_features.quality_flags() instead."""
+        if not self._shape_air_held() or self._shape_air_ref is None:
+            return 'in air mode — press Space to take a reference first'
+        if self._shape_live is None:
+            return 'no live frame yet'
+        since = self._shape_air_ref_ts or 0.0
+        if sum(1 for ts, _ in self._rolling_buf if ts >= since) < 2:
+            return 'not enough frames since the air reference — hold a moment longer'
+        return None
+
+    def _on_shape_rearm_air(self):
+        """Drop the air reference and start tracking fresh air.
+
+        Deliberately does NOT call _start_capture(): this tab keeps its own
+        reference (see _shape_air_mode in __init__), and having a Shape Space
+        button mutate the baseline the Heatmap and Analysis tabs share would
+        be a side effect nobody asked for. The task brief specified the shared
+        capture here; the bench showed that baseline is the wrong reference
+        for this tab, so this departs from the brief on purpose."""
+        self._shape_air_restart()
+        self.statusBar().showMessage(
+            'Shape Space: air re-armed — collecting {0} settled frames'.format(
+                self.sp_shape_air_n.value()))
+
+    # -- Scratch captures ---------------------------------------------------
+    # Quick grabs of unregistered objects, for exploring rather than for the
+    # corpus. They are written to data/scratch/, NEVER data/corpora/: a
+    # corpus build hard-errors on an unregistered target_id, and that guard is
+    # deliberate. A scratch object gets promoted by registering it in
+    # targets_v1.csv and recapturing it properly.
+
+    @staticmethod
+    def _shape_slugify(label):
+        """Free-text label -> the trailing part of a scratch target_id.
+        pimd_target_check.TARGET_ID_RE is the authority on what a valid id
+        looks like ([A-Za-z0-9_]+), so everything else collapses to '_'."""
+        slug = ''.join(ch if (ch.isascii() and ch.isalnum()) else '_' for ch in label)
+        return slug.strip('_')
+
+    def _shape_scratch_path(self):
+        return os.path.join(SCRATCH_DIR, 'gui_scratch_{0}.csv'.format(
+            date.today().strftime('%Y%m%d')))
+
+    def _shape_scratch_stats(self, anchor_mode):
+        """Signature stats for a scratch capture, through the same
+        pimd_features routines the Analysis tab's save path uses.
+
+          'flat'  -- target window = the last N live frames; the single air
+                     anchor is this tab's HELD air reference, timestamped at
+                     the moment it was fixed. pimd_features.baseline_at()
+                     clamps outside the anchor range, so one anchor means a
+                     flat (not drift-corrected) baseline -- the documented
+                     single-anchor case, and what makes a scratch grab quick.
+                     Requires a held reference: against rolling air the delta
+                     is ~0 by construction, so there would be nothing to save.
+          'air2'  -- the Analysis tab's Training cycle already computed a
+                     two-anchor, drift-corrected signature; reuse it verbatim
+                     rather than duplicating that state machine here.
+
+        Returns a stats dict shaped exactly like _compute_sig_stats()'s."""
+        if anchor_mode == 'air2':
+            stats = self._sig_last_stats
+            if stats is None or 'error' in stats:
+                return {'error': 'no completed training capture to save'}
+            return dict(stats)
+
+        if not self._shape_air_held() or self._shape_air_ref is None:
+            return {'error': 'air reference is still rolling — press Space to lock it '
+                              'against the target'}
+        # Frames since the reference was frozen, capped at the count that
+        # survives central_frames()' 60 % trim without earning a 'short' flag.
+        # Two things this gets right that a plain "last N frames" did not:
+        # the window can never reach back past the freeze and pick up air (it
+        # was reading 'noisy' because it straddled the placement transient),
+        # and a patient capture now clears MIN_CENTRAL_FRAMES honestly instead
+        # of always being stamped 'short'.
+        n = int(math.ceil(pimd_features.MIN_CENTRAL_FRAMES / pimd_features.CENTRAL_FRACTION))
+        since = self._shape_air_ref_ts or 0.0
+        recent = [(ts, arr) for ts, arr in self._rolling_buf if ts >= since][-n:]
+        if len(recent) < 2:
+            return {'error': 'not enough frames since the air was locked — hold the '
+                              'target a moment longer'}
+        frames_mV = np.array([arr for _, arr in recent], dtype=float) / 1000.0
+        t_seconds = np.array([ts for ts, _ in recent], dtype=float)
+        if frames_mV.shape[1] != self._shape_air_ref.size:
+            return {'error': 'air/frame channel-count mismatch — refusing to mix '
+                              'profile geometries (DESIGN §11)'}
+
+        anchor_ts = np.array([float(self._shape_air_ref_ts or t_seconds[0])])
+        anchor_vs = np.array([self._shape_air_ref.reshape(-1)])
+        plateau = pimd_features.Plateau(
+            target_id='scratch', short_name='', distance_mm=None, long_axis='na',
+            face_normal='na', offset_x_mm=0, offset_y_mm=0, medium='air', repeat_idx=1,
+            notes='', is_air=False, start_idx=0, end_idx=len(recent))
+        c0, c1 = pimd_features.central_frames(plateau)
+        delta_mV, plateau_amp_mV, amp_mean_abs_mV, splithalf_floor, n_central, center_t = \
+            pimd_features.compute_plateau_stats(frames_mV, t_seconds, c0, c1, anchor_ts, anchor_vs)
+        return dict(
+            delta_mV=delta_mV, plateau_amp_mV=plateau_amp_mV,
+            amp_mean_abs_mV=amp_mean_abs_mV, splithalf_floor=splithalf_floor,
+            quality=pimd_features.quality_flags(splithalf_floor, plateau_amp_mV, n_central),
+            n_central=n_central, used_air_after=False,
+            out_of_range=(center_t < anchor_ts[0] or center_t > anchor_ts[-1]))
+
+    def _on_shape_save_scratch(self):
+        blocker = self._shape_scratch_blocker()
+        if blocker is not None:
+            self.statusBar().showMessage('Save Scratch: {0}'.format(blocker))
+            return
+        training_stats = self._sig_last_stats
+        air2_available = (training_stats is not None and 'error' not in training_stats
+                          and training_stats.get('used_air_after'))
+        dlg = ScratchDialog(self, air2_available=air2_available,
+                            default_distance_mm=self.sig_distance_mm.value())
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        fields = dlg.values()
+
+        slug = self._shape_slugify(fields['label'])
+        if not slug:
+            self.statusBar().showMessage(
+                'Save Scratch: label has no usable characters — ids must match '
+                '[A-Za-z0-9_]+')
+            return
+        target_id = SCRATCH_ID_PREFIX + slug
+        if not pimd_target_check.TARGET_ID_RE.match(target_id):
+            self.statusBar().showMessage(
+                "Save Scratch: '{0}' is not a valid target_id".format(target_id))
+            return
+
+        stats = self._shape_scratch_stats(fields['anchor'])
+        if 'error' in stats:
+            self.statusBar().showMessage('Save Scratch: {0}'.format(stats['error']))
+            return
+
+        path = self._shape_scratch_path()
+        os.makedirs(SCRATCH_DIR, exist_ok=True)
+        is_new = not os.path.exists(path)
+        existing = {}
+        if not is_new:
+            # Same geometry guard as the corpus save path: appending a
+            # different-width signature to an existing file would produce a
+            # mixed-geometry file that no downstream tool can read (DESIGN §11).
+            try:
+                existing = self._scan_editable_signature_file(path)
+            except Exception as e:
+                self.statusBar().showMessage(
+                    'Save Scratch: cannot read {0} ({1})'.format(path, e))
+                return
+            for sig in existing.values():
+                if len(sig['shape']) != self._n_channels:
+                    self.statusBar().showMessage(
+                        'Save Scratch: {0} holds {1}-channel signatures, live profile has '
+                        '{2} — never mix profile geometries (DESIGN §11)'.format(
+                            os.path.basename(path), len(sig['shape']), self._n_channels))
+                    return
+
+        # The schema has no anchor column (scratch files are deliberately the
+        # same shape as gui_signatures_*.csv), so the anchor mode is recorded
+        # in the free-text notes -- a flat single-anchor capture is NOT
+        # drift-corrected and that has to be visible later.
+        notes = fields['note']
+        notes = '{0} [anchor={1}]'.format(notes, fields['anchor']).strip()
+
+        # One session per scratch FILE (i.e. per day), with a running capture
+        # sequence resumed above the highest _cNN already in it. A
+        # timestamp-derived session plus a fixed _c01 would collide for two
+        # saves inside the same second: _scan_editable_signature_file() folds
+        # same-key rows into one capture, so the second save would vanish into
+        # the first -- exactly the v1.40 corpus-path failure.
+        session_id = 'scratch_{0}'.format(date.today().strftime('%Y%m%d'))
+        seq = max([self._capture_id_seq(cid) for _, cid in existing] or [0])
+        seq += 1
+        capture_id = '{0}_c{1:02d}'.format(session_id, seq)
+        while (session_id, capture_id) in existing:
+            seq += 1
+            capture_id = '{0}_c{1:02d}'.format(session_id, seq)
+
+        plateau = pimd_features.Plateau(
+            target_id=target_id, short_name=fields['label'],
+            distance_mm=fields['distance_mm'], long_axis='na', face_normal='na',
+            offset_x_mm=0, offset_y_mm=0, medium=fields['medium'], repeat_idx=1,
+            notes=notes, is_air=False, start_idx=0, end_idx=0)
+        rows = pimd_features.build_rows(
+            session_id, capture_id, datetime.now().isoformat(),
+            plateau, self._build_colmap_for_corpus(),
+            stats['delta_mV'], stats['plateau_amp_mV'], stats['splithalf_floor'],
+            stats['quality'], stats['amp_mean_abs_mV'], self._profile.get('name'),
+            self._profile_sha8, self._parsed_fw_version(),
+            'pimd_classviz.py v{0}'.format(APP_VERSION), self.cb_supply.currentText(), path)
+        try:
+            with open(path, 'a', newline='') as f:
+                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
+                if is_new:
+                    writer.writerow(pimd_features.CORPUS_HEADER_FIELDS)
+                for row in rows:
+                    writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
+        except OSError as e:
+            self.statusBar().showMessage('Save Scratch failed: {0}'.format(e))
+            return
+        self.statusBar().showMessage(
+            "Saved scratch '{0}' as {1} ({2} rows, anchor={3}) to {4}".format(
+                target_id, capture_id, len(rows), fields['anchor'], path))
+
+    # ------------------------------------------------------------------
     # Serial
     # ------------------------------------------------------------------
     def serial_open(self, flag):
@@ -3330,9 +5135,15 @@ class MainWindow(QMainWindow):
         # Catches ADC bit-truncation artifacts (440–880 mV shifts) without suppressing
         # real signals (e.g. ±7 mV environmental pickup). _rolling_buf and _record_buf
         # receive unfiltered raw so frame recordings stay faithful.
-        if self._ch_glitch_buf is None:
-            self._ch_glitch_buf = np.zeros((64, self._n_channels))
         raw_mv = raw / 1000.0
+        if self._ch_glitch_buf is None:
+            # Seeded with the FIRST frame, not zeros. Zero-filled, the median
+            # sits near 0 until 33 real frames have arrived, so every one of
+            # those frames is |raw − 0| > 100 mV, i.e. flagged as a glitch:
+            # the heatmap showed ~0 for its first ~10 s after connect or after
+            # a profile change, and Shape Space's air buffer (which excludes
+            # glitch frames) filled at a crawl over the same period.
+            self._ch_glitch_buf = np.tile(raw_mv, (64, 1))
         self._ch_glitch_buf[self._ch_glitch_pos] = raw_mv
         self._ch_glitch_pos = (self._ch_glitch_pos + 1) % 64
         med_mv = np.median(self._ch_glitch_buf, axis=0)
@@ -3357,6 +5168,15 @@ class MainWindow(QMainWindow):
         # capture above (self._capturing/_capture_buf stay Heatmap-tab-only).
         if self._analysis_training_active:
             self._sig_train_ingest(now, raw, glitch_mask)
+
+        # Shape Space air tracking + live features. Done per frame regardless
+        # of the visible tab (the air reference has to be current the moment
+        # that tab is shown, not start warming up then); drawing is still
+        # gated on visibility in _redraw(). Air first — the live features read
+        # the reference it maintains.
+        if hasattr(self, 'shape_scatter'):
+            self._shape_air_ingest(now, raw, glitch_mask)
+            self._shape_ingest_frame()
 
         if self._continuous_log:
             raw_nxn = raw.reshape(self._n_bands, self._n_cells)
@@ -3731,6 +5551,13 @@ class MainWindow(QMainWindow):
             self._update_analysis_charts()
             self._update_analysis_strips()
 
+        # Shape Space: only the live-frame-driven panels refresh per tick, and
+        # only while the tab is showing. The capture points / ladder rows /
+        # tile change on load, selection and control-bar edits instead, so
+        # they are redrawn from those events (_shape_redraw_static).
+        if self.tabs.currentIndex() == self._shape_tab_index:
+            self._update_shape_live()
+
     def _update_baseline_label(self, mean):
         mode = self._baseline_mode
         if mode == 'nominal':
@@ -4055,6 +5882,34 @@ class MainWindow(QMainWindow):
             self.sp_std_lower.setValue(float(s.get('std_lower', 0.50)))
             self.sp_std_upper.setValue(float(s.get('std_upper', 1.00)))
 
+            # Shape Space — axis/colour selections, gate, trail, custom band
+            # range. findData guards an axis key retired by a later version.
+            for combo, saved in ((self.cb_shape_x, s.get('shape_x')),
+                                  (self.cb_shape_y, s.get('shape_y')),
+                                  (self.cb_shape_colour, s.get('shape_colour'))):
+                idx = combo.findData(saved) if saved else -1
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            self.sp_shape_gate.setValue(float(s.get('shape_gate', SHAPE_GATE_DEFAULT)))
+            self.sp_shape_trail.setValue(int(s.get('shape_trail', SHAPE_TRAIL_DEFAULT)))
+            self.sp_shape_band_lo.setValue(int(s.get('shape_band_lo', 0)))
+            self.sp_shape_band_hi.setValue(int(s.get(
+                'shape_band_hi', max(0, self._n_bands - 1))))
+            self.sp_shape_win_n.setValue(int(s.get('shape_win_n', SHAPE_WIN_N_DEFAULT)))
+            self.sp_shape_air_n.setValue(int(s.get('shape_air_n', SHAPE_AIR_N_DEFAULT)))
+
+            # Dock layout. Restored inside its own try: a state written by a
+            # build with different dock names must degrade to the default
+            # layout, not take the app down on startup.
+            dock_state = s.get('shape_dock_state')
+            if dock_state:
+                try:
+                    self.shape_dock_area.restoreState(dock_state)
+                except Exception:
+                    self._shape_apply_default_layout()
+                    self.statusBar().showMessage(
+                        'Shape Space: saved dock layout could not be restored — using the default')
+
             # Saved-profile dropdown (already populated from disk in _build_ui,
             # so findText guards a since-deleted file; only the dropdown
             # selection is restored -- no auto Load & Run).
@@ -4131,6 +5986,17 @@ class MainWindow(QMainWindow):
             'sig_q_split_ratio':  self.sp_sig_q_split_ratio.value(),
 
             'analysis_left_split_sizes': self.analysis_left_split.sizes(),
+
+            'shape_x':       self.cb_shape_x.currentData(),
+            'shape_y':       self.cb_shape_y.currentData(),
+            'shape_colour':  self.cb_shape_colour.currentData(),
+            'shape_gate':    self.sp_shape_gate.value(),
+            'shape_trail':   self.sp_shape_trail.value(),
+            'shape_band_lo': self.sp_shape_band_lo.value(),
+            'shape_band_hi': self.sp_shape_band_hi.value(),
+            'shape_win_n':     self.sp_shape_win_n.value(),
+            'shape_air_n':     self.sp_shape_air_n.value(),
+            'shape_dock_state': self._shape_dock_state(),
         }
         try:
             os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
@@ -4151,7 +6017,12 @@ class MainWindow(QMainWindow):
         override-advance) while that tab is visible; otherwise it is left alone
         and reaches whatever widget has focus, as normal. Since v1.39 that is
         the only Space binding -- the Training Session tab's step-advance went
-        with the tab."""
+        with the tab.
+
+        v1.42: Space also locks/releases the Shape Space air reference, but
+        ONLY while that tab is the visible one. The two bindings are keyed on
+        different tab indices and can never both match, so the Training
+        group's Space handling is untouched."""
         if event.type() == QEvent.Type.KeyPress:
             if isinstance(QApplication.focusWidget(), (QLineEdit, QSpinBox, QDoubleSpinBox)):
                 return super().eventFilter(obj, event)
@@ -4160,6 +6031,10 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_Space and self._analysis_training_active \
                     and self.tabs.currentIndex() == self._analysis_tab_index:
                 self._on_sig_train_space()
+                return True
+            if event.key() == Qt.Key.Key_Space \
+                    and self.tabs.currentIndex() == self._shape_tab_index:
+                self._on_shape_air_space()
                 return True
         return super().eventFilter(obj, event)
 

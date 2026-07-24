@@ -40,6 +40,289 @@ min 2.44, non-ferrous max 1.75, ferrite 1.37. (2026-07-24)
 
 ---
 
+### src/pimd_classviz.py — v1.42 — Shape Space tab + scratch captures
+
+New fourth tab, **Shape Space**: every loaded signature as a point in a selectable
+2-D feature space, with the current frame moving through it as a live dot. Purpose is
+human exploration of signature geometry — the 2026-07-23 corpus analysis's family
+plane, crossing axis and decay-persistence separation, live instead of in static PNGs.
+All feature maths comes from the new `pimd_shape.py`; this file is plumbing and drawing.
+
+Layout is a `pyqtgraph.dockarea.DockArea` with five movable/floatable docks — Scatter,
+Band Curves, Crossing Ladder, Tile Inspector, Gauges — rather than the Analysis tab's
+nested splitters: each panel wants the whole screen at some point, so they need to be
+re-orderable, not merely resizable. Layout persists as `shape_dock_state` in
+`classviz_settings.json` (restored inside its own try, so a state written by a build
+with different dock names degrades to the default instead of taking startup down);
+"Reset layout" replays the default `addDock` sequence, which re-homes placed docks and
+pulls floated ones back. Control bar: X/Y/Colour combos, custom band-range spin pair,
+SNR gate, trail length, Load signatures…, Reacquire Air, Save Scratch…, Reset layout —
+all except the buttons persisted.
+
+**One store, one loader.** Points come from `self._analysis_templates`, the set the
+Analysis tab already loads; the Shape Space "Load signatures…" button is wired to the
+existing `_on_load_signatures_clicked` handler. `_scan_editable_signature_file` now also
+returns each capture's own `pulses_us` /`n_delays` /`profile_name` (read off its rows,
+not assumed), and `_merge_template_list` carries `target_id` /`distance_mm` /`short_name`
+/geometry/profile into the template dict — they were previously formatted into the
+display label and discarded.
+
+**Mixed profile geometries are allowed here, and marked.** This is the one place in the
+app that plots captures from more than one profile together, so the reasoning is worth
+stating. `_refresh_analysis_overlays()` must keep refusing, because it draws raw
+cell-by-cell curves where cell index N is a different (pulse, threshold) pair under a
+different profile — superimposing those is meaningless. These features are not that:
+every `pimd_shape` function takes its geometry explicitly and normalises through it, so
+a crossing width is µs either way and a family verdict is a sign either way. They are
+comparable in *kind*. They are **not** calibrated against each other — a crossing is
+interpolated on that profile's own pulse ladder, and decay persistence reads that
+profile's own threshold columns — so every foreign capture is marked on sight:
+
+- **Marker shape** carries it, because colour is spoken for (family / colour-by) and
+  fill is spoken for (gated). Circle = live profile, square = other profile; star and
+  diamond are the respective scratch forms. A dashed outline was tried alone first and
+  reads fine on a hollow marker but is nearly invisible on a filled 9 px one, so shape
+  does the work and the dash stays as reinforcement.
+- **A standing banner** in the Scatter dock, not a transient status line, naming the
+  counts and profiles actually on screen ("66 from cal_45_other_v1 (5×9)"), the live
+  profile, and the not-calibrated caveat. While foreign geometries are on the plane the
+  fact has to stay visible, because the numbers look perfectly ordinary.
+- **Tooltip, Tile Inspector title and Band Curves** each say so too. The tile's threshold
+  axis falls back to bare column indices labelled "own ladder" for a foreign capture —
+  the voltage labels come from the live profile and would otherwise be a quiet lie. Its
+  band curve is dashed for the sharper reason that its vertices sit on its own pulse
+  ladder and need not touch the live profile's x ticks at all.
+
+DESIGN §10's "frames from different profile geometries must never be mixed in one
+dataset" governs corpus builds; nothing in this tab writes one, and scratch saves still
+refuse a geometry mismatch outright. Genuinely unusable captures — a shape that isn't a
+rectangular n_bands × n_delays, or too few bands/delays for the features to be defined —
+are still dropped, now with a message that says that rather than citing §11.
+
+**Two rules the panels exist to enforce.** Below the SNR gate the unit shape is
+normalised noise — it still has a family verdict and still wanders the plane
+convincingly — so below the gate the live dot greys, shrinks and drops its trail, and
+the Crossing Ladder omits ungated captures entirely. And `family` (sign) and
+`decay_persistence` (magnitude) are always shown side by side, never reconciled.
+
+**The air reference — the tab's own, and why a static baseline cannot serve.** First
+bench run of the tab reported the live dot wandering across the plane, confidently
+family-coloured, with nothing in front of the coil. Root-caused to referencing the shared
+static air capture: thermal drift (DESIGN §3 ≈ −50 µV/s; §14.1 heavy bands −20…−31 mV,
+monotonic with pulse width) accumulates into the delta as a large **coherent** term, and
+the SNR gate cannot catch that *by construction* — `splithalf` measures short-timescale
+scatter, so drift inflates `amp` while leaving `splithalf` flat. Simulated at the
+documented rate against a fresh static baseline, coil in air:
+
+| time since air capture | amp | splithalf | SNR | gated? |
+|---|---|---|---|---|
+| 30 s | 9.8 mV | 1.15 | 8.6 | **yes** |
+| 90 s | 27.2 mV | 1.25 | 21.7 | **yes** |
+| 270 s | 79.3 mV | 1.18 | 67.2 | **yes** |
+
+The first round of offline verification could not have caught this: its synthetic stream
+was stationary, so the drift term never existed. Any future test of this tab has to drift.
+
+Replaced with a Shape-Space-owned rolling air reference, the same drift-cancelling
+principle as the Analysis tab's air-bracketed Training cycle (DESIGN §17.5). Shape Space
+no longer consults `_get_current_baseline()` at all — with the Heatmap tab's Baseline
+combo on Rolling or Nominal the whole tab was silently meaningless.
+
+**Two modes, and Space is the only thing that moves between them.**
+
+- **air** — every glitch-free frame feeds a `frames`-deep buffer and the reference is its
+  running median, so the live delta is ~0 by construction and the cursor sits at the
+  origin. The indicator carries the frame counter and goes **yellow → green** the moment
+  a full `frames` is collected.
+- **measure** — Space snapshots that median as a fixed, timestamped reference and the
+  cursor moves against it. Space again returns to air, clearing the buffer so the counter
+  restarts at 0 and the indicator goes back to yellow: the mode is then unambiguous from
+  across the room. Refused below 2 frames (a median needs two); the green indicator is
+  what says the reference is properly deep.
+
+Nothing auto-detects a target arriving or leaving. An intermediate revision did — a
+settle gate, a Detect threshold, auto-freeze on arrival, auto-release on removal — and it
+is gone by direction. One measured fact from building it is worth keeping, because it
+says the auto-release half was never going to be reliable: an absolute |Δ| against a
+frozen reference **cannot** detect removal under drift, since after a long hold the
+accumulated drift exceeds the target's own |Δ| — a spanner @60 mm reads |Δ| 2.8 mV while
+150 s of drift reads 5.2 mV, so taking the object away makes |Δ| go *up*.
+
+**The cursor is always yellow**, one constant size, in both modes — no family colour, no
+gated/ungated tint, no size change. The family verdict belongs to the loaded captures it
+is being compared against; a cursor that recolours as it moves reads as the instrument
+asserting something it was not asked to assert. The trail, the Crossing Ladder's LIVE
+diamond and dashed line, and the Band Curves live trace follow the same rule. Stroked
+elements use a darkened shade of the same hue (`_hl_ink`), because `_HL_YELLOW` is a
+background colour — pale enough to be near-invisible as a 2 px line on pyqtgraph's white
+canvas.
+
+Pinning the air-mode cursor to the origin matters: its magnitude is ~0 but its unit shape
+still has a definite direction (the reference's half-window drift lag), which parked it
+at a consistent off-centre spot — measured, right inside the non-ferrous cluster. It is
+pinned only on the signed-mean axes where 0 is the origin of anything, and hidden on the
+others.
+
+Fixed while testing the frame counter, in code that predates this tab: the 64-frame
+glitch-filter buffer (`_ch_glitch_buf`) was zero-filled on first use, so its median sat
+near 0 until 33 real frames had arrived and every one of those frames was flagged
+`|raw − 0| > 100 mV`, i.e. a glitch. The heatmap therefore displayed ~0 for its first
+~10 s after connect or after a profile change, and the air buffer — which excludes glitch
+frames — filled at a crawl over the same window (10 of 40 frames in 44 sweeps). Seeded
+with the first frame instead.
+
+**Two frame counts, both Shape Space's own and persisted separately.** `window` sizes the
+live cursor position and its split-half noise floor; `frames` sizes the air buffer and the
+counter. Both defaults are deliberately unlike the Analysis tab's, for measured reasons:
+
+- **Window 15 frames, not the Stats tab's 50.** A 50-frame window is ~15 s at the sweep
+  rate, so a target does not fully register for 15 s — by which time drift has already
+  spoiled the reading. Measured: a copper pipe registered at 8 s with a 15-frame window
+  and not at all with 50.
+- **Air buffer 40 frames, not the Analysis tab's 120.** A rolling reference is
+  single-ended, so its median sits half a window in the past and that lag is baked into
+  every measurement as drift. Measured against a spanner @60 mm: family read correctly out
+  to a 15 s hold at 20–40 frames, and was already wrong at a 5 s hold at 80–120.
+
+The Air-age gauge reads the age of the snapshot in measure mode and `air mode` otherwise,
+amber past `SHAPE_AIR_AMBER_S` (60 s, not the 600 s a static baseline suggested: at
+50 µV/s a 60 s-old reference already carries ~1 mV/cell, the order of a weak target). The
+Settled gauge survives as a plain readout with no threshold line and a neutral bar —
+there is no settle threshold to draw any more, but "is the rig quiet right now" is still
+useful context.
+
+**"Reacquire Air" → "Re-arm Air"**, and it no longer calls `_start_capture()`. This
+departs from the task brief, which specified the shared static capture here; the bench
+showed that baseline is the wrong reference for this tab, and a Shape Space button
+mutating the Heatmap/Analysis tabs' baseline as a side effect is worse than not.
+
+**Scratch captures.** "Save Scratch…", live in measure mode once enough frames have
+arrived since the snapshot and blocked in air mode, takes a label/note/distance/medium
+plus an air-anchor choice: the snapshotted air reference as a single flat anchor (quick),
+or the Analysis tab's two-anchor training
+capture (drift-corrected, offered only when one is pending). Both run through the same
+`pimd_features` plateau/quality routines and the same `build_rows` provenance columns as
+the corpus save path. Label slugifies to `scratch_<slug>`, validated against
+`pimd_target_check.TARGET_ID_RE`. Rows append to `src/data/scratch/gui_scratch_<date>.csv`
+in the CORPUS_HEADER schema, never into `src/data/corpora/` — a corpus build hard-errors
+on an unregistered target_id and that guard is deliberate; promotion means registering
+the object in `targets_v1.csv` and recapturing properly. Same channel-count guard as the
+corpus path. The schema has no anchor column, so the anchor mode is recorded as an
+`[anchor=flat]` /`[anchor=air2]` suffix in the free-text notes: a flat single-anchor
+capture is not drift-corrected and that has to stay visible afterwards.
+
+There is no hidden SNR or settledness threshold on the button: you save what you can see,
+and a thin or noisy capture is stamped honestly by `pimd_features.quality_flags()`
+instead of the button greying out for a reason the cursor does not show.
+
+The flat path takes its target frames from the moment the air was snapshotted onward, capped
+at `ceil(MIN_CENTRAL_FRAMES / CENTRAL_FRACTION)`. Two things a plain "last N frames" got
+wrong: the window could reach back past the freeze and pick up air (it was stamping
+captures `noisy` because it straddled the placement transient), and at the tab's short
+live window it was always stamped `short`. A patient capture now clears
+`MIN_CENTRAL_FRAMES` honestly and an impatient one is still told it is thin.
+
+The Crossing Ladder shows the live frame on its own reserved **LIVE** row at the top
+(family-coloured diamond, hover tip carrying family/crossing/decay/amp/SNR) with a
+matching family-coloured line running down through the target rows, so the live
+crossing can be read straight against every target's dots. The earlier plain black
+dashed line alone was indistinguishable from grid. Below the gate both are hidden
+rather than greyed — unlike the scatter, where a grey dot still usefully says "here is
+the frame, don't trust it", an ungated crossing width placed on an ordered ladder would
+imply a rank that isn't there.
+
+One live-SNR defect, caught while testing that live row and worth spelling out because
+it was silent: the live amplitude was taken from `_compute_analysis_matrix()` — a mean
+over the Analysis tab's Avg-N frames, **default 1** — while the live noise floor came
+from a 50-frame split-half. Amplitude and noise must be averaged over the same number of
+frames or their ratio is not an SNR; the mismatch inflated it by roughly
+√(N_window/N_avg), and in an offline sweep across the noise levels DESIGN §3/§17.8
+reports, plain air cleared the 5.0 gate on its own. The live dot would have gone
+confidently family-coloured, with a trail, on nothing at all — precisely what the gate
+exists to prevent. Replaced by a single `_shape_live_window()` deriving both from one
+window, mirroring `compute_plateau_stats` exactly: median frame minus baseline for the
+shape, split-half of the same window for the noise. Air now reads SNR ≈ 1.0–1.3 at every
+noise level from 0.05 to 2.0 mV (the correct answer for pure noise under matched
+averaging) and stays ungated with no trail, while a presented spanner reads gated and
+ferrous throughout; live amplitude reproduces the stored capture's 38.88 mV.
+
+One performance defect, also caught offline: the Band Curves dock initially rebuilt
+every curve — selection, all checked signatures, and the live frame — on each redraw
+tick. With the full 66-capture corpus checked that measured **66 ms per tick against
+the 33 ms REDRAW_MS budget**, i.e. a visible stall whenever the live dot moved. Split
+into a static half (selection + checked, rebuilt only on load/selection/control
+changes) and a single persistent live curve item updated in place: 66 ms → 0.5 ms per
+tick, independent of how many signatures are checked.
+
+One capture-identity defect found during offline verification, worth recording
+separately because it is the **same class as the v1.40 corpus-path failure**: the
+scratch save initially derived its session id from a `%Y%m%d_%H%M%S` timestamp and
+used a fixed `_c01`, so two saves inside the same second produced identical
+`(session, capture_id)` keys, `_scan_editable_signature_file()` folded their rows
+into one capture, and the second save silently vanished. Reproduced (126 rows, 1
+capture) before the fix. Now one session per scratch *file* (`scratch_<date>`, matching
+the filename) with a running `_cNN` resumed above the highest already in the file,
+plus the same collision while-loop the corpus path uses.
+
+Three rendering defects found and fixed during the same pass, all worth recording
+because each was silently wrong rather than broken: `QColor('#RRGGBB' + '22')`
+is read by Qt as `#AARRGGBB`, so the ladder's shaded sentinel rails came out dark grey
+and green instead of translucent red and blue (now `setAlpha`); the empty-state
+`setXRange`/`setYRange` latched the scatter off auto-range, so switching axes put nearly
+every point off screen (now re-enabled whenever there are points); and the gauge strips
+were sized such that the GraphicsLayout margins plus the scale axis left the viewbox
+4.5 px tall, rendering each bar as a hairline. Also noted, deliberately not "fixed":
+pyqtgraph's `enableAutoSIPrefix(False)` does not clear the already-latched
+`autoSIPrefixScale`, it only stops the label disclosing it — so the auto prefix is left
+on (its default here and in every other plot in this file), and the axis says "(x0.001)"
+rather than silently showing 150 for 0.15.
+
+Verified offline against `gui_signatures_targets_v1_20260723.csv` under cal_63_air_v2:
+66 points, 46 filled / 20 hollow at gate 5.0; 26/12/8 family split; ladder ordered by
+median crossing; `Fe_spanner_01` @60 renders red intensifying toward 100 µs (7 of 63
+cells marginally negative, ≤0.61 mV against a +14.16 mV peak, so they render near-white
+— the brief's "all-positive" is a visual claim, not a literal one), `Cu_pipe_01` @60
+strictly all-negative; dock layout survives a save/restore cycle byte-for-byte and Reset
+restores the default; a scratch save round-trips back through "Load signatures…" and
+renders with the scratch marker. Live-dot behaviour was exercised with a synthetic frame
+stream: air reads below gate with no trail, a presented spanner shape reads gated,
+ferrous, with its trail. Mixed geometry was exercised against a synthetic 5×9
+`cal_45_other_v1` corpus folded down from the same captures: 132 points (66 native, 66
+foreign) all plotting, foreign features sane on their own ladder (spanner ferrous /
+already-positive / decay 6.76, copper pipe non-ferrous / never / decay 1.55), 66 squares
+vs 66 circles, banner naming the profile and clearing again on unload, foreign band
+curve carrying its own five vertices at 9/20/30/45/100 µs.
+
+The two-mode air model has its own drifting-air harness, which is now the regression that
+matters, since a stationary stream cannot see the defect that prompted all of this. Over
+six simulated minutes of air at the DESIGN §3 rate the cursor stays exactly at the origin,
+yellow, with no trail and no mode change (a static baseline reached SNR 67 on the same
+input); the counter fills one frame per sweep and the indicator flips yellow→green
+precisely at `frames`; a target appearing and then leaving changes nothing without Space;
+Space enters measure and the cursor moves into the right quadrant for a spanner (ferrous)
+and a copper pipe (non-ferrous) with the reference provably unchanged during the
+measurement, every live marker yellow; Space returns to air with the buffer cleared and
+the trail, ladder marker and live band curve gone; Space is refused with 0 frames and
+accepted with 5, announcing the reference as thin; and taking the air *with* a target in
+place then measuring it reads ~0 — asserted so that consequence of removing auto-freeze
+is a known property rather than a surprise.
+
+Reading accuracy against hold time was characterised rather than asserted, since it is
+bounded by physics rather than code: four of five targets read correctly out to a 40–60 s
+hold, and `Fe_spanner_01` flips ferrous→crossover at ~15 s because its own early-band mean
+is +0.045 mV — a knife-edge on that plane, so a fraction of a mV of drift moves it.
+
+Noted while running these: under `QT_QPA_PLATFORM=offscreen` this environment segfaults at
+interpreter exit with no Python frame on the stack, reproducibly (10/10) in a script that
+only constructs the window and feeds frames on the Heatmap tab — nothing to do with this
+tab, and it happens after all work has completed. The harnesses now `os._exit()` so their
+exit codes stay meaningful.
+
+Confirmation on the bench with a real target is outstanding — everything above is
+simulated. (2026-07-24)
+
+---
+
 ### src/pimd_classviz.py — v1.41 — FIX Space-forced placement skipped the removal wait
 
 Reported from the bench: on a target weak enough to need the Space override to get
