@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.6
+# PIMD — Usage Guide (USAGE.md) v1.7
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,15 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.7 2026-07-24 classviz v1.39 → v1.42: new §5 Shape Space bullet (fourth tab,
+                two-mode air reference, scratch captures) and the §1 diagram
+                follows. §5 profile-switch diagnostic amended — the blank
+                heatmap it described was largely the v1.42 glitch-buffer bug,
+                not a lost `G`. New pimd_shape.py (v1) node in the §1 pipeline.
+                §4: Import Profile promoted from optional convenience to the
+                standard starting point for any recalibration, with the
+                settings-persistence trap that motivates it. §6 note corrected —
+                pimd_corpus_check.py is tracked and current, not local-only.
 v1.6 2026-07-23 pimd_targets.py renamed pimd_target_check.py (v2 → v3) — §1
                 diagram and §6 heading/body follow. Stale version references
                 corrected: classviz v1.35 → v1.39 in the §1 diagram and the §5
@@ -57,9 +66,10 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.25)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.39)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.42)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
-                     │
+                     │        └─ uses src/pimd_shape.py (v1) — shared feature maths
+                     │              (family / crossing / decay persistence)
                      ▼
           src/pimd_features.py (v7) + src/pimd_target_check.py (v3)
                — registry-validated training-corpus builder ──► ML corpus
@@ -161,7 +171,8 @@ contract (DESIGN §10) — profiles are locked after calibration, never edited i
   zigzag (− first, then +) on the 8 ns grid with a ±cap, ceiling latch (channels
   that hit no-signal territory are forced down-only), lock-on-pass, parallel or
   sequential evaluation; exports the profile automatically on finish.
-- Import Profile loads an existing JSON for re-checking without a fresh sweep.
+- **Import Profile** loads an existing JSON — **start every recalibration here**, see
+  below. Also used for re-checking a profile without a fresh sweep.
 
 **Operational notes.** Post-enclosure, the top of decay sits at ≈4.87–4.89 V, so the
 **signal-detect ceiling must be set to 5.0 V** (DESIGN §3 epoch note) or the coarse
@@ -169,9 +180,17 @@ hunt false-triggers. Calibrate only after a full warm-up soak — heavy-band del
 move tens of ns between cold and warm (see cal_63_air_v2 rationale, DESIGN §10).
 Settings persist in `src/data/delaycal_settings.json`.
 
+**Always Import Profile before recalibrating.** The persisted settings are *not*
+anchored to the currently locked profile, so editing a field or two and pressing run
+inherits a stale baseline for everything else — band plan included. This has already
+produced a plausible-looking export carrying the excluded 6 µs band and a threshold
+short of one value (2026-07-24; DESIGN §15 delaycal row). Nothing in the export path
+flags a departure from the DESIGN §10 band plan, so the procedure is the guard: load
+the current locked profile, edit what you mean to change, then sweep.
+
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.39)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.42)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -213,14 +232,45 @@ validated against the target registry.
   1.0) and glitch-excluded. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
+- **Shape Space tab (v1.42):** exploration, not capture. Every loaded signature is a
+  point in a selectable 2-D feature space (X/Y/Colour combos), with the live frame
+  moving through it as a yellow dot. Five docks — Scatter, Band Curves, Crossing
+  Ladder, Tile Inspector, Gauges — are movable and floatable; the layout persists,
+  and **Reset layout** restores the default. Feature maths comes from
+  `pimd_shape.py`; family (a sign test) and decay persistence (a magnitude test) are
+  always shown side by side and neither overrules the other.
+  - **Two modes, and Space is the only thing that moves between them.** In **air**
+    mode every clean frame feeds a rolling buffer and the cursor sits pinned at the
+    origin; the indicator goes yellow → **green** once a full buffer is collected.
+    **Space** snapshots that reference and enters **measure** mode, where the cursor
+    moves against it. Space again returns to air, clearing the buffer. This tab does
+    **not** use the Heatmap tab's baseline — on a static reference the whole tab is
+    meaningless within a minute, because drift accumulates as a coherent term the SNR
+    gate cannot catch (DESIGN §14.1). Nothing auto-detects a target arriving or
+    leaving; that is deliberate and physical, not a missing feature.
+  - **Air age matters more than it looks.** The gauge goes amber at 60 s because a
+    60 s-old reference already carries ~1 mV/cell — the order of a weak target
+    (DESIGN §17.10). Re-arm air often.
+  - **Mixed profile geometries are allowed here and marked** — squares/diamonds and a
+    standing banner for captures from another profile. They are comparable in kind,
+    **not calibrated against each other**. Nothing here writes a corpus.
+  - **Save Scratch…** captures an *unregistered* object to
+    `src/data/scratch/gui_scratch_<date>.csv` — never into `src/data/corpora/`.
+    Promotion means registering the object in `targets_v1.csv` and recapturing
+    through the Analysis tab.
 - **Session-dump recorder:** self-describing per-session CSV to
   `src/data/sessions/` — embedded profile JSON, per-column map, `# mark:` /
   `# mark_target:` lines — the input format for `pimd_features.py`.
 
 **Notes.** Always `E` before switching profiles (Load & Run does this itself).
-W-frames with a stale profile index are silently dropped — blank heatmap after a
-profile switch means `G` went out before the board confirmed the profile. Settings
-persist in `src/data/classviz_settings.json` (written on close only).
+W-frames with a stale profile index are silently dropped, so a **persistently** blank
+heatmap after a profile switch means `G` went out before the board confirmed the
+profile. *(Amended v1.7: a heatmap reading ~0 for roughly the first 10 s after connect
+or after a profile change was usually the glitch-buffer bug fixed in v1.42 — its
+median started at zero, so every early frame was flagged as a glitch. On ≤ v1.41 that
+is the more likely explanation, and any bench note resting on the older wording should
+be treated as suspect.)* Settings persist in `src/data/classviz_settings.json`
+(written on close only).
 
 ---
 
@@ -254,6 +304,8 @@ mix (DESIGN §10 invariant).
   pre-v1.32 free-text-schema files are loudly rejected — **no migration path, by
   design** (the post-enclosure corpus is rebuilt from zero).
 
-**Notes.** Run inside the venv (DESIGN §16). The previous-epoch analysis tools
-(`pimd_classify.py`, `pimd_corpus_check.py`, `pimd_v2_findings.py`) are kept
-local-only and untracked pending the new corpus.
+**Notes.** Run inside the venv (DESIGN §16). `pimd_corpus_check.py` (v1.6) is the
+corpus-level acceptance checker — run it to gate a capture day; it is tracked and
+maintained against the current schema (DESIGN §15). The previous-epoch analysis tools
+(`pimd_classify.py`, `pimd_v2_findings.py`) are kept local-only and untracked pending
+the new corpus.

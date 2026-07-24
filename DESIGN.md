@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) · **Firmware:** v4.26 · **PC tools:** gui v4.13 · classviz v1.39 · delaycal v1.25 · features v7 · targets v2 · corpus_check v1.6 · **Coil:** v4 · **Operating profile:** cal_63_air_v2 (locked 2026-07-14)
-**Last bench update:** 2026-07-14 (fw v4.26 CC-write fix A/B-verified; soaked recal → cal_63_air_v2 locked)
-**Doc rev:** 1.9.2 (2026-07-23) — §15 `src/data/profiles/` row: the superseded locks are now listed file-by-file in `.gitignore` rather than excluded by a `dir/*` + negation pair (git handled the wildcard form correctly, but that idiom renders unreliably in some editors' ignore decorations). Net tracking is unchanged — only `cal_63_air_v2.json` is tracked — but new delaycal candidates now stay visible as untracked instead of being ignored by default. (Previous: 1.9.1 (2026-07-23) — post-consolidation corrections (human-directed): `pimd_targets.py` renamed **`pimd_target_check.py`** (v2→v3; import-contract change only, no functional change) — §15 row and the classviz row's reference follow. Repo hygiene, all files kept on disk: `src/data/profiles/` is now gitignored except the operating `cal_63_air_v2.json` (superseded locks untracked), the three previous-epoch `References/profile8b-*` captures untracked, and the stray `src/data/delaycal_1706-104844.csv` deleted; §15 profiles row records the new tracking policy; 1.9 (2026-07-23) — consolidation pass, **PC-tooling only**: no hardware, firmware, profile or measured-value change, and no new bench observations (§3 and §17 untouched — every entry consolidated here is tooling work). classviz v1.32→v1.39: the **Training Session tab is gone**, all corpus capture is now the Analysis tab's automated Training cycle, plus capture ergonomics (shrinkable heatmap split, auto-visible new captures, per-parameter quality colouring) and two latent-bug fixes. features v6→v7 (doc-only); targets v1→v2 — registry relocated to `src/data/targets/targets_v1.csv`; corpus_check v1.4→v1.6 — migrated onto the `target_id`/`distance_mm` schema and fixed so an air capture no longer aborts the run (§15). §15 corrections: registry path and object count (22, not 23). Next phase: systematic target signature/profile capture under the existing `cal_63_air_v2` profile and `targets_v1` registry, both deliberately left untouched; 1.8.2 (2026-07-15) — §15: added rows for the seven previously uncited `References/` images (pcb-coil-baseline, warmup-with-8ns-steps, new-training-data, training-targets-v3, training-results-v1a/b/c — the last three flagged previous-epoch), captions written from the images; 1.8.1 (2026-07-15) — post-consolidation corrections: delaycal v1.25 (`APP_VERSION` constant re-synced with its header — no functional change); `pimd_corpus_check.py` re-tracked and its §15 row restored (v1.4 is maintained against the current schema regime; `pimd_classify.py`/`pimd_v2_findings.py` remain local-only); 1.8 (2026-07-15) — consolidation pass: fw v4.25 outlier-gate latch fix + v4.26 post-emit CC-write race fix, both bench-verified (§8, §17.8); 6 µs band dropped → 63-cell profiles, soaked recal locked as **cal_63_air_v2** (§10); threshold-noise-zone upper edge located ≈ 4.67 V on the 100 µs band, thermal operating-point drift mapped (§14.7, §17.8); structured target-metadata capture regime landed — `targets.csv` registry + `pimd_targets.py` v1, classviz v1.31→v1.32, features v6 (§15); `USAGE.md` added, `docs/` removed; §15 asset rows: scope baseline renamed `scope-pulse-baseline.jpeg`, four previous-epoch profile8b rows dropped; 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only); 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.) Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S LiPo supply (2026-07-24) · **Firmware:** v4.26 · **PC tools:** gui v4.13 · classviz v1.42 · delaycal v1.25 · features v7 · shape v1 · target_check v3 · corpus_check v1.6 · **Coil:** v4 · **Operating profile:** cal_63_air_v2 (locked 2026-07-14)
+**Last bench update:** 2026-07-24 (bench PSU failed → 6S LiPo pack; recalibration series under way, no new profile locked)
+**Doc rev:** 1.10 (2026-07-24) — consolidation pass. **Supply epoch:** the 1990s bench supply failed and the detector moved to a 6S LiPo pack (19.8–25.2 V, working floor 21.0 V), roughly doubling L7815 dissipation and lengthening warm-up (§4, §12, §14.1). Measured result that the regulator holds the operating point across the regulated window, so this is **not** a measurement-epoch reset — no §3/§17 value is voided by it (§17.10). classviz v1.39→v1.42: new **Shape Space** tab (a fourth tab) and scratch captures, built on the new shared feature module **`pimd_shape.py` v1** (§15). First post-enclosure corpus captured 2026-07-23 — 66 captures under `cal_63_air_v2`, analysed into the family-plane / crossing-axis / decay-persistence geometry, with the five analysis figures now cited in §15 (§17.9). New findings: the §14.7 threshold noise zone tracks the **operating point** rather than a fixed voltage, and reads noisy–clean–noisy (§14.7); **reference age** sets a hard ceiling on any frozen-reference measurement (§14.1, §17.10); the family-plane early-band axis needs a confidence band, not a sign test (new §14.9). Deferred to the next pass for want of bench facts: the new locked profile and the state-of-charge window it adds to the §10 profile contract; feature-level portability across that threshold-geometry change (§13); the delaycal settings-persistence fix-or-procedure decision (§15). (Previous: 1.9.2 (2026-07-23) — §15 `src/data/profiles/` row: the superseded locks are now listed file-by-file in `.gitignore` rather than excluded by a `dir/*` + negation pair (git handled the wildcard form correctly, but that idiom renders unreliably in some editors' ignore decorations). Net tracking is unchanged — only `cal_63_air_v2.json` is tracked — but new delaycal candidates now stay visible as untracked instead of being ignored by default; 1.9.1 (2026-07-23) — post-consolidation corrections (human-directed): `pimd_targets.py` renamed **`pimd_target_check.py`** (v2→v3; import-contract change only, no functional change) — §15 row and the classviz row's reference follow. Repo hygiene, all files kept on disk: `src/data/profiles/` is now gitignored except the operating `cal_63_air_v2.json` (superseded locks untracked), the three previous-epoch `References/profile8b-*` captures untracked, and the stray `src/data/delaycal_1706-104844.csv` deleted; §15 profiles row records the new tracking policy; 1.9 (2026-07-23) — consolidation pass, **PC-tooling only**: no hardware, firmware, profile or measured-value change, and no new bench observations (§3 and §17 untouched — every entry consolidated here is tooling work). classviz v1.32→v1.39: the **Training Session tab is gone**, all corpus capture is now the Analysis tab's automated Training cycle, plus capture ergonomics (shrinkable heatmap split, auto-visible new captures, per-parameter quality colouring) and two latent-bug fixes. features v6→v7 (doc-only); targets v1→v2 — registry relocated to `src/data/targets/targets_v1.csv`; corpus_check v1.4→v1.6 — migrated onto the `target_id`/`distance_mm` schema and fixed so an air capture no longer aborts the run (§15). §15 corrections: registry path and object count (22, not 23). Next phase: systematic target signature/profile capture under the existing `cal_63_air_v2` profile and `targets_v1` registry, both deliberately left untouched; 1.8.2 (2026-07-15) — §15: added rows for the seven previously uncited `References/` images (pcb-coil-baseline, warmup-with-8ns-steps, new-training-data, training-targets-v3, training-results-v1a/b/c — the last three flagged previous-epoch), captions written from the images; 1.8.1 (2026-07-15) — post-consolidation corrections: delaycal v1.25 (`APP_VERSION` constant re-synced with its header — no functional change); `pimd_corpus_check.py` re-tracked and its §15 row restored (v1.4 is maintained against the current schema regime; `pimd_classify.py`/`pimd_v2_findings.py` remain local-only); 1.8 (2026-07-15) — consolidation pass: fw v4.25 outlier-gate latch fix + v4.26 post-emit CC-write race fix, both bench-verified (§8, §17.8); 6 µs band dropped → 63-cell profiles, soaked recal locked as **cal_63_air_v2** (§10); threshold-noise-zone upper edge located ≈ 4.67 V on the 100 µs band, thermal operating-point drift mapped (§14.7, §17.8); structured target-metadata capture regime landed — `targets.csv` registry + `pimd_targets.py` v1, classviz v1.31→v1.32, features v6 (§15); `USAGE.md` added, `docs/` removed; §15 asset rows: scope baseline renamed `scope-pulse-baseline.jpeg`, four previous-epoch profile8b rows dropped; 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only); 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -39,9 +39,23 @@ before relying on any pre-2026-07-13 figure. The ML signature corpus is to be re
 the new hardware state — the capture tooling for that rebuild landed 2026-07-14
 (`targets.csv` registry, classviz v1.32 structured capture, features v6; §15) and was
 hardened through 2026-07-23 (classviz v1.39, targets v2, corpus_check v1.6; §15).
-**Systematic target signature capture is the current phase**, running against the locked
-`cal_63_air_v2` profile and the `targets_v1` registry — both deliberately left untouched
-so the corpus is captured under one fixed hardware/profile/target state.
+
+**First post-enclosure corpus captured 2026-07-23** — 66 captures over 22 registered
+targets at 60–420 mm under `cal_63_air_v2`. Its offline analysis established the signature
+geometry the classification layer will be built on: signatures separate into three family
+quadrants on an early-vs-late pulse plane, the zero-crossing pulse width is a stable third
+coordinate that orders the crossover family, and a threshold-axis "decay persistence" ratio
+separates iron-bearing from non-ferrous independently of sign (§17.9). That geometry is now
+live in the tooling — `pimd_shape.py` v1 holds the maths, classviz v1.42's Shape Space tab
+displays it (§15).
+
+**Supply epoch (2026-07-24):** the bench supply failed and the detector moved to a **6S LiPo
+pack** (§12). Unlike the enclosure change this is *not* a measurement-epoch reset — the
+L7815 holds the operating point across the regulated window, measured (§17.10) — but warm-up
+is longer and the free-air noise floor still needs re-measuring on battery (§14.3).
+**Recalibration against the new supply is the current phase**; a candidate series was run
+2026-07-24 and **no new profile is locked yet**, so `cal_63_air_v2` and the `targets_v1`
+registry both remain the operating contract (§10).
 
 ---
 
@@ -87,6 +101,9 @@ eddy currents weaken it).
   20.0 µs pulse / 10.0 µs sample delay / DS 256 · coil in air, no targets · 20 V bench
   supply · allow **4 min warm-up** from cold (expect ≈ 50 µV/s drop during warm-up; do not
   take noise-floor readings before this point). Reference capture: `References/GUI-steady-state-256-1024.jpg`.
+  *(Supply note, 2026-07-24: the 20 V bench supply no longer exists — SoC now runs on the 6S
+  pack, §12. The values above stand: within the regulated window the L7815 holds coil drive
+  constant, measured §17.10. Warm-up is longer than 4 min on battery, §14.1.)*
 
 - **Mode 2 warm-up ≈ 5 min** *(established 2026-07-02/03)*: the profile duty is much heavier
   than Mode 1 SoC; run the profile in ClassViz until thermal drift settles before calibrating
@@ -98,7 +115,7 @@ eddy currents weaken it).
 ## 4. System block diagram (text)
 
 ```
- 5x LiPo (16.5–21 V)
+ 6S LiPo (19.8–25.2 V, working floor 21.0 V)
         │  F1 2A ─ D4 reverse-prot ─ FB1
         ├── U1 L7815CV ──► +15 V  (coil drive rail)
         ├── U2 L7812CV ──► +12 V  (analogue rail)
@@ -330,6 +347,18 @@ carry over) with two changes:
 **Treat v2 as a new calibration epoch for corpus purposes** — same geometry as v1 but
 different delays; frames must never be mixed across profiles (contract above).
 
+> **Recalibration in progress (2026-07-24), nothing locked.** The move to the 6S supply
+> (§12) prompted a recalibration series; three candidate runs were taken and none met the
+> locking preconditions (still warming — §17.10). `cal_63_air_v2` remains the operating
+> profile. Two things the next lock will have to carry, recorded now so they are not
+> forgotten: a **state-of-charge window** — on a bench supply the operating point is fixed,
+> on battery it is only defined inside a stated voltage range, which is a new dimension of
+> this contract — and, if the threshold ladder moves to escape the §14.7 noise columns, an
+> explicit warning that an **identical cell count does not imply comparability**. A changed
+> threshold ladder makes frames incomparable by the `cal_72_air_v2`→`v3` precedent above,
+> and a cell-count sanity check would pass; comparability then rests entirely on the
+> `(profile_name, profile_sha8)` guard in `pimd_features`, which must not be relaxed.
+
 | Band | Freq (kHz) | Pulse (µs) | Duty | Band share of sweep |
 |---|---|---|---|---|
 | 1 | 25.0 | 9.00 | 22.5 % | 4.1 % |
@@ -411,11 +440,34 @@ table lives in the profile JSON (`src/data/profiles/cal_72_air_v3.json`).
 | +2V5 | U7 LT1762-2.5 | ADC |
 | 5 V ref | U5 LTC6655-5 | precision reference |
 
-Input: 5× LiPo (16.5–21 V), F1 2 A, D4 1N4004 reverse protection, FB1 ferrite bead. A
+Input: **6S LiPo (19.8–25.2 V)**, F1 2 A, D4 1N4004 reverse protection, FB1 ferrite bead. A
 **dedicated** battery powers the detector (the rover's 40 V supply was too noisy).
 
-**Known supply-noise facts** *(measured, free-air, 10-sample σ):* ~200 µV USB / no flash ·
-~250 µV battery / no flash · ~900 µV USB / using flash · ~4000 µV battery / using flash.  Writing to
+**6S epoch (2026-07-24).** The 1990s bench supply failed and the pack replaced it. A cell was
+added rather than replacing the documented 5-cell pack like-for-like: at 5S (16.5–21 V) the
+pack falls below the L7815's dropout headroom over the back half of its discharge, so coil
+drive — and therefore decay amplitude, and therefore the voltage each amplitude-anchored
+delay actually lands on (§13) — sags with state of charge. 6S holds the +15 V rail in
+regulation across the whole usable discharge. Field deployment is battery-powered regardless,
+so this brings forward a supply change the soil phase would have forced anyway.
+
+- **Working discharge floor 21.0 V** (3.5 V/cell) — comfortably above the ≈ 18 V at which the
+  7815 loses headroom, and coincident with the cells' own useful-capacity limit, so there is
+  no region where the electronics still work but the pack is being damaged.
+- **Cost: roughly double the dissipation in U1** (≈ 2.5 W → ≈ 4.6 W at the §17.1 measured
+  ~0.5 A average), inside a sealed shielded enclosure, on a project whose first open problem
+  is thermal drift. Warm-up is correspondingly longer than the 5S/bench-supply case (§14.1).
+- **State of charge does not reach the operating point** within the regulated window, measured
+  down to 23.05 V (§17.10) — so the capture-window floor should be set from pulse-instant rail
+  sag, not from gradual discharge.
+- **Not yet measured:** the +15 V rail under scope *during a TX pulse*, fresh pack vs near-flat.
+  A depleted pack's internal resistance may sag the rail at the pulse instant in a way a DMM on
+  the pack cannot show. This number has never been taken, and it is what would establish the
+  real floor.
+
+**Known supply-noise facts** *(measured, free-air, 10-sample σ; **5S/pre-enclosure**, not yet
+re-measured on 6S — §14.3):* ~200 µV USB / no flash · ~250 µV battery / no flash ·
+~900 µV USB / using flash · ~4000 µV battery / using flash.  Writing to
 flash raises the noise floor ~10×.
 
 ---
@@ -441,10 +493,21 @@ flash raises the noise floor ~10×.
    2026-07-14): heavy bands drift −20…−31 mV below their calibrated operating point,
    monotonic with pulse width; light bands ≈ +9 mV high; warm recalibration moves delays
    −56…+16 ns. Mitigation: calibrate fully soaked (cal_63_air_v2).
+   **Signature survives the 6S supply change and warm-up is longer** *(2026-07-24, §17.10)*:
+   two cals 37 min apart reproduce the same fingerprint (light bands later, heavy bands
+   progressively earlier, −96…+16 ns, r = −0.95 against log pulse width), still converging,
+   consistent with roughly doubled 7815 dissipation (§12).
+   **Practical consequence — reference age is a hard ceiling on any frozen-reference
+   measurement.** At ~50 µV/s an air reference accumulates 0.5 mV/cell at 10 s, 3.0 mV at
+   60 s, 7.5 mV at 150 s — so a reference older than ~10 s already rivals a weak target, and
+   one minute exceeds a strong target at close range. Removing a target can make |Δ| go *up*
+   (§17.10). Any procedure that does not bracket air on both sides is unreliable beyond ~10 s;
+   this is the quantitative justification for the air-bracketed Training cycle (§17.5).
 2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path ~50 % noisier than USB;
    unresolved. *(Re-measure post-enclosure — shielding may have changed the picture.)*
 3. **General supply noise floor** (battery vs USB, flash penalty — partially mitigated).
-   *(Re-measure post-enclosure.)*
+   *(Re-measure post-enclosure — and now also post-6S: the §12 table is 5S/pre-enclosure on
+   both counts, so the battery rows are doubly stale.)*
 4. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET
    duty note (see §17) — Q1 (IRF610) is being pushed past its noted SOA; a higher-rated
    replacement FET is probably warranted.
@@ -467,10 +530,33 @@ flash raises the noise floor ~10×.
    heavy bands; if the edge crowds 4.70 V warm, move the third threshold up (e.g. 4.75 V)
    in the next profile rev. Watch item: ch9 (13.44 µs band, first cell) shows ~6 small
    quantized events per session — band-head related, minor.
+   **The zone tracks the operating point, not a fixed voltage** *(2026-07-24, §17.10)*: on
+   the 6S pack at 22.4 V under `cal_63_air_v2`, the **4.40 V and 3.80 V columns** were
+   elevated across all seven bands at ~5× the free-air floor. The defect followed the
+   *threshold* axis, not the band axis — bands share the ladder but sample it at different
+   delays and pulse energies, so a fault tracking the voltage label localises the mechanism
+   to the voltage domain (front end / 1N4732 clamp / preamp) rather than to timing or drive
+   energy. Two observations resist the simple "the zone moved" reading and are **unresolved**:
+   the **4.20 V column read clean between the two elevated columns** — a single shifted or
+   widened zone cannot produce noisy–clean–noisy — and **3.80 V sits well below the 1N4732
+   knee**, where the clamp should not be participating. Either a second mechanism is present
+   or the zone is structured rather than contiguous. Needs a scope on the front end plus a
+   fine threshold sweep (§17.7 method, 4.70 → 3.60 V, all bands).
 8. **Post-enclosure re-measurement backlog.** Noise floors, drift rates, the settled
    top-of-decay level (~4.87–4.89 V observed on heavy bands — bears on the delaycal
    signal-detect ceiling, now 5.0 V), and the §17.4 delay-zone map all predate the
    enclosure and need redoing on the new hardware state.
+9. **Classification layer: the family verdict must not be a hard sign test.** Solid ferrous
+   targets sit knife-edge on the family plane's early-band axis, and two independent lines of
+   evidence agree on the mechanism (§17.9, §17.10): offline, family classification held at
+   97.8 % under an SNR ≥ 5 gate but every misclassification was directional — solid ferrous
+   drifting toward *crossover* as SNR falls, because the early-pulse cells are a ferrous
+   target's smallest signal and lose their sign first; live, `Fe_spanner_01` was measured
+   flipping ferrous → crossover at a ~15 s hold on an early-band mean of just **+0.045 mV**.
+   A "too close to call" band around zero, scaled to the capture's own noise floor, is
+   required — and the same band is what a live cursor should display rather than asserting a
+   family. Recorded before the classifier exists so it inherits this rather than
+   rediscovering it a third time.
 
 ---
 
@@ -481,14 +567,16 @@ flash raises the noise floor ~10×.
 | `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.26**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23); time-floored Mode 2 boundary settling, SETTLE_FLOOR_US 3000 (v4.24); outlier gate on abs(mean) with OUTLIER_GATE_MIN floor — no more latched cells (v4.25); IRQ hold through freq/CC writes via `read_raw_bytes_hold()` — CC-write race closed (v4.26) |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
-| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.39**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Std Dev (rolling N) heatmap mode** (live noise monitor); settledness-gated, glitch-excluding signature captures (v1.31); **registry-backed structured target-metadata capture** — target combo + placement fields from `pimd_target_check.py`, `# mark_target:` session-dump lines, capture provenance (profile_sha8 / fw_version / supply), corpus CSVs to `src/data/corpora/` (v1.32); settings persistence. **Three tabs: Heatmap / Stats / Analysis** — the Analysis tab is the sole capture workbench (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale) and carries the **automated Training cycle** (v1.34–v1.35: one Space press per cycle, auto place/remove detection, 30 s guard countdowns, Save/Ignore) plus capture ergonomics (v1.38: splitter-resizable heatmap vs signature list, new captures auto-checked onto the charts, black live traces, per-parameter green/amber/red quality colouring against editable thresholds). The separate guided **Training Session tab was removed at v1.39** — all capture goes through Analysis |
-| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.25**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); 3-d.p. voltage headers; profile export/import; thermal monitoring; zigzag auto-nudge (parallel or sequential) with ceiling latch + lock-on-pass; activity log; settings persistence. **Operational note:** signal-detect ceiling must be 5.0 V post-enclosure (§3 epoch note) |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.42**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Std Dev (rolling N) heatmap mode** (live noise monitor); settledness-gated, glitch-excluding signature captures (v1.31); **registry-backed structured target-metadata capture** — target combo + placement fields from `pimd_target_check.py`, `# mark_target:` session-dump lines, capture provenance (profile_sha8 / fw_version / supply), corpus CSVs to `src/data/corpora/` (v1.32); settings persistence. **Four tabs: Heatmap / Stats / Analysis / Shape Space** — the Analysis tab is the sole corpus-capture workbench (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale) and carries the **automated Training cycle** (v1.34–v1.35: one Space press per cycle, auto place/remove detection, 30 s guard countdowns, Save/Ignore) plus capture ergonomics (v1.38: splitter-resizable heatmap vs signature list, new captures auto-checked onto the charts, black live traces, per-parameter green/amber/red quality colouring against editable thresholds). The separate guided **Training Session tab was removed at v1.39** — all corpus capture goes through Analysis. **Shape Space (v1.42)** plots every loaded signature as a point in a selectable 2-D feature space with the live frame moving through it — five movable/floatable docks (Scatter, Band Curves, Crossing Ladder, Tile Inspector, Gauges), all feature maths from `pimd_shape.py`. It is the one place in the app that plots **mixed profile geometries** together, and marks every foreign capture on sight (marker shape, standing banner, tooltip, tile title) because they are comparable in kind but not calibrated against each other; the Analysis tab's raw cell-by-cell overlays still refuse. Carries its **own two-mode rolling air reference** (air / measure, Space toggles) rather than the shared static baseline — a frozen baseline made the tab meaningless under drift (§14.1) — and **scratch captures** of unregistered objects to `src/data/scratch/`, never to `src/data/corpora/` |
+| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.25**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); 3-d.p. voltage headers; profile export/import; thermal monitoring; zigzag auto-nudge (parallel or sequential) with ceiling latch + lock-on-pass; activity log; settings persistence. **Operational note:** signal-detect ceiling must be 5.0 V post-enclosure (§3 epoch note). **Settings-persistence trap (2026-07-24):** the persisted `delaycal_settings.json` is *not* anchored to the currently locked profile, so an operator who edits two fields and presses run inherits a stale baseline for everything else — one recal run silently reintroduced the excluded 6 µs band and an 8-value threshold ladder, and looked plausible enough to nearly lock. Nothing in the export path enforces or flags a departure from the §10 band plan. Standard procedure is therefore **Import Profile first** (USAGE §4) — load the locked profile, edit, then sweep. Open: accept as procedure, or add a warning on band-plan/threshold-count mismatch |
+| `src/pimd_shape.py` | Shared signature-geometry feature maths (**v1**, pure NumPy + stdlib, **no Qt imports** — the same functions serve the Shape Space tab and a future classifier). Turns a baseline-corrected `delta_mV` signature into the scalars the 2026-07-23 corpus analysis found to separate targets: `unit_shape`/`amp_l2`/`snr`, `band_means`, `band_range_mean`, `crossing_us`, `decay_persistence`, `family`/`family_gated`. Geometry is always passed explicitly (`pulses_us`, `n_delays`) — nothing assumes 63 cells, and bands/thresholds are resolved by **value** (rows sorted pulse-ascending, threshold high→low) rather than by stored index, which is what makes a live frame and a stored capture comparable. `family` (sign) and `decay_persistence` (magnitude) are meant to be read together and neither may overrule the other: a ferrite toroid reads ferrous by sign and non-ferrous by decay, and both are true of it. `--selftest <corpus csv>` runs four acceptance groups against a known corpus |
 | `src/pimd_features.py` | Session-CSV / gui_signatures-CSV → training-corpus builder (**v7**, offline CLI). Registry join (`target_id` + structured placement replace free text), hard geometry guard — one `(profile_name, profile_sha8)` per corpus build; direct-ingest path for classviz corpus CSVs; pre-v1.32 free-text inputs loudly rejected, no migration by design |
 | `src/pimd_target_check.py` | Shared target-registry loader/validator (**v3**, CLI + library; named `pimd_targets.py` before v3). Reads `src/data/targets/targets_v1.csv`, collects all errors/warnings (ids, enums, numerics, dims order, mass plausibility); never writes the registry. `DEFAULT_REGISTRY_PATH` here is the single source of truth for the registry location — classviz and features both derive from it. Used by classviz (capture-time) and features (build-time) |
 | `src/pimd_corpus_check.py` | Corpus-level acceptance checker (**v1.6**, offline CLI) — shape distance-invariance, split-half SNR, repeat consistency, falloff fit, optional `--baseline` cross-campaign comparison; one flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. Reads the v1.32+ `target_id`/`distance_mm` schema only (legacy `target`/`distance_cm` cleanly rejected). Distances are data-driven — a target at ≥2 distances gets shape rows, ≥3 gets a falloff fit; repeats key off the `repeat_idx` column against the physical placement tuple; the old canary-drift check is retired (per-capture air bracketing does that correction in features). Air captures carry no distance: they appear in the SNR check as `@air` and are excluded from every distance-keyed check |
 | `src/data/targets/targets_v1.csv` | Human-authored registry of 22 physical target objects — single source of target physical metadata (id, material, shape, dims, mass, …). Human-owned data: tooling reads and validates only. Relocated here from `src/data/training_lists/` at targets v2 (that directory held the removed Training Session tab's run-lists and is gone) |
-| `src/data/profiles/` | Locked calibration profiles (firmware↔ML contract, §10). Only the **operating** profile is tracked in git — **`cal_63_air_v2.json`**; the superseded `cal_63_air_v1.json`, `cal_72_air_v3.json`, `cal_72_air_v2.json` are retained on disk but untracked — each is listed individually in `.gitignore` as it is retired. delaycal writes candidate profiles here routinely; those stay visible as untracked until they are either locked (tracked) or retired (ignored) |
-| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema) — post-enclosure corpus rebuild in progress; untracked in git while capture is underway (working data until a corpus is accepted) |
+| `src/data/profiles/` | Locked calibration profiles (firmware↔ML contract, §10). Only the **operating** profile is tracked in git — **`cal_63_air_v2.json`**; the superseded `cal_63_air_v1.json`, `cal_72_air_v3.json`, `cal_72_air_v2.json` are retained on disk but untracked — each is listed individually in `.gitignore` as it is retired. delaycal writes candidate profiles here routinely; those stay visible as untracked until they are either locked (tracked) or retired (ignored). Candidate exports from the 2026-07-24 6S recalibration series sit here untracked, none locked (§10) |
+| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema). First post-enclosure corpus captured 2026-07-23 — `gui_signatures_targets_v1_20260723.csv`, 66 captures over the 22 registered targets at 60–420 mm under `cal_63_air_v2` (§17.9). Untracked in git while capture is underway (working data until a corpus is accepted) |
+| `src/data/scratch/` | Scratch captures of **unregistered** objects from the Shape Space tab (`gui_scratch_<date>.csv`, same CORPUS_HEADER schema, `scratch_<slug>` ids). Deliberately never written into `src/data/corpora/`: a corpus build hard-errors on an unregistered `target_id` and that guard stays — promotion means registering the object in `targets_v1.csv` and recapturing properly. The air-anchor mode (`[anchor=flat]` / `[anchor=air2]`) is recorded in the notes, because a flat single-anchor capture is not drift-corrected and that must stay visible afterwards. Untracked |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` (sliders/QLineEdit fixed to match code, 2026-07-02) |
 | `References/schematic-v604.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
 | `References/scope-pulse-baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs |
@@ -503,6 +591,12 @@ flash raises the noise floor ~10×.
 | `References/training-results-v1a.jpg` | **Previous-epoch** (cal_72_air_v2 corpus): normalised 5 cm band responses grouping 17 targets into ferrous-rising / crossover (SS pipe, lead pipe) / non-ferrous families — the τ-fingerprint result behind §13's discrimination claims; findings historical since the epoch reset |
 | `References/training-results-v1b.png` | **Previous-epoch**: staircase-session diagnostic (2026-07-03) — 5/10/15 cm plateau timeline, shape-change vs distance, amplitude falloff, per-target distance-invariance overlays |
 | `References/training-results-v1c.png` | **Previous-epoch**: 17-target cosine-similarity matrix (three sessions combined, cal_72_air_v2) showing the two-family block structure plus SS pipe as the crossover outlier; amplitude-vs-distance and family panels |
+| `References/Targets v1 Analysis/` | Offline analysis of the 2026-07-23 corpus (66 captures, `cal_63_air_v2`) — the evidence base for §17.9 and for `pimd_shape.py`'s feature set. Untracked working output; `pimd_v2_corpus_analysis.csv` carries the per-capture table (amplitude, SNR, gate pass, empirical vs consensus family, nearest neighbour + cosine) behind the five figures below |
+| `└─ fig1_signature_atlas.png` | Best-SNR capture per target as a 7 × 9 tile (rows pulse 9→100 µs, cols threshold 4.9→0.5 V), each tile self-normalised, red = ferrous-positive / blue = non-ferrous-negative, titled with amplitude, distance and SNR. The whole target set's signatures at one glance — and the visual form of the polarity convention (§2) |
+| `└─ fig2_family_plane.png` | The family plane — early-pulse (mean of 9 + 13.4 µs bands) vs late-pulse (mean of 67 + 100 µs) components of the unit shape, every capture at every distance; marker size ∝ log amplitude, hollow = SNR < 5. Shows the three quadrants (non-ferrous −/−, crossover −/+, ferrous +/+) and, directly, the §14.9 problem: the ferrous cluster sits hard against the x = 0 axis |
+| `└─ fig3_similarity_matrix.png` | Pairwise cosine similarity of all 66 L2-normalised signatures, ordered non-ferrous \| crossover \| ferrous. Within-family shapes collapse toward 1.0 and the families separate as blocks; the NdFeB magnet is the visible outlier row/column, and the ferrite toroid anti-correlates strongly with the whole non-ferrous block |
+| `└─ fig4_invariance_envelope.png` | Two panels. Left: measured within-target cosine across distance pairs vs the ceiling predicted from the captures' own SNRs — points on the line mean shape degradation is fully explained by noise, not by real shape change with distance. Right: amplitude vs distance per target on log axes, slope steepening from ≈ −1.2 in the near field toward ≈ −4…−6, with the SNR-5 ID floor (≈ 6 mV) drawn |
+| `└─ fig5_crossing_axis.png` | Left: normalised band-mean profiles vs pulse width with each target's zero crossing marked. Right: the crossing point as a single coordinate — stable with distance, ordering the crossover family (D-shackle earliest ≈ 14 µs → cast-iron trivet latest ≈ 34 µs) between the "positive by 9 µs" rail (solid ferrous) and the "never crosses" rail (non-ferrous). The basis of `crossing_us` and its two sentinels |
 | `USAGE.md` | Per-app usage guide — intent, operation and pipeline flow for the firmware and each PC tool (replaces the former `docs/` cheat sheets) |
 | `CHANGELOG.md` | Running change log — the source this DESIGN.md is consolidated from (logging conventions in `CLAUDE.md`); archive entries for previous consolidation passes are preserved below the marker line |
 | `DESIGN.md` | **This file** — project reference (specs, design, measured values); a curated snapshot consolidated from `CHANGELOG.md` |
@@ -525,6 +619,9 @@ cd src
 python pimd_gui.py        # Mode 1 GUI (filtered telemetry)
 python pimd_classviz.py   # Mode 2 signature visualiser
 python pimd_delaycal.py   # delay-calibration sweep
+
+# Offline (no board): feature-maths acceptance check against a known corpus
+python pimd_shape.py --selftest data/corpora/gui_signatures_targets_v1_20260723.csv
 ```
 PC tools connect to `/dev/ttyACMx` @ 115200.
 
@@ -551,6 +648,11 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 > **Epoch banner (2026-07-13):** §17.1–17.6 predate the shielded enclosure and fw v4.24
 > (§17.7). They are kept as history — the methods and qualitative findings stand, but
 > every quantitative value must be re-measured before reuse.
+>
+> **Supply note (2026-07-24):** the move to the 6S pack (§12) is deliberately **not** a
+> second epoch reset. Within the regulated window the L7815 holds coil drive constant —
+> measured, §17.10 — so §17.7–17.9 stand as taken. What does change: warm-up is longer
+> (§14.1) and the free-air noise floor is unmeasured on battery (§14.3).
 
 Per-entry: **date · fw/hw rev · one-line summary**, grouped by subject. Detailed changelogs
 stay in source-file headers. This log is curated — it is refreshed from `CHANGELOG.md` at each
@@ -735,6 +837,116 @@ air floor. Key findings:
   `pimd_targets.py` v1, classviz v1.32 structured capture, features v6 (§15). First test
   corpus captured to `src/data/corpora/`; the post-enclosure corpus rebuild ("audit
   first, train second") is under way.
+
+### 17.9 First post-enclosure corpus campaign & the signature geometry it established
+
+*2026-07-23 · fw v4.26 · classviz v1.39→v1.40 · `cal_63_air_v2` · 66 captures, 22 registered
+targets, 60–420 mm · `src/data/corpora/gui_signatures_targets_v1_20260723.csv`*
+
+The corpus rebuild called for at §17.8 was captured, and its offline analysis (figures in
+`References/Targets v1 Analysis/`, §15) established the feature geometry the classification
+layer is being built on. At an SNR ≥ 5 gate: **46 of 66 captures gated**, families splitting
+**26 non-ferrous / 12 crossover / 8 ferrous**.
+
+- **Three families separate as quadrants on an early-vs-late pulse plane** — the signed means
+  of the unit shape over the 9 + 13.4 µs bands and the 67 + 100 µs bands. Non-ferrous −/−,
+  crossover −/+, ferrous +/+. Cosine similarity of the L2-normalised signatures collapses
+  within family and separates between families as visible blocks (fig3).
+- **The zero-crossing pulse width is a stable third coordinate** and orders the crossover
+  family: SS D-shackle earliest at 14.6 µs, gal pipe 14.9–21.1, gal RHS 20.8–23.4, SS perf.
+  disc 26.4–30.9, cast-iron trivet latest at 33.9–34.4 µs. Every gated ferrous target crosses
+  by ≤ 11 µs (i.e. is already positive at the bottom of the ladder) and every gated
+  non-ferrous never crosses — so the two ends need sentinel values, not a crossing.
+- **A threshold-axis "decay persistence" ratio separates iron-bearing from non-ferrous
+  independently of sign** — mean |Δ| over the two lowest-voltage threshold columns ÷ the two
+  highest. Every gated ferrous/crossover capture ≥ 2.44; every non-ferrous ≤ 1.75. The
+  ferrite toroid is the instructive case: **ferrous by sign, non-ferrous by decay (1.37)**,
+  and both readouts are true of it — which is why neither test may overrule the other.
+- **Shape is distance-invariant to within the noise budget.** Measured within-target cosine
+  across distance pairs sits on the ceiling predicted from the captures' own SNRs (fig4 left):
+  what degrades with distance is amplitude, not shape. Amplitude falls with a slope steepening
+  from ≈ −1.2 in the near field toward ≈ −4…−6, and the SNR-5 identification floor lands at
+  ≈ 6 mV against the measured ≈ 1.2 mV L2 additive noise floor (fig4 right).
+- **Family classification held at 97.8 %** under the SNR ≥ 5 gate in leave-one-out, but the
+  misclassifications were **directional** — solid ferrous drifting toward crossover as SNR
+  falls (`Fe_spanner_01` @240 mm). See §14.9: this is a real limit of the sign test, not a
+  fitting artefact.
+- **Corpus integrity:** the capture file was repaired in place after the classviz v1.40
+  `capture_id`-reuse defect (three orphaned captures reissued by regrouping on `captured_at`;
+  no measurement data lost, original kept as `.bak`). Any corpus captured with classviz
+  ≤ v1.39 should be checked for folded captures before use.
+
+### 17.10 6S battery epoch — heatmap survey, calibration series, drift ceiling
+
+*2026-07-24 · fw v4.26 · classviz v1.42 · delaycal v1.25 · `cal_63_air_v2` loaded · 6S LiPo (§12)*
+
+**Threshold-noise survey (22.4 V, Mode 2, Std Dev rolling-N heatmap).** The **4.40 V and
+3.80 V threshold columns** read elevated across all seven bands at roughly 5× the §12 free-air
+floor — at or near the 1284 µV display ceiling, only the 20 µs / 4.40 V cell falling short —
+while **4.20 V read clean between them**. Follows the threshold axis, not the band axis. Full
+reading and the two unresolved anomalies in §14.7.
+
+**Calibration series — three runs, none locked.**
+
+| Run | Time | Pack | Settings | Outcome |
+|---|---|---|---|---|
+| 1 | 20:23:51 | depleted, swapped out below 21 V | stale: 8 bands (6 µs present), 8 thresholds (4.2 absent) | **void** — two confounds (§15 delaycal row) |
+| 2 | 21:10:06 | fresh, 23.6 V | corrected: 7 bands × 9 thresholds | still warming |
+| 3 | 21:47:51 | 23.05 V | as run 2 | still warming, converging |
+
+Runs 2 and 3 are 37 minutes apart with no hardware change, and give a delay shift monotonic in
+pulse width (r = −0.95 against log pulse width):
+
+| Band (µs) | 9 | 13.44 | 20 | 30 | 45 | 67.2 | 100 |
+|---|---|---|---|---|---|---|---|
+| mean shift (ns) | +14 | +9 | +1 | −11 | −27 | −48 | −84 |
+
+Light bands later, heavy bands progressively earlier — the §14.1 thermal fingerprint,
+reproduced under the new supply. Converging (smaller than the preceding interval) but a single
+37-minute interval still moved the 100 µs band ~10 grid steps, so settling under 6S takes
+longer than the historical case, consistent with roughly doubled 7815 dissipation (§12).
+
+**Supply-regulation result.** Across that interval the pack fell 0.55 V, yet the light bands
+moved *later* — a direction a falling supply cannot produce, since less drive means a smaller
+flyback reaching every threshold sooner across **all** bands. No supply-direction component is
+visible: within the regulated window the L7815 is holding coil drive constant and **pack state
+of charge is not reaching the operating point**, at least down to 23.05 V. This is why the
+supply change is not an epoch reset (§17 banner), and it argues for setting the capture-window
+floor from pulse-instant rail sag rather than gradual discharge (§12, unmeasured).
+
+**Reference age is a hard ceiling on any frozen-reference measurement.** At the §17.2 drift
+rate of ~50 µV/s an air reference accumulates 0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at
+150 s. Against mean |Δ| from the 2026-07-23 corpus:
+
+| Target | mean \|Δ\| (mV) | reference age that matches it |
+|---|---|---|
+| Cu_pipe_01 @60 mm | 6.52 | ~130 s |
+| Fe_spanner_01 @60 mm | 3.28 | ~65 s |
+| Cu_pipe_01 @180 mm | 1.05 | ~21 s |
+| Fe_spanner_01 @240 mm | 0.36 | ~7 s |
+| Cu_Zn_brass_dome_01 @180 mm | 0.35 | ~7 s |
+
+Measured directly: a spanner @60 mm reads |Δ| 2.8 mV while 150 s of drift reads 5.2 mV — so
+**removing the object makes |Δ| go up**. No magnitude test against a frozen reference can
+detect removal, which is why auto-release was abandoned by direction. Retrospective: a static
+baseline observed at 3381 s old carried ~169 mV/cell of accumulated drift — a live display
+dominated entirely by thermal history. Consequences in §14.1.
+
+Two rolling-window sizes were measured against this rather than assumed: a copper pipe
+registered at 8 s with a 15-frame live window and **not at all** with 50; and a spanner @60 mm
+read the correct family out to a 15 s hold with a 20–40-frame air buffer but was already wrong
+at a 5 s hold with 80–120 (a rolling reference's median sits half a window in the past, and
+that lag is baked into every measurement as drift).
+
+**Family plane, live.** `Fe_spanner_01` was measured flipping ferrous → crossover at a ~15 s
+hold, on an early-band mean of **+0.045 mV** — independently confirming the §17.9 offline
+result and its mechanism. See §14.9.
+
+**Bench observation, not a result:** with a candidate calibration running and
+`cal_63_air_v2`-era signatures loaded — a deliberately mismatched profile — Shape Space still
+tracked targets correctly on the family plane after a clean air grab. Consistent with the
+band-axis features surviving a threshold re-anchoring, but it is an impression from a display,
+not a measurement, and the sentinel recapture that would settle it has not been run.
 
 ## 18. Change Log Consolidation Pass.
 

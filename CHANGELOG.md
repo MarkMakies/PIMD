@@ -1,3 +1,237 @@
+### DESIGN.md — 1.10 — consolidation pass (§18)
+
+Human-directed, read-only rule suspended per §18. Consolidates everything above the
+previous marker that was not already folded in by the 1.9.1/1.9.2 correction passes.
+
+**Supply epoch.** §4 diagram and §12 rewritten for the 6S LiPo pack (19.8–25.2 V,
+working floor 21.0 V), with the dropout-headroom rationale for adding a cell rather
+than replacing like-for-like, the ≈2.5 W → ≈4.6 W dissipation cost, and the
+never-measured pulse-instant rail-sag check recorded as outstanding. §3's SoC bullet
+gets a supply note. Deliberately **not** treated as a second measurement epoch: the
+§17.10 regulation result shows the L7815 holds the operating point across the
+regulated window, so §17.7–17.9 stand as taken — the §17 banner says so explicitly
+rather than leaving a reader to assume the worst.
+
+**Tooling.** §15: classviz row v1.39 → v1.42 (four tabs, Shape Space, mixed-geometry
+marking, the tab's own two-mode air reference, scratch captures); new rows for
+`src/pimd_shape.py` v1 and `src/data/scratch/`; delaycal row gains the
+settings-persistence trap; corpora row updated from "rebuild in progress" to the
+captured 66-capture corpus. §16 gains the `pimd_shape --selftest` invocation.
+
+**Findings.** New §17.9 (the 2026-07-23 corpus campaign and the family-plane /
+crossing-axis / decay-persistence geometry it established) and §17.10 (the 6S trial:
+threshold-column survey, three-run calibration series, the regulation result, the
+reference-age drift ceiling, the live family-plane knife-edge). §14.1 gains the 6S
+thermal reproduction and the reference-age consequence; §14.3 flags the noise floor
+as doubly stale; §14.7 gains the operating-point dependence and its two unresolved
+anomalies; **new §14.9** — the family verdict must not be a hard sign test.
+
+**Assets.** Six new §15 rows citing `References/Targets v1 Analysis/` — the analysis
+CSV and five figures, captioned from the figures themselves rather than their
+filenames.
+
+§10 records the in-progress recalibration and the two things the next lock must carry
+(a state-of-charge window; an explicit warning that identical cell count does not
+imply comparability) but **no new profile section** — nothing is locked yet. Also
+deferred for want of bench facts, and listed in the Doc-rev line so the next pass
+picks them up: feature-level portability across a threshold-geometry change (§13) and
+the delaycal fix-or-procedure decision. Header versions and the stale `targets v2`
+reference corrected; Doc-rev 1.9.2 → 1.10 with the full prior history preserved.
+(2026-07-24)
+
+---
+
+### USAGE.md — v1.7 — Shape Space, the amended profile-switch diagnostic, Import-Profile-first
+
+Follows the 1.10 consolidation. New §5 bullet for the **Shape Space** tab covering the
+parts an operator can get wrong: the two-mode air reference and that Space is the only
+thing that moves between them, that the tab deliberately ignores the Heatmap tab's
+baseline, that nothing auto-detects a target, why air age matters at 60 s rather than
+600, that mixed geometries are marked but not calibrated against each other, and that
+scratch saves never reach `src/data/corpora/`. §1 diagram: classviz v1.39 → v1.42 plus
+a `pimd_shape.py` v1 node.
+
+**§5's profile-switch diagnostic corrected.** It advised that a blank heatmap after a
+profile switch means `G` went out before the board confirmed the profile. An unknown
+share of those observations were the glitch-buffer bug fixed at v1.42 — the 64-frame
+median started at zero, so every frame in the first ~10 s was flagged a glitch. The
+note now distinguishes a *persistently* blank heatmap from the first ~10 s, and says
+past bench notes resting on the old wording are suspect.
+
+**§4:** Import Profile promoted from an optional convenience to the standard starting
+point for any recalibration, with the settings-persistence trap that motivates it.
+**§6:** corrected a stale note that listed `pimd_corpus_check.py` among the untracked
+previous-epoch tools — it is tracked, v1.6, and current. (2026-07-24)
+
+---
+
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-07-24
+
+### hardware/power — 6S LiPo supply — bench PSU failed, moved to 6-cell pack
+
+The 1990s bench supply failed 2026-07-24. The detector moved to a 6-series LiPo pack
+(19.8–25.2 V) in place of the documented 5-cell pack (§12, 16.5–21 V). Rationale for adding a
+cell rather than replacing like-for-like: at 5S the pack falls below the L7815's dropout
+headroom over the back half of its discharge, so coil drive — and therefore decay amplitude,
+and therefore the voltage each amplitude-anchored delay actually lands on — sags with state of
+charge. 6S holds the +15 V rail in regulation across the whole usable discharge. Cost is
+roughly double the dissipation in the 7815 (≈2.5 W → ≈4.6 W at the §17.1 measured ~0.5 A
+average) inside a sealed shielded enclosure, on a project whose first open problem is thermal
+drift; warm-up is correspondingly longer than the historical 5S/bench-supply case. Field
+deployment is battery-powered regardless, so this brings forward a supply epoch change the
+soil phase would have forced anyway.
+
+Working discharge floor **21.0 V** (3.5 V/cell), comfortably above the ≈18 V at which the 7815
+loses headroom and coincident with the cells' own useful-capacity limit — there is no region
+where the electronics still work but the pack is being damaged.
+[FILL: scope measurement of the +15 V rail during a TX pulse, fresh pack vs near-flat, to
+establish the real floor — a depleted pack's internal resistance may sag the rail at the pulse
+instant in a way a DMM on the pack cannot show. This number has never been measured.]
+(2026-07-24)
+
+---
+
+### findings — threshold noise zone is operating-point dependent, not fixed-voltage
+
+First movement on §14.7 since the enclosure epoch. Running Mode 2 on the 6S pack at 22.4 V
+with `cal_63_air_v2` loaded, the Std Dev (rolling N) heatmap showed the **4.40 V and 3.80 V
+columns elevated across all seven bands** at roughly 5× the §12 free-air floor (values at or
+near the 1284 µV display ceiling; only the 20 µs / 4.40 V cell fell short). The defect followed
+the *threshold* axis, not the band axis — bands share the threshold ladder but sample it at
+different absolute delays and different pulse energies, so a fault tracking the voltage label
+localises the mechanism to the voltage domain (front end / 1N4732 clamp / preamp) rather than
+to timing or drive energy.
+
+Two observations resist the simple "the zone moved" reading and are recorded unresolved: the
+**4.20 V column read clean between the two elevated columns** (a single shifted or widened
+zone cannot produce noisy–clean–noisy), and **3.80 V sits well below the 1N4732 knee**, where
+the clamp should not be participating. Either a second mechanism is present or the zone is
+structured rather than contiguous. Needs a scope on the front end plus a fine threshold sweep
+(§17.7 method, 4.70 → 3.60 V, all bands).
+(2026-07-24)
+
+---
+
+### src/pimd_delaycal.py — [FILL: version if a code change is made] — stale settings silently reintroduced an excluded band plan
+
+Run 1 of the 2026-07-24 recalibration exported a profile carrying an **eighth band (6 µs /
+50 kHz)** — excluded back in `cal_63_air_v1` as carrying no unique target information and being
+noisy — together with an **8-value threshold ladder missing 4.2 V**. Neither was intended: the
+operator edited two threshold voltages and pressed run, and `delaycal_settings.json` supplied a
+stale baseline for everything else. The result looked plausible and was nearly locked.
+
+Both anomalies share one root cause: **delaycal's persisted settings are not anchored to the
+currently locked profile.** The band-plan exclusion is a project decision recorded in DESIGN
+§10, and nothing in the export path enforces or flags a departure from it. Documented
+workaround is the existing **Import Profile** path (USAGE §4) — load the current locked profile
+first, edit, then sweep — which produced the corrected runs 2 and 3.
+[FILL: accept as an operator procedure, or add a warning when an exported band plan or
+threshold count differs from the loaded/locked profile? If the latter, this entry needs a
+version bump.]
+(2026-07-24)
+
+---
+
+### findings — 6S warm-up reproduces the §14.1 thermal fingerprint; pack voltage does not reach the operating point
+
+Two successive calibrations 37 minutes apart (runs 2 and 3 of the 2026-07-24 series), same
+settings, no hardware change, pack falling 23.6 → 23.05 V, give a delay shift monotonic in
+pulse width (r = −0.95 against log pulse width):
+
+| Band (µs) | 9 | 13.44 | 20 | 30 | 45 | 67.2 | 100 |
+|---|---|---|---|---|---|---|---|
+| mean shift (ns) | +14 | +9 | +1 | −11 | −27 | −48 | −84 |
+
+Light bands later, heavy bands progressively earlier, overall range −96…+16 ns. This reproduces
+the §14.1 post-enclosure thermal fingerprint closely — that recalibration moved delays −56…+16
+ns with heavy bands earliest and light bands high — confirming the signature survives the supply
+change and that the rig was still warming. Magnitude is smaller than the preceding interval,
+i.e. converging, but a single 37-minute interval still moved the 100 µs band ~10 grid steps
+(order 100 mV of operating point), so settling under 6S takes longer than the historical case,
+consistent with roughly doubled 7815 dissipation.
+
+**Supply-regulation result (new).** Across that interval the pack fell 0.55 V, yet the light
+bands moved *later* — a direction a falling supply cannot produce, since less drive means a
+smaller flyback reaching every threshold sooner across all bands. No supply-direction component
+is visible. Within the regulated window the L7815 is therefore holding coil drive constant and
+**pack state of charge is not reaching the operating point**, at least down to 23.05 V. This
+supports setting the capture-window floor from pulse-instant rail sag (the pending scope
+measurement in the 6S supply entry above) rather than from gradual state of charge.
+(2026-07-24)
+
+---
+
+### USAGE.md — [PENDING] — profile-switch diagnostic invalidated by the v1.42 glitch-buffer fix
+
+`pimd_classviz v1.42` fixed a pre-existing defect: the 64-frame glitch-filter buffer
+(`_ch_glitch_buf`) was zero-filled on first use, so its median sat near 0 until 33 real frames
+had arrived and every one of those frames was flagged `|raw − 0| > 100 mV`, i.e. a glitch.
+The consequence recorded there is display-side — the heatmap showed ~0 for roughly the first
+10 s after connect or after a profile change.
+
+The consequence **not** recorded is documentary: USAGE §5 currently advises that a blank heatmap
+after a profile switch means `G` went out before the board confirmed the profile. An unknown
+share of those observations were this bug, not a lost `G`. The diagnostic needs amending, and
+any past bench note resting on it should be treated as suspect. **USAGE.md is not yet edited** —
+this entry records the defect in the documentation, not its repair.
+[FILL: were any corpus captures taken within ~10 s of a connect or profile change? The Training
+cycle excludes glitch-flagged frames, so the failure mode would be a slow-filling air buffer
+rather than corrupted data — but confirm rather than assume.]
+(2026-07-24)
+
+---
+
+### findings — reference age sets a hard ceiling on measurement validity; quantified against real targets
+
+Building the Shape Space air model produced a general measurement constraint that was not
+previously written down. At the §17.2 drift rate of ~50 µV/s, an air reference accumulates
+**0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at 150 s**. Against mean |Δ| from the 2026-07-23
+corpus:
+
+| Target | mean \|Δ\| (mV) | reference age that matches it |
+|---|---|---|
+| Cu_pipe_01 @60 mm | 6.52 | ~130 s |
+| Fe_spanner_01 @60 mm | 3.28 | ~65 s |
+| Cu_pipe_01 @180 mm | 1.05 | ~21 s |
+| Fe_spanner_01 @240 mm | 0.36 | ~7 s |
+| Cu_Zn_brass_dome_01 @180 mm | 0.35 | ~7 s |
+
+So a reference older than ~10 s already rivals a weak target and one minute exceeds a strong
+target at close range. Measured directly on the bench during the build: a spanner @60 mm reads
+|Δ| 2.8 mV while 150 s of drift reads 5.2 mV — **removing the object makes |Δ| go up**, which is
+why no magnitude test against a frozen reference can detect removal, and why the auto-release
+logic was abandoned by direction.
+
+This is a property of the instrument, not of any one tab. It is the quantitative justification
+for the Analysis tab's air-bracketed Training cycle (§17.5) — corpus captures are protected
+because they bracket air on both sides — and it means any procedure that does not bracket is
+unreliable beyond ~10 s. Retrospective note: a static baseline observed at 3381 s old carried
+~169 mV/cell of accumulated drift, i.e. a live display dominated entirely by thermal history.
+(2026-07-24)
+
+---
+
+### findings — family-plane early-band axis needs a confidence band, not a sign test
+
+Two independent lines of evidence converge. Offline, in the 2026-07-23 corpus analysis, family
+classification held at 97.8% under an SNR ≥ 5 gate, but the misclassifications were
+directional: solid ferrous targets drift toward *crossover* as SNR falls, because the early-pulse
+cells are a ferrous target's smallest signal and lose their sign first (`Fe_spanner_01` @240 mm
+misread as crossover in leave-one-out). Live, during the Shape Space build, `Fe_spanner_01` was
+measured flipping ferrous → crossover at a ~15 s hold, its early-band mean being just
+**+0.045 mV** — a fraction of a millivolt from the axis.
+
+The two agree on mechanism and on which targets are exposed. Consequence for the classification
+layer: the family verdict must not be a hard sign test on the early-band axis. A "too close to
+call" band around zero, scaled to the capture's own noise floor, is required — and the same
+band is what a live cursor should display rather than asserting a family. Recorded now so the
+classifier inherits it rather than rediscovering it a third time.
+(2026-07-24)
+
+---
+
 ### src/pimd_shape.py — v1 — shared signature-geometry feature maths
 
 New module. Pure NumPy + stdlib, deliberately free of Qt/pyqtgraph imports so the
@@ -483,8 +717,6 @@ bullet no longer lists the `notes` placement field (removed at classviz v1.38) �
 it now names the v1.38 per-parameter green/amber/red readout instead. (2026-07-23)
 
 ---
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-23
 
