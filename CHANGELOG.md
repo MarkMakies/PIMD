@@ -1,3 +1,45 @@
+### src/pimd_shape.py — v1 — shared signature-geometry feature maths
+
+New module. Pure NumPy + stdlib, deliberately free of Qt/pyqtgraph imports so the
+same functions serve both the ClassViz Shape Space tab and a future classifier.
+Turns a baseline-corrected `delta_mV` signature into the small set of scalars the
+2026-07-23 corpus analysis found to separate targets: `unit_shape` /`amp_l2` /`snr`,
+`band_means`, `band_range_mean` (backs the early/mid/late and custom-range axes
+alike), `crossing_us`, `decay_persistence`, and `family` /`family_gated`.
+
+Conventions are fixed and documented in the header: `vec` is band-major, pulse
+ascending, thresholds high→low — the same row sort `pimd_features` writes and
+`pimd_corpus_check.load_corpus` /`pimd_classviz._scan_editable_signature_file` read,
+which is what makes a live frame and a stored capture comparable at all. Geometry
+is always passed explicitly (`pulses_us`, `n_delays`); nothing assumes 63 cells, and
+`default_band_ranges()` derives early/mid/late from `n_bands` (outer thirds), which
+reproduces the analysis's 0-1 / 2-4 / 5-6 split for the 7-band operating profile
+without hard-coding it.
+
+`crossing_us` interpolates log-linearly between bracketing bands — the pulse ladder
+is geometric (DESIGN §10), so equal information sits in equal log-width steps — and
+takes the *first* neg→pos transition so a noisy late band cannot move the answer.
+The two outcomes that are not a crossing get sentinel values rather than NaN:
+`CROSS_ALREADY_POS = 8.0` (band 0 already positive — a solid ferrous target) and
+`CROSS_NEVER = 200.0` (non-ferrous). Both sit just outside the 9–100 µs ladder so
+they land on their own rails on a log axis instead of dropping out of the plot.
+
+`family` is a sign test and `decay_persistence` a magnitude test, and they are meant
+to be read together: a ferrite toroid reads ferrous by sign and non-ferrous by decay,
+and both readouts are true of it. Neither is allowed to overrule the other anywhere
+in the tooling.
+
+`--selftest <corpus csv>` runs the four acceptance groups against a known corpus.
+Verified against `gui_signatures_targets_v1_20260723.csv` (cal_63_air_v2, 66 captures):
+66 points / 46 gated / 20 below gate at SNR 5.0; families 26 non-ferrous, 12 crossover,
+8 ferrous; crossing widths within ±1.5 µs of the analysis figures (trivet 34.35/33.85,
+SS disc 26.4–30.9, gal RHS 20.8–23.4, gal pipe 14.9–21.1, D-shackle 14.61 as the
+earliest crossover), every gated ferrous ≤ 11 µs, every gated non-ferrous at
+CROSS_NEVER, ferrite at CROSS_ALREADY_POS; decay persistence ferrous/crossover
+min 2.44, non-ferrous max 1.75, ferrite 1.37. (2026-07-24)
+
+---
+
 ### src/pimd_classviz.py — v1.41 — FIX Space-forced placement skipped the removal wait
 
 Reported from the bench: on a target weak enough to need the Space override to get
