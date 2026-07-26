@@ -1,3 +1,79 @@
+### src/pimd_target_check.py — v4 — CLI requires `-f`; `wall_thickness_mm` 0 = solid
+
+The CLI no longer defaults its registry path: `-f/--file` is now required (`--registry`
+kept as an alias), so `python pimd_target_check.py` with no arguments is a usage error
+instead of a silent check of whichever file the default happened to name. With several
+registry versions on disk that default had become a trap — it still pointed at
+`targets_v1.csv` while the live registry had moved to v3, so a clean run said nothing
+about the file actually in use. Relative paths resolve against the current working
+directory as usual (`-f data/targets/targets_v3.csv` from `src/`), and the run now prints
+the absolute path of the registry it loaded before the table.
+
+`wall_thickness_mm` gained an explicit "solid / not applicable" value of **0**, replacing
+the `na` the v3 registry carried (which the tool rejected outright as unparseable) and the
+empty cell v1 used. Both legacy spellings are still accepted and normalise to `0.0`, so
+older registry files keep loading, and the column is now always a float — `Target.
+wall_thickness_mm` is never `None`. The shape-mismatch warning fires on `> 0` rather than
+"is set", so a solid `plate`/`disc`/`bolt` no longer trips it just for carrying the
+sentinel; a negative wall is a new error.
+
+`DEFAULT_REGISTRY_PATH` repointed to `targets_v3.csv`. It remains the single source of
+truth for the *library* default, so `pimd_classviz.py` (`TARGETS_REGISTRY_PATH`),
+`pimd_features.py` (`--registry` default) and `pimd_corpus_check.py` (no-arg
+`load_targets()`) all follow it onto v3 unchanged — only the CLI lost its default.
+
+Verified: all four PC tools `py_compile` clean; `-f` missing exits 2 with usage; v3 loads
+26 targets / 0 errors / 2 pre-existing warnings (`ferrite_toroid_01` closed_loop, and
+`Fe_heavy_pully`'s 66 mm wall on a `disc`); v1 still loads clean with its 12 blank walls
+normalised to `0.0`; planted `abc` and `-2` walls both error. Note for downstream:
+`pimd_features.py:745` writes `wall_thickness_mm` as `''` when `None`, which can no longer
+happen — solid targets will now appear as `0` in newly built corpus CSVs rather than
+blank. (2026-07-26)
+
+---
+
+### src/data/targets/targets_v3.csv — registry v3 — re-exported from UTF-7, data fixes
+
+New registry revision (solder roll changed; rocks, quartz piece and water bottle added;
+existing rows reviewed). The LibreOffice export had been written with the character set
+left on **Unicode (UTF-7)**, so every `_`, `-`, `#`, `"`, `—` and `>=` in the file arrived
+as a `+AF8-`-style modified-base64 escape — `targets+AF8-v3`, `dim+AF8-a +AD4APQ-
+dim+AF8-b`. Decoded in place with `iconv -f UTF-7 -t UTF-8`; row count and content
+otherwise unchanged. LibreOffice remembers the last charset used, so the export dialog
+needs setting back to UTF-8 on the next Save As or this recurs.
+
+Data fixes in the same pass: header typos (`reviwed`, `measuremnents`) and a duplicated
+`dim_a >= dim_b >= dim_c.` cell on the units line; `Quartz_piece_01` had a shifted row —
+`dim_c_mm` empty with its `40` sitting in `wall_thickness_mm` — corrected to
+`60,50,40`; `material_class` for `Quartz_piece_01` and `Sandstone_rock_01` set from `?`
+to `mineral`. All 37 lines now parse to exactly 13 fields and every row satisfies the
+header's sorted-bounding-box invariant.
+
+`wall_thickness_mm` migrated from `na` to `0` for the 15 solid targets, matching the
+sentinel `pimd_target_check.py` v4 now understands; the header comment block documents
+`0 = solid / not applicable`.
+
+`Fe_heavy_pully` reclassified `disc` → `ring`, which was the last registry warning. Its
+66 mm `wall_thickness_mm` was flagged as being set on a shape the registry treats as
+solid, but the measurement is right — the pulley has a real bore and 66 is the radial
+wall, `(150 − 18) / 2`. So the row was a shape misclassification, not a bad number: a
+shape carrying a radial wall is a `ring`. That matches the three existing `ring` rows
+(`Cu_Zn_brass_gear_01`, `ferrite_toroid_01`, `Fe_SS_shackle_01`), which all pair a radial
+wall with `closed_loop=y`, and the mass agrees (a steel ring OD 150 / ID 18 × 28 is
+3829 g against 3700 g measured). Dims were never at issue — `dim_a = dim_b = 150`,
+`dim_c = 28` is the correct bounding box, same convention as the pipe rows.
+
+Left alone deliberately: `Fe_heavy_pully` misspells "pulley" in both `short_name` and
+`target_id`, and ids are stable by the registry's own rule — renaming one would orphan
+any capture referencing it. Flagged, not changed: `closed_loop=y` is kept on the pulley,
+which reads the flag as "supports a large circulating eddy-current path" rather than the
+header's written rule (a bore comparable to object size; an 18 mm bore in a 150 mm body
+doesn't meet it). Under that broader reading `Fe_Cast_iron_trivet_01` and `Fe_SS_disc_01`
+are arguably mislabelled `n` and the header wording needs updating — a registry-wide
+semantics decision left for a separate pass. (2026-07-26)
+
+---
+
 ### repo — `cal_63_air_v2` retired; `cal_63_air_bat_v3` is the sole operating profile
 
 `cal_63_air_v2.json` untracked (`git rm --cached`, still on disk) and added to the superseded

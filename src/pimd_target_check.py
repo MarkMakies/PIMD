@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Target Registry Check (pimd_target_check.py) v3
-# — loads and validates data/targets/targets_v1.csv, the human-maintained
+# PIMD Target Registry Check (pimd_target_check.py) v4
+# — loads and validates data/targets/targets_v3.csv, the human-maintained
 #   registry of physical target objects captured by the PIMD detector. Shared
 #   by pimd_classviz.py's Analysis tab and pimd_features.py's corpus builder
 #   -- one implementation, so both tools agree on what a valid target row
@@ -19,7 +19,18 @@
 # warnings, not errors -- the registry owner has judgment calls on physical
 # measurements that this tool can't second-guess.
 #
+# wall_thickness_mm: 0 is the registry's "solid / not applicable" value, and
+# is what the file now carries for every solid shape. Legacy spellings ''
+# (targets_v1.csv) and 'na' are accepted and normalised to 0.0, so the column
+# is always a float -- callers never need a None branch.
+#
+# The CLI has no default registry: -f/--file is required, so a run can never
+# silently validate a stale registry version. The library default
+# (DEFAULT_REGISTRY_PATH, used by classviz / features / corpus_check) is
+# unaffected.
+#
 # History (full detail in CHANGELOG.md):
+#   v4 CLI requires -f/--file (no default); wall_thickness_mm 0 = solid; registry -> targets_v3.csv
 #   v3 renamed pimd_targets.py -> pimd_target_check.py (import contract change only)
 #   v2 registry relocated to data/targets/targets_v1.csv (out of data/training_lists/)
 #   v1 initial version
@@ -38,8 +49,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # from this, so the file moves by editing this one line. v2 moved it out of
 # data/training_lists/, which was never a sensible home for it: that directory
 # held the Training Session tab's saved run-lists, and classviz v1.39 removed
-# that tab entirely.
-DEFAULT_REGISTRY_PATH = os.path.join(SCRIPT_DIR, 'data', 'targets', 'targets_v1.csv')
+# that tab entirely. v4 repointed it at targets_v3.csv.
+#
+# This is the *library* default only -- the CLI deliberately has none (v4), so
+# `python pimd_target_check.py` without -f is a usage error rather than a
+# silent check of whichever registry version this line happens to name.
+DEFAULT_REGISTRY_PATH = os.path.join(SCRIPT_DIR, 'data', 'targets', 'targets_v3.csv')
 
 TARGET_ID_RE = re.compile(r'^[A-Za-z0-9_]+$')
 
@@ -52,11 +67,18 @@ SHAPE_CLASS_ENUM = {'rod', 'tube', 'ring', 'disc', 'plate', 'dome', 'block', 'sp
 CLOSED_LOOP_ENUM = {'y', 'n', 'na', 'unk'}
 MAGNET_TEST_ENUM = {'strong', 'weak', 'none', 'unk'}
 
-# Shapes for which a wall_thickness_mm value is expected and unremarkable
+# Shapes for which a non-zero wall_thickness_mm is expected and unremarkable
 # (hollow sections / bores; for rings this is the radial wall). Any other
-# shape carrying a wall_thickness_mm is flagged -- a warning, not an error,
-# since the registry owner has judgment calls here.
+# shape carrying a non-zero wall_thickness_mm is flagged -- a warning, not an
+# error, since the registry owner has judgment calls here. A wall of 0 (solid)
+# is never flagged, on any shape.
 NO_WARN_WALL_THICKNESS_SHAPES = {'tube', 'block', 'dome', 'ring', 'wire_coil'}
+
+# Accepted legacy spellings of "solid / not applicable" in wall_thickness_mm,
+# normalised to 0.0. The registry's own convention is a literal 0; '' is what
+# targets_v1.csv used and 'na' what targets_v3.csv used before the tool
+# understood 0, and both still parse so older registry files keep loading.
+WALL_THICKNESS_NA_SPELLINGS = {'', 'na'}
 
 # material_class values that are not electrically conductive -- closed_loop
 # 'y' (a macroscopic closed conductive ring path) doesn't make physical
@@ -83,7 +105,7 @@ class Target:
     dim_a_mm: float
     dim_b_mm: float
     dim_c_mm: float
-    wall_thickness_mm: object   # float or None
+    wall_thickness_mm: float    # 0.0 = solid / not applicable (never None, v4)
     closed_loop: str
     mass_g: float
     magnet_test: str
@@ -108,7 +130,8 @@ def _optional_str(s):
 def load_targets(path=DEFAULT_REGISTRY_PATH):
     """Load and validate the target registry. Returns (targets, issues):
     targets is dict[target_id -> Target] (always usable; empty only if the
-    header itself is unreadable). issues is list[Issue] -- errors and
+    header itself is unreadable), with wall_thickness_mm always a float (0.0
+    = solid / not applicable). issues is list[Issue] -- errors and
     warnings both collected, never stops at the first problem, so a single
     CLI run surfaces everything wrong with the file at once. Raises
     FileNotFoundError/OSError unchanged if `path` can't be opened -- callers
@@ -190,14 +213,24 @@ def load_targets(path=DEFAULT_REGISTRY_PATH):
                 row_ok = False
                 dims[name] = None
 
-        wall_mm = None
-        if wall_s.strip():
+        # 0 is the registry's "solid / not applicable" value; '' and 'na' are
+        # the legacy spellings of the same thing and normalise to 0.0, so
+        # wall_thickness_mm is always a float downstream.
+        wall_raw = wall_s.strip()
+        wall_mm = 0.0
+        if wall_raw.lower() not in WALL_THICKNESS_NA_SPELLINGS:
             try:
-                wall_mm = float(wall_s.strip())
+                wall_mm = float(wall_raw)
             except ValueError:
                 issues.append(Issue('error', row_no, target_id,
-                                     "unparseable wall_thickness_mm: '{0}'".format(wall_s)))
+                                     "unparseable wall_thickness_mm: '{0}' "
+                                     '(expected a number, or 0 for solid)'.format(wall_s)))
                 row_ok = False
+            else:
+                if wall_mm < 0:
+                    issues.append(Issue('error', row_no, target_id,
+                                         'negative wall_thickness_mm: {0}'.format(wall_mm)))
+                    row_ok = False
 
         mass_g = None
         try:
@@ -214,7 +247,7 @@ def load_targets(path=DEFAULT_REGISTRY_PATH):
                                      'dims not sorted: dim_a_mm={0} dim_b_mm={1} dim_c_mm={2} '
                                      '(expected dim_a >= dim_b >= dim_c)'.format(dim_a, dim_b, dim_c)))
 
-        if wall_mm is not None and shape_class not in NO_WARN_WALL_THICKNESS_SHAPES:
+        if wall_mm > 0 and shape_class not in NO_WARN_WALL_THICKNESS_SHAPES:
             issues.append(Issue('warning', row_no, target_id,
                                  "wall_thickness_mm={0} set on shape_class '{1}', outside the usual "
                                  '{2}'.format(wall_mm, shape_class, sorted(NO_WARN_WALL_THICKNESS_SHAPES))))
@@ -291,20 +324,27 @@ def print_target_table(targets, issues):
 
 
 def build_arg_parser():
-    p = argparse.ArgumentParser(description='Load and validate the PIMD target registry.')
-    p.add_argument('--registry', default=DEFAULT_REGISTRY_PATH,
-                    help='Path to the target registry CSV (default: {0}).'.format(
-                        DEFAULT_REGISTRY_PATH))
+    p = argparse.ArgumentParser(
+        description='Load and validate a PIMD target registry CSV.',
+        epilog='Example (from src/): python pimd_target_check.py -f data/targets/targets_v3.csv')
+    # Required on purpose (v4): there are several registry versions on disk and
+    # a defaulted path meant a run could silently validate the wrong one. A
+    # relative path resolves against the current working directory, as usual.
+    # '--registry' stays as an alias so existing notes and muscle memory work.
+    p.add_argument('-f', '--file', '--registry', dest='file', required=True, metavar='PATH',
+                    help='Path to the target registry CSV (required; relative to the '
+                         'current directory).')
     return p
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     try:
-        targets, issues = load_targets(args.registry)
+        targets, issues = load_targets(args.file)
     except OSError as e:
-        print('Could not read registry {0}: {1}'.format(args.registry, e), file=sys.stderr)
+        print('Could not read registry {0}: {1}'.format(args.file, e), file=sys.stderr)
         return 1
+    print('Registry: {0}'.format(os.path.abspath(args.file)))
     print_target_table(targets, issues)
     return 1 if any(i.severity == 'error' for i in issues) else 0
 
