@@ -119,7 +119,8 @@ def default_band_ranges(n_bands):
     """(early, mid, late) inclusive (lo, hi) band-index pairs for a profile of
     `n_bands` bands: outer thirds early/late, everything between is mid.
 
-    For the 7-band operating profile (cal_63_air_v2) this gives exactly the
+    For the 7-band operating profile (cal_63_air_bat_v3, and cal_63_air_v2
+    before it -- the band plan is common to both) this gives exactly the
     ranges the 2026-07-23 corpus analysis used -- early 0-1 (9, 13.44 us),
     mid 2-4 (20, 30, 45 us), late 5-6 (67.2, 100 us). Derived rather than
     hard-coded so a re-banded profile still gets a sane split."""

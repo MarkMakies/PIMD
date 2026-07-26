@@ -41,11 +41,9 @@ src/data/sessions/
 # and a corpus build hard-errors on those by design)
 src/data/scratch/
 
-# Superseded calibration profiles — kept on disk, not repo source. The current
-# *operating* profile is tracked (§10 firmware<->ML contract); it is now
-# cal_63_air_bat_v3.json, deliberately absent from this list. cal_63_air_v2.json
-# is also still tracked — it is the epoch v3 was derived from and the reference
-# the Compare Profiles tab is pointed at; retire it here once that stops mattering.
+# Superseded calibration profiles — kept on disk, not repo source. Only the
+# current *operating* profile is tracked (§10 firmware<->ML contract); it is
+# cal_63_air_bat_v3.json, deliberately absent from this list.
 #
 # Listed file-by-file rather than as `src/data/profiles/*` + a negation: the
 # wildcard form is correct as far as git is concerned, but the dir/* + !negation
@@ -53,6 +51,7 @@ src/data/scratch/
 # that new delaycal candidate profiles are NOT ignored by default — add each
 # superseded lock here as it is retired.
 src/data/profiles/cal_63_air_v1.json
+src/data/profiles/cal_63_air_v2.json
 src/data/profiles/cal_72_air_v2.json
 src/data/profiles/cal_72_air_v3.json
 

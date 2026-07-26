@@ -1,3 +1,25 @@
+### repo — `cal_63_air_v2` retired; `cal_63_air_bat_v3` is the sole operating profile
+
+`cal_63_air_v2.json` untracked (`git rm --cached`, still on disk) and added to the superseded
+list in `.gitignore`, restoring the one-tracked-profile-at-a-time rule from the 2026-07-23
+hygiene pass. From here everything runs under battery on `cal_63_air_bat_v3` — v2 is the
+previous supply epoch and is no longer a thing new work should be anchored to.
+
+Nothing in the code loads a profile by name, so this is a tracking change only: delaycal's
+Import Profile and Compare Profiles both scan `data/profiles/*.json` off disk, so v2 stays
+available as a comparison reference for as long as the file is kept. One stale reference
+corrected — `pimd_shape.py`'s `default_band_ranges()` docstring named v2 as "the 7-band
+operating profile"; the band plan is common to v2 and v3, so the derived early/mid/late split
+is unchanged and only the naming needed updating (comment only, no version bump).
+
+Note for corpus work: `gui_signatures_targets_v1_20260723.csv` was captured under v2, so the
+only tracked profile no longer matches the only corpus on disk. That is expected across an
+epoch boundary and is what the `(profile_name, profile_sha8)` guard exists to catch, but it
+does mean a v3 corpus has to be recaptured before the two can be worked with together.
+(2026-07-26)
+
+---
+
 ### USAGE.md — v1.17 — delaycal v1.28 → v1.29
 
 §4's intent no longer claims exports land at a fixed `cal_<ts>.json` path. New **Export
