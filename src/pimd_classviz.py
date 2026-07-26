@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.42
+# PIMD Signature Visualiser (ClassViz) v1.50
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,14 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.50 below-gate frames leave no trail at all; the trail is green by construction
+#   v1.49 FIX custom band pair lost on restart (clamped by the startup profile's narrower spin range)
+#   v1.48 Family Plane: no gridlines on a rank axis; the zero rails follow the spacing curve
+#   v1.47 Family Plane per-axis Scale combo (expand-ends / rank spacing; no log, it is backwards here)
+#   v1.46 scratch saves plot immediately (own template source) and draw as triangles
+#   v1.45 FIX heatmap colorbar handles now mark Min/Max; live shape cursor/trail green above SNR gate
+#   v1.44 Analysis heatmap manual scale is an explicit Min/Max; signature dialogs remember their directory
+#   v1.43 Shape Space renamed Family Plane Analysis; material tags, per-axis custom bands, ladder click
 #   v1.42 new Shape Space tab (feature-space scatter + docks) + scratch captures
 #   v1.41 FIX Space-forced target placement skipped the removal wait (auto-detect latch)
 #   v1.40 FIX capture_id reuse after a delete silently merged later saves into an existing capture
@@ -82,10 +90,11 @@ import numpy as np
 os.environ.setdefault('QT_API', 'pyqt6')
 
 from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
-from PyQt6.QtGui import QBrush, QColor, QFont  # noqa: E402
+from PyQt6.QtGui import QBrush, QColor, QFont, QImage, QPixmap  # noqa: E402
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
@@ -106,9 +115,24 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.42'
+APP_VERSION = '1.50'
 
 REDRAW_MS   = 33    # ~30 Hz
+
+# -- Analysis heatmap colorbar-as-range-slider (v1.45) ----------------------
+# ColorBarItem's internal coordinate space is a fixed 0..256 across the bar,
+# independent of the levels on its axis.
+CBAR_SPAN = 256.0
+# The bar's axis shows a *domain* wider than the Min/Max window, so the handles
+# have room to travel outwards as well as in. The domain is the union of the
+# window and the data actually on screen -- but never so wide that the window
+# shrinks below this fraction of the bar, or a tight window on a wide-ranging
+# field (Δ mode reaches ~500000 µV) becomes an unreadable sliver.
+CBAR_MIN_WINDOW_FRAC = 0.5
+# ...and never so narrow that the handles end up pinned on the bar's two ends
+# with nowhere to be dragged outwards to, which is what happens whenever the
+# window already contains all the data.
+CBAR_MAX_WINDOW_FRAC = 0.9
 
 DEFAULT_PROFILE_IDX   = 4   # static CLASSIFY_EP — sent automatically on connect
 DYNAMIC_PROFILE_INDEX = 5   # must match firmware's NUM_PROFILES (pimd_mcu.py v4.07+)
@@ -130,10 +154,15 @@ SUPPLY_CHOICES = ['battery', 'psu']
 SCRATCH_ID_PREFIX = 'scratch_'
 SCRATCH_MEDIA = ['air', 'soil', 'sand', 'water', 'other']
 
-# -- Shape Space tab -------------------------------------------------------
-# (key, menu label). 'custom' reads the control bar's band-range spin pair;
-# everything else is a fixed pimd_shape feature. Used for both axis combos
-# and, with SHAPE_COLOUR_EXTRA appended, the Colour-by combo.
+# -- Family Plane Analysis tab ---------------------------------------------
+# Tab name (v1.43; was "Shape Space"). Held as a constant because it prefixes
+# every status-bar line this tab emits.
+SHAPE_TAB_TITLE = 'Family Plane Analysis'
+# (key, menu label). 'custom' reads the control bar's band-range spin pair
+# for that axis (X and Y have their own pair, so custom-vs-custom is a real
+# plane and not the identity diagonal); everything else is a fixed pimd_shape
+# feature. Used for both axis combos and, with SHAPE_COLOUR_EXTRA appended,
+# the Colour-by combo.
 SHAPE_AXES = [
     ('early',    'early mean'),
     ('mid',      'mid mean'),
@@ -144,6 +173,25 @@ SHAPE_AXES = [
     ('log_amp',  'log₁₀ amplitude'),
 ]
 SHAPE_COLOUR_EXTRA = [('family', 'family'), ('distance', 'distance'), ('none', 'none')]
+# Per-axis spacing curves (v1.47). The family-plane axes are band-range means of
+# a UNIT shape, so they are hard-bounded at +/- 1/sqrt(k * n_delays) -- +/-0.1925
+# for 3 of 7 bands -- and the corpus reaches 83% of that ceiling. Both families
+# therefore pile up against opposite walls with the family decision boundary as
+# an empty band between them: on the 2026-07-23 corpus the middle 48% of the Y
+# axis holds nothing while each cluster is squeezed into 8-31%.
+#
+# There is deliberately NO log option. Log expands near zero and compresses at
+# the extremes, which is backwards here -- measured, it drives the dead middle
+# from 48% to 85%. These curves expand near the ENDS instead (measured on the
+# same corpus: cube 15% dead, atanh 14%, rank 2%).
+SHAPE_SCALES = [
+    ('linear', 'Linear'),
+    ('cube',   'Expand ends (cube)'),
+    ('atanh',  'Expand ends (atanh)'),
+    ('rank',   'Rank'),
+]
+# atanh(0.999) -- the normaliser that keeps the 'atanh' curve inside [-1, 1].
+SHAPE_ATANH_K = math.atanh(0.999)
 # Axes whose values are pulse widths in µs -- plotted as log10 with the
 # profile's own pulse ladder as ticks (see _shape_axis_ticks). pyqtgraph's
 # PlotItem.setLogMode only transforms PlotDataItems, not the bare
@@ -164,6 +212,38 @@ SHAPE_FAMILY_COLOURS = {
     'ferrous':          '#d62728',
     pimd_shape.LOW_SNR: '#999999',
 }
+
+# material_class / plating_material -> short tag drawn beside a point. Chemical
+# symbols where one exists, so the plane reads as chemistry rather than as
+# registry strings; alloys get a 3-letter contraction. Keys are exactly the
+# registry's material_class vocabulary (pimd_target_check.DENSITY_G_PER_CM3)
+# plus the plating materials that appear only in plating_material/substrate.
+# An unlisted material falls back to Title-cased first 3 letters — a new
+# registry material shows up as a readable guess, not as '?'.
+SHAPE_MATERIAL_ABBREV = {
+    'aluminium':    'Al',
+    'brass':        'Brs',
+    'cast_iron':    'CI',
+    'chrome':       'Cr',
+    'copper':       'Cu',
+    'cu_alloy':     'CuA',
+    'ferrite':      'Frt',
+    'gold':         'Au',
+    'lead':         'Pb',
+    'ndfeb':        'NdFe',
+    'nickel':       'Ni',
+    'silver':       'Ag',
+    'solder_sn_pb': 'SnPb',
+    'stainless':    'SS',
+    'steel':        'Fe',
+    'tin':          'Sn',
+    'zinc':         'Zn',
+}
+# Above this many drawn captures the per-point material tags are suppressed:
+# past ~200 the text is denser than the points it annotates and the plane
+# becomes unreadable. The checkbox still reads checked -- the tags come back
+# on their own once the drawn set shrinks (a gate change, a different file).
+SHAPE_LABEL_MAX = 200
 SHAPE_GATE_DEFAULT  = pimd_shape.DEFAULT_SNR_GATE
 SHAPE_TRAIL_DEFAULT = 30
 SHAPE_TRAIL_MAX     = 500   # deque cap; the spinbox slices the last N of it
@@ -428,7 +508,20 @@ class MainWindow(QMainWindow):
         self._analysis_hm_norm_auto      = True
         self._analysis_hm_display_mode   = 'delta'   # used only when norm is Manual (decoupled)
         self._analysis_hm_scale_auto     = True
-        self._analysis_hm_manual_range_uv = 200_000.0
+        # Manual scale is an explicit (min, max) pair, not a ± half-range
+        # (v1.44). Std Dev is the case that forced it: a rolling σ field lives
+        # in a narrow band well above zero, so a range anchored at 0 spends
+        # most of the colour ramp on values that never occur.
+        self._analysis_hm_manual_min_uv  = -200_000.0
+        self._analysis_hm_manual_max_uv  = 200_000.0
+        # Colorbar-as-range-slider state (v1.45). The bar's axis spans a domain
+        # wider than the Min/Max window so the two handles have somewhere to sit
+        # *and* somewhere to travel; frozen mid-drag so the value under the
+        # cursor doesn't move while the window is being dragged.
+        self._analysis_cbar_domain     = None  # (lo, hi) currently on the bar's axis
+        self._analysis_cbar_data_range = None  # (lo, hi) of the matrix last drawn
+        self._analysis_cbar_dragging   = False
+        self._analysis_cbar_syncing    = False  # guards our own setRegion() calls
 
         self._analysis_c2_norm_auto  = True
         self._analysis_c2_manual_ref = 0.0
@@ -450,6 +543,14 @@ class MainWindow(QMainWindow):
         self._editable_sig_session_id = None   # 'gui_YYYYMMDD_HHMMSS', assigned fresh on New/Open
         self._editable_sig_seq        = 0      # running per-file capture_id sequence, reset on New/Open
         self._editable_repeat_counts  = {}     # placement tuple -> count seen, for repeat_idx auto-increment
+        # Directory the signature file dialogs open in, persisted across
+        # sessions (v1.44). Corpora and scratch files live in several places
+        # (src/data/corpora/, src/data/scratch/, ad-hoc directories for
+        # another rig's captures), so re-navigating from the CWD on every
+        # load was a per-session tax. Only the DIRECTORY is remembered -- a
+        # remembered file path would be a stale pointer, which is the foot-gun
+        # _load_settings' comment calls out for the editable-file path.
+        self._last_sig_dir = CORPORA_DIR
 
         # Target registry (pimd_target_check.py) -- backs the Analysis tab's inline
         # capture widgets.
@@ -503,6 +604,16 @@ class MainWindow(QMainWindow):
         # derived at draw time from the cached unit shape instead.
         self._shape_feat_cache   = {}     # template key -> feature dict
         self._shape_selected_key = None   # clicked scatter point
+        # role -> monotone spacing callable, or None for a plain linear axis.
+        # Rebuilt from the drawn captures on every static redraw (v1.47).
+        self._shape_scale_map    = None
+        # role -> the custom band (lo, hi) the operator actually asked for, as
+        # opposed to what the spinboxes are currently able to show (v1.49).
+        # The spins are ranged to the LIVE profile, so a pair chosen under a
+        # 7-band profile cannot even be represented while the app is still on
+        # the 5-band startup profile -- setValue() would clamp it away and the
+        # choice would be lost. None until settings load or an operator edit.
+        self._shape_band_pref    = {'x': None, 'y': None}
         self._shape_live         = None   # feature dict for the current frame, or None
         # Live feature dicts, appended once per W frame in process_packet so
         # the trail is already populated when the tab is first shown. Only
@@ -762,7 +873,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_heatmap_tab(), 'Heatmap')
         self.tabs.addTab(self._build_stats_tab(),   'Stats')
         self._analysis_tab_index = self.tabs.addTab(self._build_analysis_tab(), 'Analysis')
-        self._shape_tab_index = self.tabs.addTab(self._build_shape_tab(), 'Shape Space')
+        self._shape_tab_index = self.tabs.addTab(self._build_shape_tab(), SHAPE_TAB_TITLE)
         layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
@@ -1678,18 +1789,39 @@ class MainWindow(QMainWindow):
         ctrl.addWidget(self.cb_hm_norm)
 
         ctrl.addWidget(QLabel('Scale:'))
-        self.cb_hm_scale_auto = QCheckBox('Auto ±')
+        self.cb_hm_scale_auto = QCheckBox('Auto')
         self.cb_hm_scale_auto.setChecked(True)
         self.cb_hm_scale_auto.toggled.connect(self._on_hm_scale_auto_toggled)
+        # clicked (not toggled) fires only on a real click, so seeding the
+        # limits from what is currently on screen can't fire during
+        # _load_settings and overwrite the restored ones.
+        self.cb_hm_scale_auto.clicked.connect(self._on_hm_scale_auto_clicked)
         ctrl.addWidget(self.cb_hm_scale_auto)
-        self.sp_hm_scale_manual = QDoubleSpinBox()
-        self.sp_hm_scale_manual.setRange(100, 5_000_000)
-        self.sp_hm_scale_manual.setSingleStep(10_000)
-        self.sp_hm_scale_manual.setDecimals(0)
-        self.sp_hm_scale_manual.setValue(self._analysis_hm_manual_range_uv)
-        self.sp_hm_scale_manual.setEnabled(False)
-        self.sp_hm_scale_manual.valueChanged.connect(self._on_hm_scale_manual_changed)
-        ctrl.addWidget(self.sp_hm_scale_manual)
+        self.sp_hm_scale_min = QDoubleSpinBox()
+        self.sp_hm_scale_max = QDoubleSpinBox()
+        for caption, sp, val in (
+                ('Min', self.sp_hm_scale_min, self._analysis_hm_manual_min_uv),
+                ('Max', self.sp_hm_scale_max, self._analysis_hm_manual_max_uv)):
+            ctrl.addWidget(QLabel(caption))
+            # Signed range on BOTH: a diverging mode wants min < 0, Std Dev
+            # and RAW want both limits positive, and which is which is the
+            # operator's call, not a rule worth enforcing here.
+            sp.setRange(-5_000_000, 5_000_000)
+            sp.setDecimals(0)
+            # Adaptive stepping: one fixed step cannot serve a Δ range of
+            # ~500000 µV and a Std Dev range of ~500 µV at the same time.
+            sp.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
+            sp.setMaximumWidth(96)
+            sp.setValue(val)
+            sp.setEnabled(False)
+            sp.valueChanged.connect(self._on_hm_scale_limits_changed)
+            ctrl.addWidget(sp)
+        self.sp_hm_scale_min.setToolTip(
+            'Colour-scale limits in µV, used when Auto is off. Also what the colorbar\'s '
+            'own drag handles write into.\nStd Dev and RAW are unipolar, so a floor of 0 '
+            'wastes half the ramp — set Min just under the quiet-cell level and Max just '
+            'over the noisy one to see the structure between them.')
+        self.sp_hm_scale_max.setToolTip(self.sp_hm_scale_min.toolTip())
         ctrl.addWidget(QLabel('µV'))
         ctrl.addStretch(1)
         v.addLayout(ctrl)
@@ -1712,19 +1844,44 @@ class MainWindow(QMainWindow):
         self.analysis_plot.addItem(self.analysis_img)
 
         # Colorbar/legend, docked below the heatmap's x-axis via insert_in --
-        # doubles as an interactive range control: dragging its handles sets
-        # the image's levels directly (see _update_analysis_heatmap's Manual-
-        # scale branch, which leaves the bar in control instead of overriding
-        # it every redraw tick). Also gives the mV/σ <-> colour legend asked
-        # for, without a second widget.
+        # doubles as an interactive range control and as the mV/σ <-> colour
+        # legend, without a second widget.
+        #
+        # interactive=False (v1.45): ColorBarItem's own handles are *relative*
+        # adjusters, not level markers -- _regionChanged() snaps them back to
+        # 25%/75% of the bar after every drag, so they can never show where
+        # Min/Max sit. We drive our own LinearRegionItem instead, positioned by
+        # value against a domain wider than the window (see
+        # _update_analysis_cbar_range).
         self.analysis_colorbar = pg.ColorBarItem(
-            values=(-self._analysis_hm_manual_range_uv, self._analysis_hm_manual_range_uv),
-            colorMap=self.cm_div, orientation='horizontal', label='value (µV, σ for Z mode)')
+            values=(self._analysis_hm_manual_min_uv, self._analysis_hm_manual_max_uv),
+            colorMap=self.cm_div, orientation='horizontal', label='value (µV, σ for Z mode)',
+            interactive=False)
         cbar_font = QFont()
         cbar_font.setPointSize(7)
         self.analysis_colorbar.axis.setStyle(tickFont=cbar_font)
         self.analysis_colorbar.setImageItem(self.analysis_img, insert_in=self.analysis_plot)
-        self.analysis_colorbar.sigLevelsChanged.connect(self._on_analysis_colorbar_levels_changed)
+
+        # The bar's internal x range is a fixed 0..256 whatever the levels are
+        # (ColorBarItem.__init__), so CBAR_SPAN is the coordinate system the
+        # handles live in and value<->position goes through the domain.
+        self.analysis_cbar_region = pg.LinearRegionItem(
+            (0.0, CBAR_SPAN), 'vertical', swapMode='block',
+            pen=pg.mkPen('#202020', width=2), brush=pg.mkBrush(None),
+            hoverPen=pg.mkPen('#ffffff', width=3), hoverBrush=pg.mkBrush(None),
+            bounds=(0.0, CBAR_SPAN))
+        self.analysis_cbar_region.setZValue(1000)
+        for line in self.analysis_cbar_region.lines:
+            line.addMarker('<|>', size=7)
+        self.analysis_cbar_region.setToolTip(
+            'Drag to set the Min/Max colour-scale limits. The pale tails outside the '
+            'handles are values the scale saturates on.')
+        self.analysis_colorbar.addItem(self.analysis_cbar_region)
+        self.analysis_cbar_region.sigRegionChanged.connect(self._on_analysis_cbar_region_changing)
+        self.analysis_cbar_region.sigRegionChangeFinished.connect(
+            self._on_analysis_cbar_region_done)
+        self.analysis_cbar_region.setVisible(not self._analysis_hm_scale_auto)
+        self._analysis_cbar_cmap = self.cm_div
         # setImageItem() above calls img.setLevels() while the image still
         # has no data -- pyqtgraph defers that (ImageItem._defferedLevels)
         # and replays it at the end of the *next* setImage() call, which
@@ -1745,29 +1902,169 @@ class MainWindow(QMainWindow):
 
     def _on_hm_scale_auto_toggled(self, checked):
         self._analysis_hm_scale_auto = checked
-        self.sp_hm_scale_manual.setEnabled(not checked)
+        self.sp_hm_scale_min.setEnabled(not checked)
+        self.sp_hm_scale_max.setEnabled(not checked)
+        # In Auto the bar spans exactly the auto-computed range, so handles
+        # would sit uselessly on its two ends -- and dragging them wouldn't
+        # stick anyway, the next tick recomputes the range.
+        if hasattr(self, 'analysis_cbar_region'):
+            self.analysis_cbar_region.setVisible(not checked)
 
-    def _on_hm_scale_manual_changed(self, val):
-        self._analysis_hm_manual_range_uv = val
-        if not self._analysis_hm_scale_auto:
-            lo = 0.0 if self._analysis_hm_mode() in ('raw', 'stddev') else -val
-            self.analysis_colorbar.setLevels((lo, val))
-
-    def _on_analysis_colorbar_levels_changed(self, _bar):
-        """Fires only on an actual drag of the colorbar's handles (setLevels()
-        calls made by our own redraw code don't emit this) -- mirror the
-        dragged range back into the manual-range spinbox/state so they stay
-        consistent and the range survives a settings save. Ignored in Auto
-        mode: the next redraw tick snaps the bar back to the auto-computed
-        range anyway, so a drag there wouldn't stick."""
-        if self._analysis_hm_scale_auto:
+    def _on_hm_scale_auto_clicked(self, checked):
+        """Leaving Auto seeds Min/Max from the range currently on screen, so
+        manual mode starts from what the operator is already looking at and is
+        tightened from there -- rather than snapping to a stale pair saved
+        under some other display mode."""
+        if checked:
             return
         lo, hi = self.analysis_colorbar.levels()
-        val = hi if self._analysis_hm_mode() in ('raw', 'stddev') else max(abs(lo), abs(hi))
-        self._analysis_hm_manual_range_uv = val
-        self.sp_hm_scale_manual.blockSignals(True)
-        self.sp_hm_scale_manual.setValue(val)
-        self.sp_hm_scale_manual.blockSignals(False)
+        if lo is None or hi is None or not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            return
+        for sp, val in ((self.sp_hm_scale_min, lo), (self.sp_hm_scale_max, hi)):
+            sp.blockSignals(True)
+            sp.setValue(float(val))
+            sp.blockSignals(False)
+        self._analysis_hm_manual_min_uv = float(lo)
+        self._analysis_hm_manual_max_uv = float(hi)
+
+    def _on_hm_scale_limits_changed(self, _val):
+        """Keep min < max without fighting the user mid-edit: nudge the other
+        spinbox rather than snapping back the one being typed into. The levels
+        themselves are applied by the next redraw tick, which reads these two
+        as the source of truth in manual mode."""
+        sp_min, sp_max = self.sp_hm_scale_min, self.sp_hm_scale_max
+        if sp_min.value() >= sp_max.value():
+            other = sp_max if self.sender() is sp_min else sp_min
+            step = max(1.0, abs(sp_min.value()) * 0.01)
+            other.blockSignals(True)
+            other.setValue(sp_min.value() + step if other is sp_max
+                           else sp_max.value() - step)
+            other.blockSignals(False)
+        self._analysis_hm_manual_min_uv = sp_min.value()
+        self._analysis_hm_manual_max_uv = sp_max.value()
+        # Redraw the bar now rather than waiting for the next tick: with no
+        # stream running _update_analysis_heatmap() returns early, and typing a
+        # limit that moved nothing on screen is exactly the confusing case.
+        self._update_analysis_cbar(self._analysis_hm_manual_min_uv,
+                                    self._analysis_hm_manual_max_uv)
+
+    # -- Colorbar as an absolute range slider (v1.45) -------------------------
+    # ColorBarItem's own handles are relative adjusters that snap back to
+    # 25%/75% after every drag, so they can never show where Min/Max sit. Ours
+    # are positioned by value: the bar's axis spans a *domain* wider than the
+    # window, the handles sit at Min and Max within it, and the pale tails
+    # outside them are the values the scale saturates on.
+
+    @staticmethod
+    def _cbar_pos(value, dom_lo, dom_hi):
+        """Value -> position in the bar's fixed 0..CBAR_SPAN coordinate space."""
+        if dom_hi <= dom_lo:
+            return 0.0
+        return float(np.clip((value - dom_lo) / (dom_hi - dom_lo), 0.0, 1.0) * CBAR_SPAN)
+
+    @staticmethod
+    def _cbar_value(pos, dom_lo, dom_hi):
+        return float(dom_lo + (pos / CBAR_SPAN) * (dom_hi - dom_lo))
+
+    def _analysis_cbar_domain_for(self, lo, hi):
+        """The range the bar's axis spans: the window widened to take in the
+        data actually on screen, so a handle has somewhere to travel outwards
+        to -- then held between CBAR_MIN/MAX_WINDOW_FRAC, which re-centres the
+        window on the bar. The union is quantised and the clamped forms derive
+        from (lo, hi) alone: reading an unrounded data max straight off the
+        live matrix walks the axis and the handles a pixel every frame.
+
+        Sticky: an existing domain that still holds the window at a workable
+        size is kept as-is. Refitting on every tick would re-centre the window
+        after every drag, springing the handles back to 25%/75% -- which is the
+        ColorBarItem behaviour this replaced."""
+        span = hi - lo
+        cur = self._analysis_cbar_domain
+        if cur is not None and cur[1] > cur[0] and cur[0] <= lo and hi <= cur[1]:
+            frac = span / (cur[1] - cur[0])
+            if CBAR_MIN_WINDOW_FRAC <= frac <= CBAR_MAX_WINDOW_FRAC:
+                return cur
+        d_lo, d_hi = self._analysis_cbar_data_range or (lo, hi)
+        dom_lo, dom_hi = min(lo, d_lo), max(hi, d_hi)
+        dom_span = dom_hi - dom_lo
+        if np.isfinite(dom_span) and dom_span > 0:
+            step = 10.0 ** math.floor(math.log10(dom_span / 4.0))
+            dom_lo = math.floor(dom_lo / step) * step
+            dom_hi = math.ceil(dom_hi / step) * step
+            dom_span = dom_hi - dom_lo
+        widest, tightest = span / CBAR_MIN_WINDOW_FRAC, span / CBAR_MAX_WINDOW_FRAC
+        if not (tightest <= dom_span <= widest):
+            pad = (min(max(dom_span, tightest), widest) - span) / 2.0
+            dom_lo, dom_hi = lo - pad, hi + pad
+        if not (dom_hi > dom_lo):
+            dom_lo, dom_hi = lo - 1.0, hi + 1.0
+        return dom_lo, dom_hi
+
+    def _set_analysis_cbar_gradient(self, lo, hi, dom_lo, dom_hi):
+        """Paint the bar's strip clipped the same way the image is: flat below
+        Min, the ramp across the window, flat above Max. Written straight onto
+        the bar pixmap rather than via ColorBarItem.setColorMap(), which would
+        push both the strip's clipped map and the bar's (domain) levels into
+        the heatmap image."""
+        cmap = self._analysis_cbar_cmap
+        lut = cmap.getLookupTable(nPts=256, alpha=True)
+        vals = np.linspace(dom_lo, dom_hi, 256)
+        t = np.clip((vals - lo) / (hi - lo), 0.0, 1.0) if hi > lo else np.zeros(256)
+        strip = np.expand_dims(lut[(t * 255.0).astype(int)], axis=0)
+        qimg = pg.functions.ndarray_to_qimage(np.ascontiguousarray(strip),
+                                               QImage.Format.Format_RGBA8888)
+        self.analysis_colorbar.bar.setPixmap(QPixmap.fromImage(qimg))
+
+    def _update_analysis_cbar(self, lo, hi):
+        """Re-point the whole bar at colour-scale window (lo, hi): axis domain,
+        clipped gradient, handle positions."""
+        if not hasattr(self, 'analysis_cbar_region'):
+            return
+        auto = self._analysis_hm_scale_auto
+        self.analysis_cbar_region.setVisible(not auto)
+        if auto:
+            dom = (lo, hi)                       # no tails to show, no handles
+        elif self._analysis_cbar_dragging and self._analysis_cbar_domain is not None:
+            dom = self._analysis_cbar_domain     # frozen: don't move the ruler mid-drag
+        else:
+            dom = self._analysis_cbar_domain_for(lo, hi)
+        self._analysis_cbar_domain = dom
+        # update_items=False -- the axis is showing the domain, which must not
+        # be pushed into the image as its levels.
+        self.analysis_colorbar.setLevels(dom, update_items=False)
+        self._set_analysis_cbar_gradient(lo, hi, dom[0], dom[1])
+        if not auto and not self._analysis_cbar_dragging:
+            self._analysis_cbar_syncing = True
+            self.analysis_cbar_region.setRegion(
+                (self._cbar_pos(lo, dom[0], dom[1]), self._cbar_pos(hi, dom[0], dom[1])))
+            self._analysis_cbar_syncing = False
+
+    def _on_analysis_cbar_region_changing(self):
+        """Live during a handle drag: mirror the dragged positions into the
+        Min/Max spinboxes (rounded to what those spinboxes can actually show,
+        so the two never disagree). The image's levels follow on the next
+        redraw tick, which reads the spinboxes."""
+        if self._analysis_cbar_syncing or self._analysis_hm_scale_auto:
+            return
+        dom = self._analysis_cbar_domain
+        if dom is None:
+            return
+        self._analysis_cbar_dragging = True
+        p_lo, p_hi = self.analysis_cbar_region.getRegion()
+        lo = float(round(self._cbar_value(p_lo, dom[0], dom[1])))
+        hi = float(round(self._cbar_value(p_hi, dom[0], dom[1])))
+        if hi <= lo:
+            return
+        self._analysis_hm_manual_min_uv = lo
+        self._analysis_hm_manual_max_uv = hi
+        for sp, val in ((self.sp_hm_scale_min, lo), (self.sp_hm_scale_max, hi)):
+            sp.blockSignals(True)
+            sp.setValue(val)
+            sp.blockSignals(False)
+        self._set_analysis_cbar_gradient(lo, hi, dom[0], dom[1])
+
+    def _on_analysis_cbar_region_done(self):
+        self._analysis_cbar_dragging = False
 
     def _rebuild_analysis_heatmap_axes(self):
         """Same data/row-order as the Heatmap tab's chart -- only the label
@@ -2253,7 +2550,11 @@ class MainWindow(QMainWindow):
 
         cmap = self.cm_seq if mode in ('raw', 'stddev') else self.cm_div
         self.analysis_img.setColorMap(cmap)
-        self.analysis_colorbar.setColorMap(cmap)
+        # Not setColorMap() on the bar: that pushes the bar's own levels (which
+        # are the slider's *domain*, not the image's) back into the image. The
+        # bar's strip is painted by _set_analysis_cbar_gradient from this map.
+        self._analysis_cbar_cmap = cmap
+        self._analysis_cbar_data_range = (float(matrix.min()), float(matrix.max()))
 
         if self._analysis_hm_scale_auto:
             if mode in ('raw', 'stddev'):
@@ -2263,18 +2564,17 @@ class MainWindow(QMainWindow):
                 if lim < 1.0:
                     lim = 1.0
                 levels = (-lim, lim)
-            self.analysis_img.setImage(matrix.T, levels=levels)
-            # ImageItem has no sigLevelsChanged in this pyqtgraph version, so
-            # the bar won't pick up a programmatic level change on its own --
-            # push it explicitly (update_items=False: don't bounce back into
-            # the image we just set).
-            self.analysis_colorbar.setLevels(levels, update_items=False)
         else:
-            # Manual: the colorbar (dragged, or set via the range spinbox) is
-            # the single source of truth for levels -- leave them alone here,
-            # just repaint with whatever's already set, or a drag would get
-            # overwritten on the very next tick.
-            self.analysis_img.setImage(matrix.T, autoLevels=False)
+            # Manual: the Min/Max spinboxes are the single source of truth
+            # (v1.44). Re-applying them every tick is safe with the slider
+            # handles because a drag writes the dragged values straight back
+            # into the spinboxes -- so what is re-applied here is what was just
+            # dragged, not a stale pair that would fight the drag.
+            levels = (self._analysis_hm_manual_min_uv, self._analysis_hm_manual_max_uv)
+        self.analysis_img.setImage(matrix.T, levels=levels)
+        # ImageItem has no sigLevelsChanged in this pyqtgraph version, so the
+        # bar won't pick up a programmatic level change on its own.
+        self._update_analysis_cbar(levels[0], levels[1])
 
     def _update_analysis_charts(self):
         matrix = self._compute_analysis_matrix()
@@ -2345,15 +2645,27 @@ class MainWindow(QMainWindow):
         cols = header.rstrip('\n').split(',')
         return 'target_id' in cols and 'distance_mm' in cols and 'delta_mV' in cols
 
+    def _sig_dialog_dir(self):
+        """Start directory for the signature file dialogs -- the last one used,
+        falling back to src/data/corpora/ if it has since been moved away."""
+        if self._last_sig_dir and os.path.isdir(self._last_sig_dir):
+            return self._last_sig_dir
+        return CORPORA_DIR if os.path.isdir(CORPORA_DIR) else ''
+
+    def _remember_sig_dir(self, path):
+        if path:
+            self._last_sig_dir = os.path.dirname(os.path.abspath(path))
+
     def _on_load_signatures_clicked(self):
         # DontUseNativeDialog: the native GTK/portal file dialog renders as a
         # completely blank window in this environment -- Qt's own dialog
         # widget works reliably instead.
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Load signature corpus', '', 'CSV files (*.csv)',
+            self, 'Load signature corpus', self._sig_dialog_dir(), 'CSV files (*.csv)',
             options=QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
+        self._remember_sig_dir(path)
         try:
             # v1.32+ files (what this app writes) go through our own reader;
             # pimd_corpus_check.load_corpus only handles the legacy schema and
@@ -2368,11 +2680,15 @@ class MainWindow(QMainWindow):
         self._merge_template_list(sigs, source='loaded')
         self.statusBar().showMessage('Loaded {0} signature(s) from {1}'.format(len(sigs), path))
 
+    # Per-source list prefix. Three sources share one store, so the list has to
+    # say which file a row came from without a second column.
+    _TEMPLATE_SOURCE_PREFIX = {'editable': '✎ ', 'scratch': '△ '}
+
     def _merge_template_list(self, sigs, source):
         """Replace only the entries tagged `source` ('loaded' = read-only
-        reference corpus, 'editable' = the active editable file), leaving
-        entries from the other source untouched -- a loaded reference corpus
-        and an active editable file coexist in one list, both overlay-able.
+        reference corpus, 'editable' = the active editable file, 'scratch' =
+        today's Family Plane scratch file), leaving entries from the other
+        sources untouched -- all three coexist in one list, all overlay-able.
         Preserves checked state across a reload of the same source (so
         Save/Delete don't drop an overlay you had checked)."""
         prev_checked = {
@@ -2389,7 +2705,7 @@ class MainWindow(QMainWindow):
         self._analysis_templates = {k: v for k, v in self._analysis_templates.items() if v['source'] != source}
 
         keys_sorted = sorted(sigs.keys(), key=lambda k: tuple(str(v) for v in k))
-        prefix = '✎ ' if source == 'editable' else ''
+        prefix = self._TEMPLATE_SOURCE_PREFIX.get(source, '')
         for i, key in enumerate(keys_sorted):
             sig = sigs[key]
             amp, splithalf, quality = sig['amp'], sig['splithalf'], sig['quality']
@@ -3116,6 +3432,10 @@ class MainWindow(QMainWindow):
     # -- Signature file operations (New / Open for editing / Save / Delete) --
 
     def _on_sig_new_file_clicked(self):
+        # A NEW corpus file still defaults into src/data/corpora/ rather than
+        # the last-used directory: that is where the capture pipeline expects
+        # corpora to be, and the last-used directory may well have been
+        # somewhere a read-only corpus was browsed from.
         os.makedirs(CORPORA_DIR, exist_ok=True)
         default = os.path.join(CORPORA_DIR, 'gui_signatures_{0}.csv'.format(
             datetime.now().strftime('%Y%m%d_%H%M%S')))
@@ -3124,6 +3444,7 @@ class MainWindow(QMainWindow):
             options=QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
+        self._remember_sig_dir(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', newline='') as f:
             csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n').writerow(
@@ -3140,10 +3461,11 @@ class MainWindow(QMainWindow):
 
     def _on_sig_open_for_edit_clicked(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Open signature file for editing', '', 'CSV files (*.csv)',
-            options=QFileDialog.Option.DontUseNativeDialog)
+            self, 'Open signature file for editing', self._sig_dialog_dir(),
+            'CSV files (*.csv)', options=QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
+        self._remember_sig_dir(path)
         # Editing appends v1.32+ rows via Save, so the file must already be that
         # schema (target_id/distance_mm/delta_mV). The old pimd_corpus_check
         # sniff gate rejected exactly these files (v1.37 fix).
@@ -3470,7 +3792,8 @@ class MainWindow(QMainWindow):
                 'Recording{0}'.format(' (paused)' if self._session_paused else ''))
 
     # ------------------------------------------------------------------
-    # Tab 3 — Shape Space
+    # Tab 3 — Family Plane Analysis (internally still `shape`; the tab was
+    # called "Shape Space" up to v1.42)
     # ------------------------------------------------------------------
     # Human exploration of signature geometry: every loaded signature is a
     # point in a selectable 2-D feature space, with the current frame moving
@@ -3481,8 +3804,9 @@ class MainWindow(QMainWindow):
     # Two rules the panels exist to enforce, both about not lying:
     #   - below the SNR gate the unit shape is normalised NOISE. It still has
     #     a family verdict and it still moves around the plane convincingly.
-    #     So below the gate the live dot goes grey, shrinks, and its trail is
-    #     suppressed, and gated-only is the default for every derived panel.
+    #     So below the gate the live dot draws yellow (green at or above it)
+    #     and leaves NO trail at all, loaded captures draw hollow in LOW_SNR
+    #     grey, and gated-only is the default for every derived panel.
     #   - family() is a SIGN test and decay_persistence() is a magnitude test.
     #     A ferrite reads ferrous by sign and non-ferrous by decay. Both
     #     readouts are shown; neither is allowed to overrule the other.
@@ -3534,7 +3858,7 @@ class MainWindow(QMainWindow):
 
     def _on_shape_reset_layout(self):
         self._shape_apply_default_layout()
-        self.statusBar().showMessage('Shape Space: layout reset to default')
+        self.statusBar().showMessage('Family Plane Analysis: layout reset to default')
 
     def _shape_dock_state(self):
         """DockArea.saveState() as JSON-serialisable data, or None. Wrapped
@@ -3548,7 +3872,7 @@ class MainWindow(QMainWindow):
     # -- Control bar --------------------------------------------------------
 
     def _build_shape_ctrl_bar(self):
-        box = QGroupBox('Shape Space')
+        box = QGroupBox(SHAPE_TAB_TITLE)
         outer = QVBoxLayout(box)
         outer.setContentsMargins(6, 4, 6, 4)
         outer.setSpacing(3)
@@ -3556,12 +3880,32 @@ class MainWindow(QMainWindow):
         row.setSpacing(4)
         outer.addLayout(row)
 
-        row.addWidget(QLabel('X:'))
         self.cb_shape_x = QComboBox()
-        row.addWidget(self.cb_shape_x)
-        row.addWidget(QLabel('Y:'))
         self.cb_shape_y = QComboBox()
-        row.addWidget(self.cb_shape_y)
+        self.cb_shape_scale_x = QComboBox()
+        self.cb_shape_scale_y = QComboBox()
+        for caption, cb_axis, cb_scale in (
+                ('X:', self.cb_shape_x, self.cb_shape_scale_x),
+                ('Y:', self.cb_shape_y, self.cb_shape_scale_y)):
+            row.addWidget(QLabel(caption))
+            row.addWidget(cb_axis)
+            for key, label in SHAPE_SCALES:
+                cb_scale.addItem(label, key)
+            cb_scale.setMaximumWidth(120)
+            cb_scale.setToolTip(
+                'Spacing along this axis only — every scale maps the drawn set\'s '
+                'min/max onto themselves, so a point keeps its value and the ticks '
+                'still read real feature units.\n'
+                '"Expand ends" stretches the two extremes and compresses the middle: '
+                'the family-plane axes are bounded, so both families press against '
+                'opposite walls with the family decision boundary empty between them. '
+                'Cube is gentle, atanh is stronger.\n'
+                '"Rank" spaces the drawn points evenly — the most spread, but position '
+                'stops meaning anything physical and moves as the drawn set changes.\n'
+                'A log scale is deliberately absent: it expands near zero and '
+                'compresses the extremes, which is the wrong way round here.')
+            row.addWidget(QLabel('Scale:'))
+            row.addWidget(cb_scale)
         row.addWidget(QLabel('Colour:'))
         self.cb_shape_colour = QComboBox()
         row.addWidget(self.cb_shape_colour)
@@ -3574,21 +3918,34 @@ class MainWindow(QMainWindow):
         self.cb_shape_x.setCurrentIndex(0)          # early mean
         self.cb_shape_y.setCurrentIndex(2)          # late mean -- the family plane
         self.cb_shape_colour.setCurrentIndex(len(SHAPE_AXES))   # family
-        for cb in (self.cb_shape_x, self.cb_shape_y, self.cb_shape_colour):
+        for cb in (self.cb_shape_x, self.cb_shape_y, self.cb_shape_colour,
+                   self.cb_shape_scale_x, self.cb_shape_scale_y):
             cb.currentIndexChanged.connect(self._on_shape_axis_changed)
 
-        row.addWidget(QLabel('Custom bands:'))
+        # One band-range pair PER AXIS (v1.43). With a single shared pair,
+        # picking "custom band range" on both axes plotted a feature against
+        # itself -- every point on the y=x diagonal, which looks like a
+        # finding and is an artefact. Colour-by "custom band range" reads the
+        # X pair; it has no third pair of its own.
         self.sp_shape_band_lo = QSpinBox()
         self.sp_shape_band_hi = QSpinBox()
-        for sp in (self.sp_shape_band_lo, self.sp_shape_band_hi):
-            sp.setRange(0, max(0, self._n_bands - 1))
-            sp.setMaximumWidth(48)
-            sp.valueChanged.connect(self._on_shape_custom_range_changed)
-            row.addWidget(sp)
-        self.sp_shape_band_hi.setValue(max(0, self._n_bands - 1))
-        self.sp_shape_band_lo.setToolTip(
-            'Inclusive band index range (0 = shortest pulse) behind the "custom band '
-            'range" axis/colour entry.')
+        self.sp_shape_band_y_lo = QSpinBox()
+        self.sp_shape_band_y_hi = QSpinBox()
+        hi_max = max(0, self._n_bands - 1)
+        for caption, (sp_lo, sp_hi) in (
+                ('Custom bands X:', (self.sp_shape_band_lo, self.sp_shape_band_hi)),
+                ('Y:',              (self.sp_shape_band_y_lo, self.sp_shape_band_y_hi))):
+            row.addWidget(QLabel(caption))
+            for sp in (sp_lo, sp_hi):
+                sp.setRange(0, hi_max)
+                sp.setMaximumWidth(48)
+                sp.valueChanged.connect(self._on_shape_custom_range_changed)
+                row.addWidget(sp)
+            sp_hi.setValue(hi_max)
+            sp_lo.setToolTip(
+                'Inclusive band index range (0 = shortest pulse) behind the "custom band '
+                'range" entry on this axis.\nThe X pair is also what colour-by "custom '
+                'band range" reads.')
 
         row.addWidget(QLabel('SNR gate:'))
         self.sp_shape_gate = QDoubleSpinBox()
@@ -3599,7 +3956,8 @@ class MainWindow(QMainWindow):
         self.sp_shape_gate.setMaximumWidth(70)
         self.sp_shape_gate.setToolTip(
             'Amp(L2)/splithalf below which a shape is not interpreted: stored captures '
-            'draw hollow, the live dot greys out and stops trailing.\nDefault 5.0 = '
+            'draw hollow, the live cursor draws yellow instead of green, and it leaves '
+            'no trail.\nDefault 5.0 = '
             '1/pimd_features.NOISY_RATIO_THRESHOLD, the same line that stamps a capture '
             "'noisy'.")
         self.sp_shape_gate.valueChanged.connect(self._on_shape_axis_changed)
@@ -3610,8 +3968,22 @@ class MainWindow(QMainWindow):
         self.sp_shape_trail.setRange(0, SHAPE_TRAIL_MAX)
         self.sp_shape_trail.setValue(SHAPE_TRAIL_DEFAULT)
         self.sp_shape_trail.setMaximumWidth(60)
-        self.sp_shape_trail.setToolTip('Live-dot trail length, in frames.')
+        self.sp_shape_trail.setToolTip(
+            'Live-dot trail length, in frames. Only frames at or above the SNR gate '
+            'leave a mark, but every frame ages the window along — so holding '
+            'below-gate fades the trail out rather than freezing the last good pass.')
         row.addWidget(self.sp_shape_trail)
+
+        self.cb_shape_labels = QCheckBox('Material tags')
+        self.cb_shape_labels.setChecked(True)
+        self.cb_shape_labels.setToolTip(
+            'Draw the target\'s material beside each scatter point, and append it to each '
+            'Crossing Ladder row: Al, Fe, SS, Cu, Brs…, with "base/plating" for a plated '
+            'target (Fe/Zn).\nMaterial comes from the target registry, so a capture whose '
+            'target_id is not in it (scratch objects, another rig\'s corpus) reads "?".\n'
+            'Suppressed automatically above {0} drawn points.'.format(SHAPE_LABEL_MAX))
+        self.cb_shape_labels.toggled.connect(self._on_shape_axis_changed)
+        row.addWidget(self.cb_shape_labels)
 
         row.addStretch(1)
 
@@ -3629,6 +4001,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.pb_shape_air)
 
         self.pb_shape_scratch = QPushButton('Save Scratch…')
+        self.pb_shape_scratch.setToolTip(
+            'Grab the object currently under the coil as an unregistered "scratch" '
+            'capture, written to src/data/scratch/ — never to a corpus.\nIt is plotted '
+            'immediately, as a triangle, and joins the Analysis tab\'s signature list '
+            'under a △ prefix.')
         self.pb_shape_scratch.clicked.connect(self._on_shape_save_scratch)
         row.addWidget(self.pb_shape_scratch)
 
@@ -3680,20 +4057,43 @@ class MainWindow(QMainWindow):
     def _on_shape_axis_changed(self, *_):
         self._shape_redraw_static()
 
+    def _shape_band_spins(self, role):
+        """The (lo, hi) spin pair for an axis role. Only 'y' has its own pair
+        -- 'x' and the colour-by both read the X pair (see the control bar)."""
+        if role == 'y':
+            return self.sp_shape_band_y_lo, self.sp_shape_band_y_hi
+        return self.sp_shape_band_lo, self.sp_shape_band_hi
+
+    def _shape_band_saved(self, role, idx):
+        """The custom band index to persist: the remembered preference where
+        there is one, else whatever the spinbox holds."""
+        pref = (self._shape_band_pref or {}).get(role)
+        return pref[idx] if pref else self._shape_band_spins(role)[idx].value()
+
     def _on_shape_custom_range_changed(self, *_):
         """Keep lo <= hi without fighting the user mid-edit: nudge the other
-        spinbox rather than snapping back the one being typed into."""
-        lo, hi = self.sp_shape_band_lo.value(), self.sp_shape_band_hi.value()
-        if lo > hi:
-            other = self.sp_shape_band_hi if self.sender() is self.sp_shape_band_lo \
-                else self.sp_shape_band_lo
-            other.blockSignals(True)
-            other.setValue(lo if other is self.sp_shape_band_hi else hi)
-            other.blockSignals(False)
+        spinbox rather than snapping back the one being typed into. Only the
+        pair the edited spinbox belongs to is touched."""
+        sender = self.sender()
+        for role in ('x', 'y'):
+            sp_lo, sp_hi = self._shape_band_spins(role)
+            if sender not in (sp_lo, sp_hi):
+                continue
+            lo, hi = sp_lo.value(), sp_hi.value()
+            if lo > hi:
+                other = sp_hi if sender is sp_lo else sp_lo
+                other.blockSignals(True)
+                other.setValue(lo if other is sp_hi else hi)
+                other.blockSignals(False)
+            # An operator edit is the new preference for THIS pair only -- the
+            # other pair may be sitting clamped under a narrow profile, and
+            # rewriting it from the spinbox would discard its wider choice.
+            self._shape_band_pref[role] = (sp_lo.value(), sp_hi.value())
         self._shape_redraw_static()
 
-    def _shape_custom_range(self):
-        lo, hi = self.sp_shape_band_lo.value(), self.sp_shape_band_hi.value()
+    def _shape_custom_range(self, role='x'):
+        sp_lo, sp_hi = self._shape_band_spins(role)
+        lo, hi = sp_lo.value(), sp_hi.value()
         hi = min(hi, self._n_bands - 1)
         return min(lo, hi), hi
 
@@ -3721,10 +4121,16 @@ class MainWindow(QMainWindow):
         self.shape_scatter_plot = self.shape_scatter_gw.addPlot()
         self._style_compact(self.shape_scatter_plot)
         self.shape_scatter_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.shape_scatter_plot.addItem(
-            pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#bbbbbb', width=1)))
-        self.shape_scatter_plot.addItem(
-            pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#bbbbbb', width=1)))
+        # The two zero rails. Held as attributes (v1.48) because a spacing
+        # curve moves where the feature value 0 lands, and 0 is the one
+        # reference on this plane worth drawing: it is the family decision
+        # boundary. Angle 0 is the horizontal rail, so it tracks the Y axis.
+        self.shape_zero_h = pg.InfiniteLine(pos=0, angle=0,
+                                            pen=pg.mkPen('#bbbbbb', width=1))
+        self.shape_zero_v = pg.InfiniteLine(pos=0, angle=90,
+                                            pen=pg.mkPen('#bbbbbb', width=1))
+        self.shape_scatter_plot.addItem(self.shape_zero_h)
+        self.shape_scatter_plot.addItem(self.shape_zero_v)
 
         # Draw order matters: captures underneath, then the selection ring,
         # then the trail, then the live dot on top of everything.
@@ -3746,6 +4152,13 @@ class MainWindow(QMainWindow):
 
         self.shape_live_item = pg.ScatterPlotItem(pxMode=True, symbol='o')
         self.shape_scatter_plot.addItem(self.shape_live_item)
+
+        # Material tags. Pooled and reused rather than created per redraw:
+        # addItem/removeItem on a few hundred TextItems every control change
+        # is the expensive part, setText/setPos is not.
+        self._shape_label_items = []
+        self._shape_label_font = QFont()
+        self._shape_label_font.setPointSize(7)
 
         self.lbl_shape_hint = pg.TextItem(anchor=(0.5, 0.5), color='#888888')
         self.shape_scatter_plot.addItem(self.lbl_shape_hint)
@@ -3808,7 +4221,20 @@ class MainWindow(QMainWindow):
         self.shape_ladder_points = pg.ScatterPlotItem(
             pxMode=True, hoverable=True, hoverSize=14,
             tip=lambda x, y, data: data['tip'] if isinstance(data, dict) else '')
+        # Same handler as the scatter (v1.43): the ladder is where an outlier
+        # capture is spotted, so it has to be where that capture can be opened
+        # in the Tile Inspector as well.
+        self.shape_ladder_points.sigClicked.connect(self._on_shape_point_clicked)
         self.shape_ladder_plot.addItem(self.shape_ladder_points)
+        # Selection ring, the scatter's in the ladder's coordinates.
+        self.shape_ladder_sel = pg.ScatterPlotItem(
+            pxMode=True, size=22, symbol='o', brush=None,
+            pen=pg.mkPen('#000000', width=2))
+        self.shape_ladder_sel.setZValue(12)
+        self.shape_ladder_plot.addItem(self.shape_ladder_sel)
+        # target_id -> ladder row, filled by _update_shape_ladder(); the row
+        # order is by median crossing width, so nothing else can derive it.
+        self._shape_ladder_rows = {}
         # Live frame gets its own row at the top of the ladder, in the same
         # visual language as the capture dots, plus a full-height line so its
         # crossing can be read straight down against every target's dots. A
@@ -3935,8 +4361,45 @@ class MainWindow(QMainWindow):
             # Defaults so a live-frame dict is structurally the same as a
             # capture's. Both are correct for the live frame by definition:
             # it is always on the live profile and is never a saved scratch.
+            # The live frame has no registry entry, hence no material -- and
+            # must not borrow the Analysis tab's selected target_id: what is
+            # actually under the coil is exactly what this tab is asking.
             'foreign': False, 'is_scratch': False,
+            'material_tag': '?', 'material_text': 'live frame (no registry entry)',
         }
+
+    @staticmethod
+    def _shape_material_abbrev(material):
+        """Short tag for one registry material string. Unknown materials fall
+        back to their first 3 letters Title-cased rather than to '?': a
+        registry that gains a material should read as that material, not as
+        missing data."""
+        material = (material or '').strip().lower()
+        if not material:
+            return ''
+        return SHAPE_MATERIAL_ABBREV.get(material) or material[:3].title()
+
+    def _shape_material_tag(self, target_id):
+        """(short tag, long text) for a capture's material, from the target
+        registry. A plated target reads 'base/plating' (Fe/Zn) -- which layer
+        the eddy currents actually see is the question this tab exists to
+        explore, so the tag must not collapse it to one material.
+
+        Anything the registry does not know reads '?' rather than a guess:
+        scratch objects are unregistered by design, and a corpus captured on
+        another rig can carry target_ids this registry has never seen."""
+        target = self._targets.get(target_id)
+        if target is None:
+            if target_id == 'air':
+                return 'air', 'air (no target)'
+            return '?', 'material unknown — {0} is not in the target registry'.format(
+                target_id or 'this capture')
+        base = self._shape_material_abbrev(target.material_class)
+        plating = self._shape_material_abbrev(target.plating_material)
+        if plating and plating != base:
+            return ('{0}/{1}'.format(base, plating),
+                    '{0} plated {1}'.format(target.material_class, target.plating_material))
+        return base or '?', target.material_class or 'unspecified'
 
     def _shape_capture_features(self):
         """Feature dicts for every loaded capture, keyed the same as
@@ -3986,6 +4449,7 @@ class MainWindow(QMainWindow):
             foreign = (len(pulses_us) != self._n_bands or n_delays != self._n_cells
                        or (tpl.get('profile_name') or self._profile.get('name'))
                        != self._profile.get('name'))
+            mat_tag, mat_text = self._shape_material_tag(target_id)
             feat.update({
                 'key': key, 'label': tpl['label'], 'target_id': target_id,
                 'short_name': tpl.get('short_name', ''),
@@ -3995,13 +4459,14 @@ class MainWindow(QMainWindow):
                 'profile_name': tpl.get('profile_name', ''),
                 'geom': '{0}×{1}'.format(len(pulses_us), n_delays),
                 'foreign': foreign,
+                'material_tag': mat_tag, 'material_text': mat_text,
             })
             self._shape_feat_cache[key] = feat
         if unusable and not self._shape_geom_warned:
             self._shape_geom_warned = True
             self.statusBar().showMessage(
-                'Shape Space: dropped {0} capture(s) whose cell count is not a rectangular '
-                'band × delay geometry'.format(unusable))
+                'Family Plane Analysis: dropped {0} capture(s) whose cell count is not '
+                'a rectangular band × delay geometry'.format(unusable))
         return {k: v for k, v in self._shape_feat_cache.items()
                 if v is not None and k in self._analysis_templates}
 
@@ -4067,12 +4532,12 @@ class MainWindow(QMainWindow):
         measure -> air: back to rolling air, buffer cleared."""
         if self._shape_air_held():
             self._shape_air_restart()
-            self.statusBar().showMessage('Shape Space: back to air capture')
+            self.statusBar().showMessage('Family Plane Analysis: back to air capture')
             return
         n = len(self._shape_air_buf or ())
         if n < 2:
             self.statusBar().showMessage(
-                'Shape Space: need at least 2 air frames to take a reference '
+                'Family Plane Analysis: need at least 2 air frames to take a reference '
                 '(have {0})'.format(n))
             return
         # The reference is already the buffer's running median; measure mode
@@ -4083,7 +4548,7 @@ class MainWindow(QMainWindow):
         self._shape_trail.clear()
         cap = self._shape_air_buf.maxlen
         self.statusBar().showMessage(
-            'Shape Space: air reference taken on {0} frame(s){1} — Space returns to '
+            'Family Plane Analysis: air reference taken on {0} frame(s){1} — Space returns to '
             'air'.format(n, '' if n >= cap else ' (thin: {0} of {1})'.format(n, cap)))
 
     def _shape_air_status(self):
@@ -4168,8 +4633,10 @@ class MainWindow(QMainWindow):
             return
         held = self._shape_air_held()
         feat['air_mode'] = self._shape_air_mode
-        # Kept for the gauges and the hover tip; it no longer decides anything
-        # about how the live frame is DRAWN -- the cursor is always yellow.
+        # Snapshot for the gauges and the hover tip. The drawing code does NOT
+        # read it -- _shape_live_colour() re-tests snr against the gate as it
+        # stands at redraw, so moving the gate recolours the trail already
+        # captured rather than only the frames ingested after the change.
         feat['gated'] = feat['snr'] >= self._shape_gate()
         self._shape_live = feat
         if held:
@@ -4179,11 +4646,12 @@ class MainWindow(QMainWindow):
 
     # -- Axis / colour dispatch ---------------------------------------------
 
-    def _shape_axis_value(self, feat, key):
+    def _shape_axis_value(self, feat, key, role='x'):
         """Feature value for an axis/colour key. 'custom' is derived here (not
-        cached) so the band-range spinboxes take effect immediately."""
+        cached) so the band-range spinboxes take effect immediately, and it
+        reads `role`'s own spin pair -- pass 'y' for the Y axis."""
         if key == 'custom':
-            lo, hi = self._shape_custom_range()
+            lo, hi = self._shape_custom_range(role)
             return pimd_shape.band_range_mean(
                 feat['u'], lo, hi, feat['n_bands'], feat['n_delays'])
         if key == 'distance':
@@ -4193,13 +4661,167 @@ class MainWindow(QMainWindow):
                 return float('nan')
         return feat.get(key, float('nan'))
 
-    def _shape_plot_value(self, feat, key):
+    def _shape_plot_value(self, feat, key, role='x'):
         """Axis value in PLOT coordinates -- log10 for the pulse-width axes,
-        whose ticks are relabelled back to µs by _shape_axis_ticks()."""
-        val = self._shape_axis_value(feat, key)
+        whose ticks are relabelled back to µs by _shape_axis_ticks(), then the
+        axis's own spacing curve. Every consumer (capture spots, live cursor,
+        trail, selection ring) goes through here, which is why the Scale combo
+        needs no other wiring."""
+        val = self._shape_axis_value(feat, key, role)
         if key in SHAPE_LOG_US_AXES:
-            return math.log10(val) if val and val > 0 else float('nan')
-        return val
+            val = math.log10(val) if val and val > 0 else float('nan')
+        return self._shape_scale_apply(val, role)
+
+    # -- Axis spacing curves (v1.47) ----------------------------------------
+    # See SHAPE_SCALES for why these exist and why none of them is a log.
+    #
+    # One invariant makes the rest tractable: every curve maps the drawn
+    # captures' [lo, hi] onto ITSELF, and only the interior spacing changes.
+    # So auto-range behaviour is untouched, a tick can always be labelled with
+    # its true feature value, and switching scales never moves the view.
+
+    def _shape_scale_key(self, role):
+        cb = self.cb_shape_scale_y if role == 'y' else self.cb_shape_scale_x
+        return cb.currentData() or 'linear'
+
+    def _shape_scale_apply(self, val, role):
+        """Map one plot value through `role`'s spacing curve. Identity unless
+        _shape_build_scale_maps() found a usable domain."""
+        fn = (self._shape_scale_map or {}).get(role)
+        if fn is None or val is None or not np.isfinite(val):
+            return val
+        return fn(val)
+
+    def _shape_build_scale_maps(self):
+        """Rebuild both axes' spacing curves from the captures currently drawn.
+
+        Called before _rebuild_shape_axes() (the ticks read the same domain),
+        and derived from the CAPTURES only -- never from the live frame. The
+        live cursor moves every frame; folding it into the domain would rescale
+        the whole plane under itself several times a second."""
+        self._shape_scale_map = {'x': None, 'y': None}
+        self._shape_scale_domain = {'x': None, 'y': None}
+        feats = self._shape_capture_features()
+        for role, cb in (('x', self.cb_shape_x), ('y', self.cb_shape_y)):
+            key = cb.currentData()
+            scale = self._shape_scale_key(role)
+            if scale == 'linear' or key in SHAPE_LOG_US_AXES:
+                # The crossing axis owns its ticks (the profile's pulse ladder
+                # plus the ≤pos / never sentinel rails); a second transform
+                # would leave those labels pointing at the wrong rails.
+                continue
+            vals = np.array(
+                [v for v in (self._shape_axis_value(f, key, role) for f in feats.values())
+                 if v is not None and np.isfinite(v)], dtype=float)
+            if vals.size < 2:
+                continue
+            lo, hi = float(vals.min()), float(vals.max())
+            if not (hi > lo):
+                continue
+            self._shape_scale_map[role] = self._shape_scale_fn(scale, lo, hi, vals)
+            self._shape_scale_domain[role] = (lo, hi)
+
+    def _shape_zero_pos(self, role):
+        """Where the feature value 0 lands on `role`'s axis.
+
+        Left at a literal 0 when the axis has no curve, and also when 0 is
+        outside the drawn range -- the curves clamp, so transforming an
+        off-domain zero would pin the rail to the edge of the plot and draw a
+        boundary line where there is no boundary. Off-view is the honest place
+        for it, which is where a literal 0 already puts it."""
+        dom = (self._shape_scale_domain or {}).get(role)
+        if dom is None or not (dom[0] <= 0.0 <= dom[1]):
+            return 0.0
+        return self._shape_scale_apply(0.0, role)
+
+    @staticmethod
+    def _nice_step(raw):
+        """Round a raw tick spacing up the 1-2-5 ladder."""
+        if not np.isfinite(raw) or raw <= 0:
+            return 1.0
+        mag = 10.0 ** math.floor(math.log10(raw))
+        for m in (1.0, 2.0, 5.0):
+            if raw <= m * mag:
+                return m * mag
+        return 10.0 * mag
+
+    def _shape_scale_ticks(self, role):
+        """Ticks at round FEATURE values, positioned through the spacing curve
+        -- so a tick labelled -0.150 sits wherever -0.150 actually landed and
+        the axis stays readable as a measurement. None on a linear axis, where
+        pyqtgraph's own ticks (and its SI prefix) are left alone."""
+        fn = (self._shape_scale_map or {}).get(role)
+        dom = (self._shape_scale_domain or {}).get(role)
+        if fn is None or dom is None:
+            return None
+        lo, hi = dom
+        step = self._nice_step((hi - lo) / 8.0)
+        # Enough decimals to resolve one step, whatever the axis's units --
+        # band-range means are ~0.1 and distances are tens of mm.
+        decimals = max(0, min(6, int(math.ceil(-math.log10(step))) + 1))
+        cand, v = [], math.ceil(lo / step) * step
+        while v <= hi + step * 1e-6:
+            # Snap the accumulated float back onto the step, or the tick that
+            # should read 0.000 lands at -2.8e-17 and prints as '-0.000'.
+            snapped = 0.0 if abs(v) < step * 1e-6 else v
+            cand.append((fn(snapped), snapped))
+            v += step
+
+        # Thin out collisions (v1.48). Round feature values are evenly spaced in
+        # VALUE, not in position -- and a curve that compresses the middle puts
+        # several of them on the same few pixels, so under rank -0.050 / 0.000 /
+        # 0.050 printed on top of each other. Greedy by priority, not left to
+        # right: 0 goes in first so it survives, since it is the family
+        # decision boundary and carries a drawn rail.
+        #
+        # Measured in PIXELS where the viewbox can say how wide it is: what
+        # collides is label text, so a fixed fraction of the domain is either
+        # wasteful on a wide dock or still overlapping on a narrow one. The
+        # fraction is the fallback for the first pass, before layout.
+        vb = self.shape_scatter_plot.getViewBox()
+        pix = float(vb.width() if role == 'x' else vb.height())
+        need_px = 52.0 if role == 'x' else 20.0     # a '-0.150' at 7pt, plus air
+        min_sep = (hi - lo) * (need_px / pix if pix > 4 * need_px else 0.045)
+        kept = []
+        for pos, val in sorted(cand, key=lambda pv: abs(pv[1])):
+            if all(abs(pos - p) >= min_sep for p, _ in kept):
+                kept.append((pos, val))
+        ticks = [(p, '{0:.{1}f}'.format(val, decimals))
+                 for p, val in sorted(kept, key=lambda pv: pv[0])]
+        return [ticks] if len(ticks) >= 2 else None
+
+    @classmethod
+    def _shape_scale_fn(cls, scale, lo, hi, vals):
+        """(scale, domain, drawn values) -> a monotone callable on that domain.
+
+        `rank` interpolates into the drawn set's ECDF rather than taking a
+        literal rank, so the live cursor and the selection ring -- neither of
+        which is IN the drawn set -- still land somewhere consistent."""
+        span = hi - lo
+        srt = np.sort(vals)
+
+        def norm(v):
+            return 2.0 * (v - lo) / span - 1.0
+
+        def denorm(t):
+            return lo + (t + 1.0) * span / 2.0
+
+        if scale == 'rank':
+            n = float(len(srt) - 1) or 1.0
+            def fn(v):
+                # Clamped at both ends: a live value outside the drawn range
+                # has no rank, and pinning it to the edge is the honest answer.
+                return denorm(2.0 * min(max(
+                    float(np.searchsorted(srt, v, side='left')), 0.0), n) / n - 1.0)
+        elif scale == 'atanh':
+            def fn(v):
+                t = min(max(norm(v), -0.999), 0.999)
+                return denorm(math.atanh(t) / SHAPE_ATANH_K)
+        else:                                    # 'cube'
+            def fn(v):
+                t = min(max(norm(v), -1.0), 1.0)
+                return denorm(t ** 3)
+        return fn
 
     def _shape_axis_ticks(self, key):
         """Tick spec for a plot axis, or None to leave pyqtgraph's automatic
@@ -4214,9 +4836,15 @@ class MainWindow(QMainWindow):
         ticks.append((math.log10(pimd_shape.CROSS_NEVER), 'never'))
         return [ticks]
 
-    def _shape_axis_label(self, key):
+    def _shape_axis_label(self, key, role='x'):
+        """Menu label for an axis key. 'custom' names the band range it is
+        currently reading -- with a pair per axis, an unqualified 'custom band
+        range' on both axes says nothing about what is being compared."""
         for k, label in SHAPE_AXES + SHAPE_COLOUR_EXTRA:
             if k == key:
+                if k == 'custom':
+                    lo, hi = self._shape_custom_range(role)
+                    return 'custom bands {0}–{1}'.format(lo, hi)
                 return label
         return key
 
@@ -4226,27 +4854,80 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'sp_shape_band_lo'):
             return
         hi_max = max(0, self._n_bands - 1)
-        for sp in (self.sp_shape_band_lo, self.sp_shape_band_hi):
-            sp.blockSignals(True)
-            sp.setRange(0, hi_max)
-            sp.blockSignals(False)
-        if self.sp_shape_band_hi.value() == 0:
-            self.sp_shape_band_hi.blockSignals(True)
-            self.sp_shape_band_hi.setValue(hi_max)
-            self.sp_shape_band_hi.blockSignals(False)
+        for role in ('x', 'y'):
+            sp_lo, sp_hi = self._shape_band_spins(role)
+            for sp in (sp_lo, sp_hi):
+                sp.blockSignals(True)
+                sp.setRange(0, hi_max)
+                sp.blockSignals(False)
+            pref = self._shape_band_pref.get(role)
+            if pref is None:
+                if sp_hi.value() == 0:
+                    sp_hi.blockSignals(True)
+                    sp_hi.setValue(hi_max)
+                    sp_hi.blockSignals(False)
+                continue
+            # Re-apply the remembered pair against the range this profile can
+            # actually represent (v1.49). The spins are only as wide as the
+            # LIVE profile, so a Y pair of 4..6 restored while the app was
+            # still on the 5-band startup profile came back as 4..4 -- clamped
+            # by setValue() and never recovered when the 7-band profile
+            # arrived and widened the range. Clamping here is display-only:
+            # `pref` is left alone, so switching back to a wide profile
+            # restores the full pair.
+            lo = min(max(pref[0], 0), hi_max)
+            hi = min(max(pref[1], lo), hi_max)
+            for sp, val in ((sp_lo, lo), (sp_hi, hi)):
+                sp.blockSignals(True)
+                sp.setValue(val)
+                sp.blockSignals(False)
 
         x_key = self.cb_shape_x.currentData()
         y_key = self.cb_shape_y.currentData()
-        for axis_name, key in (('bottom', x_key), ('left', y_key)):
+        for axis_name, key, role in (('bottom', x_key, 'x'), ('left', y_key, 'y')):
             axis = self.shape_scatter_plot.getAxis(axis_name)
-            axis.setTicks(self._shape_axis_ticks(key))
-            # pyqtgraph's auto SI prefix is left ON (its default, and what
-            # every other plot in this file uses): band-range means are ~0.1,
-            # so the axis renders them x1000 and says so in the label. Turning
-            # it off with enableAutoSIPrefix(False) does NOT clear the scale
-            # already latched into autoSIPrefixScale -- it only stops the
-            # label disclosing it, which is strictly worse.
-            axis.setLabel(self._shape_axis_label(key), **{'font-size': '7pt'})
+            scaled = self._shape_scale_ticks(role)
+            ticks = scaled if scaled is not None else self._shape_axis_ticks(key)
+            axis.setTicks(ticks)
+            label = self._shape_axis_label(key, role)
+            if scaled is not None:
+                # The non-linear spacing has to be said, or the plane reads as
+                # a measurement it is not.
+                label += ' [{0}]'.format(self._shape_scale_key(role))
+            # On AUTOMATIC ticks pyqtgraph's auto SI prefix is left on (its
+            # default, and what every other plot in this file uses): band-range
+            # means are ~0.1, so the axis renders them x1000 and says so in the
+            # label.
+            #
+            # On EXPLICIT ticks it has to go off. Our tick strings already
+            # carry full values, so a latched '(x0.001)' on the label is a flat
+            # contradiction -- it reads -0.150 as -0.000150. Turning it off
+            # does NOT clear the scale already latched into autoSIPrefixScale
+            # (updateAutoSIPrefix re-latches it from the range on every
+            # setRange, whatever the flag says), but that scale only ever
+            # reaches tickStrings(), which explicit ticks bypass entirely. The
+            # flag alone is what removes the suffix from the label.
+            axis.enableAutoSIPrefix(ticks is None)
+            axis.setLabel(label, **{'font-size': '7pt'})
+
+        # A spacing curve needs a domain, which only the drawn captures give.
+        for role, cb in (('x', self.cb_shape_scale_x), ('y', self.cb_shape_scale_y)):
+            key = x_key if role == 'x' else y_key
+            cb.setEnabled(key not in SHAPE_LOG_US_AXES)
+
+        # Gridlines are dropped on a RANK axis (v1.48). Under the other scales
+        # a gridline still marks a real feature value at its real position; a
+        # rank axis is ordinal, so a grid over it draws a metric that is not
+        # there. Per axis, since the scales are: rank on Y alone keeps the
+        # vertical gridlines. The two zero rails stay either way -- they are
+        # the family decision boundary, and are the only reference asked for.
+        self.shape_scatter_plot.showGrid(
+            x=self._shape_scale_key('x') != 'rank',
+            y=self._shape_scale_key('y') != 'rank', alpha=0.25)
+        # ...and they have to be MOVED, not left at plot 0: a curve maps the
+        # feature value 0 to wherever it falls between the drawn min and max.
+        self.shape_zero_v.setPos(self._shape_zero_pos('x'))
+        self.shape_zero_h.setPos(self._shape_zero_pos('y'))
 
         # Band Curves and the Crossing Ladder both live on the log-µs axis.
         for plot in (self.shape_curves_plot, self.shape_ladder_plot):
@@ -4274,9 +4955,15 @@ class MainWindow(QMainWindow):
         tile. Cheap enough to just run on those events rather than per frame."""
         if not hasattr(self, 'shape_scatter'):
             return
+        # Before the axes: the spacing curves define where the ticks land.
+        self._shape_build_scale_maps()
         self._rebuild_shape_axes()
         self._update_shape_scatter_captures()
         self._update_shape_ladder()
+        # Again, after the ladder: the scatter's pass through it ringed the
+        # ladder row from the PREVIOUS layout, and rows are re-ordered by
+        # median crossing width on every rebuild.
+        self._update_shape_selection_marker()
         self._update_shape_tile()
         self._update_shape_curves()
 
@@ -4295,10 +4982,15 @@ class MainWindow(QMainWindow):
             if vals:
                 lo, hi = min(vals), max(vals)
 
-        spots = []
+        # One material tag per (target, distance), not per capture: repeats of
+        # the same target at the same distance land on top of each other, so
+        # per-capture tags would draw the same string 3-5 times in the same
+        # few pixels. Distance is in the key because the same target at a
+        # different distance IS a visually separate cluster and needs its own.
+        spots, labels, labelled = [], [], set()
         for key, feat in feats.items():
-            x = self._shape_plot_value(feat, x_key)
-            y = self._shape_plot_value(feat, y_key)
+            x = self._shape_plot_value(feat, x_key, 'x')
+            y = self._shape_plot_value(feat, y_key, 'y')
             if not (np.isfinite(x) and np.isfinite(y)):
                 continue
             gated = feat['snr'] >= gate
@@ -4314,7 +5006,12 @@ class MainWindow(QMainWindow):
                 'pen': self._shape_marker_pen(colour, feat['foreign']),
                 'data': {'key': key, 'tip': self._shape_tip(feat)},
             })
+            tag_key = (feat['target_id'], feat['distance_mm'])
+            if feat['material_tag'] and tag_key not in labelled:
+                labelled.add(tag_key)
+                labels.append((x, y, feat['material_tag'], colour))
         self.shape_scatter.setData(spots)
+        self._update_shape_point_labels(labels)
         self._update_shape_foreign_banner(feats)
 
         empty = not spots
@@ -4335,6 +5032,37 @@ class MainWindow(QMainWindow):
             self.shape_scatter_plot.enableAutoRange()
         self._update_shape_selection_marker()
 
+    def _update_shape_point_labels(self, labels):
+        """Material tags on the plane. `labels` is one (x, y, text, colour) per
+        drawn (target, distance) group, taking the group's first point's
+        position and colour — so a tag can never be a different colour from
+        the marker it sits beside.
+
+        Colour follows the marker rather than being a neutral grey: under
+        colour-by family that makes the tag itself part of the verdict — a red
+        'Al' is a non-ferrous material reading ferrous, which is the whole
+        point of putting the material on the plane."""
+        entries = ([(x, y, text, colour) for x, y, text, colour in labels if text]
+                   if self.cb_shape_labels.isChecked() else [])
+        if len(entries) > SHAPE_LABEL_MAX:
+            entries = []
+        while len(self._shape_label_items) < len(entries):
+            item = pg.TextItem(anchor=(-0.25, 0.5))   # just right of the marker
+            item.setFont(self._shape_label_font)
+            item.setZValue(4)                          # under the live dot/trail
+            self.shape_scatter_plot.addItem(item)
+            self._shape_label_items.append(item)
+        # Surplus items are hidden, not destroyed -- the pool is bounded by
+        # SHAPE_LABEL_MAX and the next load probably needs them back.
+        for i, item in enumerate(self._shape_label_items):
+            if i >= len(entries):
+                item.setVisible(False)
+                continue
+            x, y, text, colour = entries[i]
+            item.setText(text, color=colour)
+            item.setPos(x, y)
+            item.setVisible(True)
+
     # Marker shape carries the two "this is not an ordinary corpus capture"
     # facts, because colour is spoken for (family / colour-by) and fill is
     # spoken for (gated). A dashed outline alone was tried first and reads
@@ -4342,10 +5070,10 @@ class MainWindow(QMainWindow):
     # so shape does the work and the dash is kept as reinforcement.
     #   (foreign, scratch) -> symbol
     _SHAPE_SYMBOLS = {
-        (False, False): 'o',      # circle  — live profile, registered target
-        (False, True):  'star',   # star    — live profile, scratch object
-        (True,  False): 's',      # square  — other profile, registered target
-        (True,  True):  'd',      # diamond — other profile, scratch object
+        (False, False): 'o',      # circle   — live profile, registered target
+        (False, True):  't1',     # triangle — live profile, scratch object
+        (True,  False): 's',      # square   — other profile, registered target
+        (True,  True):  'd',      # diamond  — other profile, scratch object
     }
 
     @classmethod
@@ -4380,7 +5108,7 @@ class MainWindow(QMainWindow):
         self.lbl_shape_foreign.setText(
             '⚠ Mixed profile geometries — {0}, drawn as squares (diamonds if scratch) '
             'with dashed outlines. Live profile is {1} ({2}×{3}), drawn as circles '
-            '(stars if scratch). Features are comparable in kind but NOT calibrated '
+            '(triangles if scratch). Features are comparable in kind but NOT calibrated '
             'across ladders: a crossing width is interpolated on its own profile\'s '
             'pulse ladder, and decay persistence reads its own threshold '
             'columns.'.format(' · '.join(parts), self._profile.get('name', '?'),
@@ -4395,10 +5123,11 @@ class MainWindow(QMainWindow):
             cross_txt = 'already positive'
         else:
             cross_txt = '{0:.1f} µs'.format(cross)
-        tip = ('{0} @{1}\nfamily: {2}   crossing: {3}\ndecay: {4:.2f}\n'
-               'amp: {5:.2f} mV   SNR: {6:.1f}\nquality: {7}'.format(
+        tip = ('{0} @{1}\nmaterial: {2}\nfamily: {3}   crossing: {4}\ndecay: {5:.2f}\n'
+               'amp: {6:.2f} mV   SNR: {7:.1f}\nquality: {8}'.format(
                    feat['target_id'] or '?',
                    '{0} mm'.format(feat['distance_mm']) if feat['distance_mm'] else 'air',
+                   feat['material_text'],
                    feat['family'], cross_txt, feat['decay'], feat['amp'], feat['snr'],
                    feat['quality'] or '?'))
         if feat['foreign']:
@@ -4407,23 +5136,41 @@ class MainWindow(QMainWindow):
         return tip
 
     def _update_shape_selection_marker(self):
+        """The selection ring, on BOTH the scatter and the ladder -- a click in
+        either has to be visible in the other, otherwise selecting from the
+        ladder looks like it did nothing to the plane."""
+        if not hasattr(self, 'shape_ladder_sel'):
+            return          # mid-build: the ladder dock is created last
         feats = self._shape_capture_features()
         feat = feats.get(self._shape_selected_key)
         if feat is None:
             self.shape_sel_marker.setData([])
+            self.shape_ladder_sel.setData([])
             return
-        x = self._shape_plot_value(feat, self.cb_shape_x.currentData())
-        y = self._shape_plot_value(feat, self.cb_shape_y.currentData())
+        x = self._shape_plot_value(feat, self.cb_shape_x.currentData(), 'x')
+        y = self._shape_plot_value(feat, self.cb_shape_y.currentData(), 'y')
         if np.isfinite(x) and np.isfinite(y):
             self.shape_sel_marker.setData([{'pos': (x, y)}])
         else:
             self.shape_sel_marker.setData([])
 
+        # The ladder only carries gated captures, so a below-gate selection
+        # legitimately has no row to ring.
+        row = self._shape_ladder_rows.get(feat['target_id'] or '?')
+        cross = feat['crossing']
+        if row is None or feat['snr'] < self._shape_gate():
+            self.shape_ladder_sel.setData([])
+        else:
+            self.shape_ladder_sel.setData([{'pos': (math.log10(cross), row)}])
+
     def _on_shape_point_clicked(self, _item, points, _ev=None):
+        """Click handler for both the scatter and the ladder -- either one
+        selects the capture, and every selection-driven panel (ring, Tile
+        Inspector, Band Curves) follows from the one key."""
         if not len(points):
             return
         data = points[0].data()
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or 'key' not in data:
             return
         self._shape_selected_key = data['key']
         self._update_shape_selection_marker()
@@ -4433,11 +5180,24 @@ class MainWindow(QMainWindow):
     def _update_shape_live_scatter(self):
         """Live cursor + trail.
 
-        The cursor is ALWAYS yellow and always the same size, in both modes.
-        It deliberately carries no family colour and no gated/ungated tint:
-        the family verdict belongs to the loaded captures it is being compared
-        against, and a cursor that changes colour as it moves reads as the
-        instrument asserting something it has not been asked to assert."""
+        The cursor carries no family colour -- that verdict belongs to the
+        loaded captures it is being compared against, and a cursor that took a
+        family colour as it moved would read as the instrument asserting
+        something it has not been asked to assert. It does carry the one
+        verdict it can make about itself: yellow below the SNR gate, green at
+        or above it (v1.45).
+
+        The TRAIL is above-gate only (v1.50) -- a below-gate frame leaves no
+        mark at all, so the trail is green by construction and draws just the
+        part of a sweep that was worth reading. Below-gate frames still go into
+        the buffer and still age the trail along, so sitting off-target fades
+        the whole thing out within `Trail` frames rather than freezing the last
+        good pass on screen.
+
+        Both the cursor colour and the trail's membership are decided against
+        the *current* gate rather than the `gated` flag stamped at ingest, so
+        moving the SNR gate spinbox repaints and re-selects the trail already
+        on screen instead of only affecting later frames."""
         feat = self._shape_live
         x_key = self.cb_shape_x.currentData()
         y_key = self.cb_shape_y.currentData()
@@ -4458,37 +5218,69 @@ class MainWindow(QMainWindow):
                 self.shape_live_item.setData([])
                 self.shape_trail_item.setData([])
                 return
-            x = y = 0.0
+            # Through the spacing curves, not a literal (0, 0): those map 0 to
+            # itself only when the drawn range happens to be symmetric.
+            x = self._shape_scale_apply(0.0, 'x')
+            y = self._shape_scale_apply(0.0, 'y')
         else:
-            x = self._shape_plot_value(feat, x_key)
-            y = self._shape_plot_value(feat, y_key)
+            x = self._shape_plot_value(feat, x_key, 'x')
+            y = self._shape_plot_value(feat, y_key, 'y')
         if not (np.isfinite(x) and np.isfinite(y)):
             self.shape_live_item.setData([])
             self.shape_trail_item.setData([])
             return
 
-        yellow = _hl_qcolor(_HL_YELLOW)
+        gate = self._shape_gate()
         self.shape_live_item.setData([{
             'pos': (x, y), 'size': 16, 'symbol': 'o',
-            'brush': pg.mkBrush(yellow), 'pen': pg.mkPen('#000000', width=2)}])
+            'brush': pg.mkBrush(self._shape_live_colour(feat, gate)),
+            'pen': pg.mkPen('#000000', width=2)}])
 
         n_trail = self.sp_shape_trail.value()
         if not held or n_trail <= 0:
             self.shape_trail_item.setData([])
             return
         trail = list(self._shape_trail)[-n_trail:]
+        green = _hl_qcolor(_HL_GREEN)
         spots = []
         for i, tf in enumerate(trail):
-            tx = self._shape_plot_value(tf, x_key)
-            ty = self._shape_plot_value(tf, y_key)
+            # Below the gate the unit shape is normalised noise that still
+            # wanders the plane convincingly, so it leaves no trail (v1.50).
+            if not self._shape_above_gate(tf, gate):
+                continue
+            tx = self._shape_plot_value(tf, x_key, 'x')
+            ty = self._shape_plot_value(tf, y_key, 'y')
             if not (np.isfinite(tx) and np.isfinite(ty)):
                 continue
+            # Age is the position in the WHOLE window, not among the drawn
+            # points: a surviving mark has to keep fading as below-gate frames
+            # push it back, or an old pass would sit at full brightness for as
+            # long as nothing else got above the gate.
             frac = (i + 1) / len(trail)          # oldest faintest
-            colour = QColor(yellow)
+            colour = QColor(green)
             colour.setAlpha(int(30 + 170 * frac))
             spots.append({'pos': (tx, ty), 'size': 4 + 5 * frac,
                           'brush': pg.mkBrush(colour), 'pen': None})
         self.shape_trail_item.setData(spots)
+
+    @staticmethod
+    def _shape_above_gate(feat, gate):
+        """Is this frame's own shape above noise? Read against the gate passed
+        in, not feat['gated'], so a gate change re-decides the trail already on
+        screen."""
+        snr = feat.get('snr')
+        # snr is +inf when splithalf collapses to zero -- that is above any
+        # gate. NaN compares False, which is the right answer for it.
+        return snr is not None and snr >= gate
+
+    @classmethod
+    def _shape_live_colour(cls, feat, gate):
+        """Live CURSOR colour: green at or above the SNR gate, yellow below it.
+        Not a family verdict -- just whether this frame's own shape is above
+        noise, which is the only thing the live cursor is entitled to say. The
+        trail no longer needs this (v1.50): it draws above-gate frames only, so
+        it is green throughout."""
+        return _hl_qcolor(_HL_GREEN if cls._shape_above_gate(feat, gate) else _HL_YELLOW)
 
     @staticmethod
     def _shape_band_curve(feat):
@@ -4565,7 +5357,13 @@ class MainWindow(QMainWindow):
         """One row per target, sorted by median crossing width; one dot per
         gated capture. Below-gate captures are left out entirely -- an
         ungated crossing width is a coin toss, and putting it on the ladder
-        would imply an ordering that isn't there."""
+        would imply an ordering that isn't there.
+
+        Row labels carry the material tag (v1.43): the ladder's whole claim is
+        that crossing width orders targets by conductivity/permeability, and
+        that claim is only readable if the material is on the row. One tag per
+        row rather than per dot -- a row IS one target, so per-dot tags would
+        be the same string repeated."""
         if not hasattr(self, 'shape_ladder_plot'):
             return
         feats = self._shape_capture_features()
@@ -4580,9 +5378,14 @@ class MainWindow(QMainWindow):
         x_hi = math.log10(pimd_shape.CROSS_NEVER)
         order = sorted(by_target, key=lambda t: float(
             np.median([f['crossing'] for f in by_target[t]])))
+        tag_rows = self.cb_shape_labels.isChecked()
         spots, ticks = [], []
+        self._shape_ladder_rows = {}
         for row, target in enumerate(order):
-            ticks.append((row, target))
+            self._shape_ladder_rows[target] = row
+            tag = by_target[target][0]['material_tag']
+            ticks.append((row, '{0}  [{1}]'.format(target, tag) if tag_rows and tag
+                          else target))
             for feat in by_target[target]:
                 colour = QColor(SHAPE_FAMILY_COLOURS.get(feat['family'], '#666666'))
                 spots.append({
@@ -4590,7 +5393,9 @@ class MainWindow(QMainWindow):
                     'size': 10, 'symbol': self._shape_marker_symbol(feat),
                     'brush': pg.mkBrush(colour),
                     'pen': self._shape_marker_pen(QColor('#333333'), feat['foreign']),
-                    'data': {'tip': self._shape_tip(feat)},
+                    # 'key' is what makes a ladder dot clickable into the Tile
+                    # Inspector -- same payload shape as a scatter spot.
+                    'data': {'key': feat['key'], 'tip': self._shape_tip(feat)},
                 })
         # Reserve the top row for the live frame and label it, so there is
         # somewhere for the live dot to sit even before any target is
@@ -4670,7 +5475,8 @@ class MainWindow(QMainWindow):
         feat = feats.get(self._shape_selected_key)
         if feat is None:
             self.shape_tiles_img.clear()
-            self.shape_tiles_plot.setTitle('Tile Inspector — click a scatter point', size='7pt')
+            self.shape_tiles_plot.setTitle(
+                'Tile Inspector — click a point on the plane or the ladder', size='7pt')
             return
         matrix = np.asarray(feat['vec'], dtype=float).reshape(feat['n_bands'], feat['n_delays'])
         lim = float(np.max(np.abs(matrix)))
@@ -4680,8 +5486,8 @@ class MainWindow(QMainWindow):
         # A foreign tile's own axes are drawn below, so the title has to say
         # whose ladder they are -- the picture is otherwise indistinguishable
         # from a live-profile capture.
-        title = '{0} @{1} — amp {2:.2f} mV, SNR {3:.1f}, {4} [{5}]'.format(
-            feat['target_id'] or '?',
+        title = '{0} ({1}) @{2} — amp {3:.2f} mV, SNR {4:.1f}, {5} [{6}]'.format(
+            feat['target_id'] or '?', feat['material_text'],
             '{0} mm'.format(feat['distance_mm']) if feat['distance_mm'] else 'air',
             feat['amp'], feat['snr'], feat['quality'] or '?', feat['session'])
         if feat['foreign']:
@@ -4837,7 +5643,7 @@ class MainWindow(QMainWindow):
         for this tab, so this departs from the brief on purpose."""
         self._shape_air_restart()
         self.statusBar().showMessage(
-            'Shape Space: air re-armed — collecting {0} settled frames'.format(
+            'Family Plane Analysis: air re-armed — collecting {0} settled frames'.format(
                 self.sp_shape_air_n.value()))
 
     # -- Scratch captures ---------------------------------------------------
@@ -4846,6 +5652,13 @@ class MainWindow(QMainWindow):
     # corpus build hard-errors on an unregistered target_id, and that guard is
     # deliberate. A scratch object gets promoted by registering it in
     # targets_v1.csv and recapturing it properly.
+    #
+    # A save also merges the file back into the shared template store under its
+    # own 'scratch' source (v1.46), so the point is on the plane immediately --
+    # as a triangle, per _SHAPE_SYMBOLS. Its own source, not 'loaded' or
+    # 'editable': _merge_template_list replaces a source wholesale, so reusing
+    # either would silently drop the reference corpus a scratch is being
+    # compared against, which is the entire point of taking one.
 
     @staticmethod
     def _shape_slugify(label):
@@ -5016,9 +5829,33 @@ class MainWindow(QMainWindow):
         except OSError as e:
             self.statusBar().showMessage('Save Scratch failed: {0}'.format(e))
             return
+        # Straight onto the plane (v1.46). A scratch grab went to disk and
+        # nowhere else, so the whole reason for taking one -- see where this
+        # object lands against the loaded corpus -- needed a Load signatures…
+        # round trip to answer.
+        self._sig_autocheck_keys.add((session_id, capture_id))
+        drawn = self._reload_scratch_signature_list(path)
         self.statusBar().showMessage(
-            "Saved scratch '{0}' as {1} ({2} rows, anchor={3}) to {4}".format(
-                target_id, capture_id, len(rows), fields['anchor'], path))
+            "Saved scratch '{0}' as {1} ({2} rows, anchor={3}) to {4}{5}".format(
+                target_id, capture_id, len(rows), fields['anchor'], path,
+                ' — plotted' if drawn else ''))
+
+    def _reload_scratch_signature_list(self, path):
+        """Re-read the scratch file into the shared template store under its
+        own 'scratch' source, so it coexists with a loaded reference corpus and
+        an active editable file rather than replacing either. Whole file, not
+        just the row just written: _merge_template_list replaces a source
+        wholesale, and re-reading is also the only check that what went to disk
+        reads back as a signature. Returns True if it landed."""
+        try:
+            sigs = self._scan_editable_signature_file(path)
+        except Exception as e:
+            self.statusBar().showMessage(
+                'Saved to {0}, but it could not be re-read to plot it ({1})'.format(
+                    os.path.basename(path), e))
+            return False
+        self._merge_template_list(sigs, source='scratch')
+        return True
 
     # ------------------------------------------------------------------
     # Serial
@@ -5834,7 +6671,12 @@ class MainWindow(QMainWindow):
 
             self.cb_hm_norm.setCurrentIndex(int(s.get('analysis_hm_norm_idx', 0)))
             self.cb_hm_scale_auto.setChecked(bool(s.get('analysis_hm_scale_auto', True)))
-            self.sp_hm_scale_manual.setValue(float(s.get('analysis_hm_scale_manual', 200_000.0)))
+            # v1.44 split the ± half-range into explicit limits; a settings
+            # file written by v1.43 or earlier carries only the half-range, so
+            # fall back to the symmetric pair it used to mean.
+            half = float(s.get('analysis_hm_scale_manual', 200_000.0))
+            self.sp_hm_scale_min.setValue(float(s.get('analysis_hm_scale_min', -half)))
+            self.sp_hm_scale_max.setValue(float(s.get('analysis_hm_scale_max', half)))
 
             self.cb_c2_norm_auto.setChecked(bool(s.get('analysis_c2_norm_auto', True)))
             self.sp_c2_norm_manual.setValue(float(s.get('analysis_c2_norm_manual', 0.0)))
@@ -5886,15 +6728,30 @@ class MainWindow(QMainWindow):
             # range. findData guards an axis key retired by a later version.
             for combo, saved in ((self.cb_shape_x, s.get('shape_x')),
                                   (self.cb_shape_y, s.get('shape_y')),
-                                  (self.cb_shape_colour, s.get('shape_colour'))):
+                                  (self.cb_shape_colour, s.get('shape_colour')),
+                                  (self.cb_shape_scale_x, s.get('shape_scale_x')),
+                                  (self.cb_shape_scale_y, s.get('shape_scale_y'))):
                 idx = combo.findData(saved) if saved else -1
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
             self.sp_shape_gate.setValue(float(s.get('shape_gate', SHAPE_GATE_DEFAULT)))
             self.sp_shape_trail.setValue(int(s.get('shape_trail', SHAPE_TRAIL_DEFAULT)))
-            self.sp_shape_band_lo.setValue(int(s.get('shape_band_lo', 0)))
-            self.sp_shape_band_hi.setValue(int(s.get(
-                'shape_band_hi', max(0, self._n_bands - 1))))
+            x_lo = int(s.get('shape_band_lo', 0))
+            x_hi = int(s.get('shape_band_hi', max(0, self._n_bands - 1)))
+            # The Y pair (v1.43) defaults to the X pair's saved values, so a
+            # settings file from v1.42 restores the plane it was drawing.
+            y_lo = int(s.get('shape_band_y_lo', x_lo))
+            y_hi = int(s.get('shape_band_y_hi', x_hi))
+            for sp, val in ((self.sp_shape_band_lo, x_lo), (self.sp_shape_band_hi, x_hi),
+                             (self.sp_shape_band_y_lo, y_lo), (self.sp_shape_band_y_hi, y_hi)):
+                sp.setValue(val)
+            # AFTER the setValue calls, which fire the range handler and would
+            # otherwise overwrite this with whatever the spins could hold. The
+            # app is still on the 5-band startup profile here, so a saved 6 is
+            # clamped to 4 on screen -- _rebuild_shape_axes() restores it from
+            # these remembered values once the real profile lands (v1.49).
+            self._shape_band_pref = {'x': (x_lo, x_hi), 'y': (y_lo, y_hi)}
+            self.cb_shape_labels.setChecked(bool(s.get('shape_labels', True)))
             self.sp_shape_win_n.setValue(int(s.get('shape_win_n', SHAPE_WIN_N_DEFAULT)))
             self.sp_shape_air_n.setValue(int(s.get('shape_air_n', SHAPE_AIR_N_DEFAULT)))
 
@@ -5908,7 +6765,14 @@ class MainWindow(QMainWindow):
                 except Exception:
                     self._shape_apply_default_layout()
                     self.statusBar().showMessage(
-                        'Shape Space: saved dock layout could not be restored — using the default')
+                        'Family Plane Analysis: saved dock layout could not be restored '
+                        '— using the default')
+
+            # Last signature-dialog directory. Validated at use time by
+            # _sig_dialog_dir(), not here -- a directory that exists at
+            # startup can still be gone (or on an unmounted disk) by the time
+            # the dialog opens.
+            self._last_sig_dir = s.get('last_signature_dir') or CORPORA_DIR
 
             # Saved-profile dropdown (already populated from disk in _build_ui,
             # so findText guards a since-deleted file; only the dropdown
@@ -5940,7 +6804,8 @@ class MainWindow(QMainWindow):
 
             'analysis_hm_norm_idx':     self.cb_hm_norm.currentIndex(),
             'analysis_hm_scale_auto':   self.cb_hm_scale_auto.isChecked(),
-            'analysis_hm_scale_manual': self.sp_hm_scale_manual.value(),
+            'analysis_hm_scale_min':    self.sp_hm_scale_min.value(),
+            'analysis_hm_scale_max':    self.sp_hm_scale_max.value(),
 
             'analysis_c2_norm_auto':    self.cb_c2_norm_auto.isChecked(),
             'analysis_c2_norm_manual':  self.sp_c2_norm_manual.value(),
@@ -5968,6 +6833,7 @@ class MainWindow(QMainWindow):
             'sig_train_override': self.cb_sig_train_override.isChecked(),
 
             'profile_file':    self.cb_profile_file.currentText(),
+            'last_signature_dir': self._last_sig_dir,
             'std_lower':       self.sp_std_lower.value(),
             'std_upper':       self.sp_std_upper.value(),
 
@@ -5990,10 +6856,18 @@ class MainWindow(QMainWindow):
             'shape_x':       self.cb_shape_x.currentData(),
             'shape_y':       self.cb_shape_y.currentData(),
             'shape_colour':  self.cb_shape_colour.currentData(),
+            'shape_scale_x': self.cb_shape_scale_x.currentData(),
+            'shape_scale_y': self.cb_shape_scale_y.currentData(),
             'shape_gate':    self.sp_shape_gate.value(),
             'shape_trail':   self.sp_shape_trail.value(),
-            'shape_band_lo': self.sp_shape_band_lo.value(),
-            'shape_band_hi': self.sp_shape_band_hi.value(),
+            # The PREFERENCE, not the spinbox, when one is held (v1.49):
+            # quitting while on a narrow profile must not write that profile's
+            # clamped pair over the wider one the operator actually chose.
+            'shape_band_lo': self._shape_band_saved('x', 0),
+            'shape_band_hi': self._shape_band_saved('x', 1),
+            'shape_band_y_lo': self._shape_band_saved('y', 0),
+            'shape_band_y_hi': self._shape_band_saved('y', 1),
+            'shape_labels':  self.cb_shape_labels.isChecked(),
             'shape_win_n':     self.sp_shape_win_n.value(),
             'shape_air_n':     self.sp_shape_air_n.value(),
             'shape_dock_state': self._shape_dock_state(),
