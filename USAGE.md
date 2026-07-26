@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.7
+# PIMD — Usage Guide (USAGE.md) v1.17
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,40 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.17 2026-07-26 delaycal v1.28 → v1.29 (Export Profile save dialog: filename sets the
+                profile `name`, plus an editable auto-generated notes field). §4's
+                intent, Auto Nudge, Import and new Export bullets; §1 diagram.
+v1.16 2026-07-26 delaycal v1.25 → v1.28 (Compare Profiles tab; fine step now in ns
+                down to the 8 ns grid; THERMAL auto-starts on sweep completion).
+                §1 diagram and §4 updated.
+v1.15 2026-07-25 classviz v1.49 → v1.50. §5's SNR-gate sub-bullet: a below-gate
+                frame now leaves no trail at all rather than a yellow one, and
+                still ages the trail window along. §1 diagram follows.
+v1.14 2026-07-25 classviz v1.48 → v1.49 (custom band pair restore fix). Version
+                references only — §1 diagram and §5 heading.
+v1.13 2026-07-25 classviz v1.47 → v1.48. §5's Scale sub-bullet gains the
+                rank-axis grid rule and the zero rails following the curve.
+                §1 diagram follows.
+v1.12 2026-07-25 classviz v1.46 → v1.47. §5's Family Plane bullet gains a Scale
+                sub-bullet (four spacing curves, why no log) and an axis
+                sub-bullet explaining what a band-range-mean axis is and why
+                the middle of the plane is empty. §1 diagram follows.
+v1.11 2026-07-25 classviz v1.45 → v1.46. §5's Family Plane bullet gains a Save
+                Scratch… sub-bullet (plotted immediately, as a triangle, listed
+                under △ alongside any loaded corpus); star → triangle in the
+                symbol legend. §1 diagram follows.
+v1.10 2026-07-25 classviz v1.44 → v1.45. §5's heatmap colour-scale sub-bullet is
+                rewritten around the colorbar working as a real range slider
+                (handles at Min/Max, saturation tails); the Family Plane bullet
+                and its SNR-gate sub-bullet now say the live cursor is yellow
+                below the gate and green at or above it. §1 diagram follows.
+v1.9 2026-07-24 classviz v1.43 → v1.44. §5 gains the Analysis heatmap's explicit
+                Min/Max colour scale (and why Auto is wrong for Std Dev) and the
+                signature dialogs' remembered directory. §1 diagram follows.
+v1.8 2026-07-24 classviz v1.42 → v1.43. The fourth tab is renamed Shape Space →
+                Family Plane Analysis; §5's bullet renamed and extended with
+                material tags, the per-axis custom band ranges and the
+                clickable Crossing Ladder. §1 diagram version follows.
 v1.7 2026-07-24 classviz v1.39 → v1.42: new §5 Shape Space bullet (fourth tab,
                 two-mode air reference, scratch captures) and the §1 diagram
                 follows. §5 profile-switch diagnostic amended — the blank
@@ -63,10 +97,10 @@ The toolchain forms one pipeline:
 ```
 mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       │  USB-serial, ASCII records (DESIGN §9)
-      ├─► src/pimd_delaycal.py (v1.25)      — calibrates sample delays,
+      ├─► src/pimd_delaycal.py (v1.29)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.42)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.50)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │        └─ uses src/pimd_shape.py (v1) — shared feature maths
                      │              (family / crossing / decay persistence)
@@ -150,29 +184,52 @@ UI fields display µs but the wire protocol is ns (conversion internal). Setting
 
 ---
 
-## 4. pimd_delaycal — delay calibration sweeper (v1.25)
+## 4. pimd_delaycal — delay calibration sweeper (v1.29)
 
 **Intent.** Produces the calibrated profiles everything else depends on. For each
 configured (freq, pulse) pair it finds the sample delay at which the decay crosses
 each target voltage threshold (the clip-release / earliest-valid-sample point), and
-exports the result as a classviz-compatible profile JSON
-(`src/data/profiles/cal_<ts>.json`). Geometry from this tool is the firmware↔ML
-contract (DESIGN §10) — profiles are locked after calibration, never edited in place.
+exports the result as a classviz-compatible profile JSON in
+`src/data/profiles/`. Geometry from this tool is the firmware↔ML contract
+(DESIGN §10) — profiles are locked after calibration, never edited in place.
 
 **Operation.**
 - **Sweep:** coarse hunt (1 µs steps) until signal appears below the signal-detect
-  ceiling, back up one step, then fine steps (0.1 µs) interpolating each threshold
-  crossing; delays snapped to the 8 ns grid, stored to 3 d.p. Live table: rows =
-  freq/pulse pairs, columns = threshold voltages.
+  ceiling, back up one step, then fine steps (set in ns, down to the 8 ns PWM grid;
+  100 ns default) interpolating each threshold crossing; delays snapped to the 8 ns
+  grid, stored to 3 d.p. Live table: rows = freq/pulse pairs, columns = threshold
+  voltages.
 - **Thermal:** streams Mode 2 with the calibrated profile (via `D` + `Q5` + `G`),
   live latest-mean and rolling-σ per channel — used to verify thermal soak and
-  drift before locking a profile.
+  drift before locking a profile. Starts automatically when a sweep finishes
+  (**Auto on completion**, default on), which also measures every cell for the
+  Compare Profiles tab.
 - **Auto Nudge:** iterative per-channel delay adjustment to escape noisy zones —
   zigzag (− first, then +) on the 8 ns grid with a ±cap, ceiling latch (channels
   that hit no-signal territory are forced down-only), lock-on-pass, parallel or
-  sequential evaluation; exports the profile automatically on finish.
+  sequential evaluation. On finish it auto-saves under a timestamp name without
+  prompting (an unattended run must not block on a dialog) — press **Export Profile**
+  afterwards to save it under the locked name with notes.
+- **Export Profile** asks for the filename, then shows the profile's **notes** for
+  editing before writing. The JSON's `name` field is set from the filename you
+  choose — `name` is what corpora record as `profile_name` and what the cross-epoch
+  guard reports, so naming the file names the epoch. The notes are pre-filled with
+  the sweep's start/end time and duration, the sweep and Auto Nudge parameters
+  (including std-dev N), the Auto Nudge outcome, the geometry, and the notes of any
+  profile imported this session, attributed — add your own conditions (thermal state,
+  soak time, pack voltage) before saving. Nothing else is reproducible without them.
 - **Import Profile** loads an existing JSON — **start every recalibration here**, see
-  below. Also used for re-checking a profile without a fresh sweep.
+  below. Also used for re-checking a profile without a fresh sweep. Its notes and
+  filename are carried forward to the next export.
+- **Compare Profiles tab:** pick any two profiles — including
+  `<current calibration table>`, so a sweep can be checked against a reference before
+  it is exported — and read the timing convergence per cell. Rows are cells the two
+  share at the *same* band and intended target voltage; columns give both delays, the
+  **Δ in ns** (green within one 8 ns step, yellow within five, red beyond), both
+  measured voltages, their difference, and each profile's error against target. Voltages
+  come from THERMAL / Auto Nudge soaks run this session and show `—` where a delay has
+  never been streamed — they are not stored in the profile JSON and do not survive a
+  restart. Footer reports mean/RMS/max |Δ| and any cells present in only one profile.
 
 **Operational notes.** Post-enclosure, the top of decay sits at ≈4.87–4.89 V, so the
 **signal-detect ceiling must be set to 5.0 V** (DESIGN §3 epoch note) or the coarse
@@ -190,7 +247,7 @@ the current locked profile, edit what you mean to change, then sweep.
 
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.42)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.50)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -232,9 +289,30 @@ validated against the target registry.
   1.0) and glitch-excluded. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
-- **Shape Space tab (v1.42):** exploration, not capture. Every loaded signature is a
+  - **Heatmap colour scale (v1.44).** The Analysis heatmap's **Scale** is either
+    **Auto** or an explicit **Min**/**Max** in µV. Auto fits the whole data range,
+    which is the wrong window for **Std Dev (rolling N)**: a rolling σ field sits in
+    a narrow band well above zero, so an auto range anchored at 0 spends most of the
+    ramp on values that never occur and every cell reads the same colour. Unchecking
+    Auto seeds Min/Max from what is currently on screen; tighten to just either side
+    of the quiet-cell level and the noisy columns separate out. The limits persist.
+  - **The colorbar is the same control, as a slider (v1.45).** Its two handles sit at
+    **Min** and **Max**, and the axis under it spans a little more than that window —
+    the pale flat tails outside the handles are the values the scale saturates on.
+    Drag either handle to set that limit; the spinboxes follow, and vice versa. The
+    bar re-scales only when the window no longer fits it sensibly, so a handle stays
+    where it is put. In **Auto** the bar spans exactly the fitted range and the
+    handles are hidden — there is nothing outside the window to show, and a drag
+    would not survive the next frame.
+  - **Load signatures… / Open for editing…** reopen in the last directory used,
+    across sessions. **New file…** still defaults into `src/data/corpora/`, since
+    that is where the capture pipeline expects a corpus to live.
+- **Family Plane Analysis tab (v1.43; called Shape Space in v1.42):** exploration, not
+  capture. Every loaded signature is a
   point in a selectable 2-D feature space (X/Y/Colour combos), with the live frame
-  moving through it as a yellow dot. Five docks — Scatter, Band Curves, Crossing
+  moving through it as a dot that reads **yellow below the SNR gate and green at or
+  above it** (v1.45) — the one verdict the cursor makes about itself; it never takes a
+  family colour. Five docks — Scatter, Band Curves, Crossing
   Ladder, Tile Inspector, Gauges — are movable and floatable; the layout persists,
   and **Reset layout** restores the default. Feature maths comes from
   `pimd_shape.py`; family (a sign test) and decay persistence (a magnitude test) are
@@ -248,16 +326,80 @@ validated against the target registry.
     meaningless within a minute, because drift accumulates as a coherent term the SNR
     gate cannot catch (DESIGN §14.1). Nothing auto-detects a target arriving or
     leaving; that is deliberate and physical, not a missing feature.
+  - **SNR gate.** Amp(L2)/splithalf below which a shape is not interpreted — below
+    it the unit shape is normalised noise that still moves around the plane
+    convincingly. Loaded captures below the gate draw hollow; the live cursor draws
+    yellow rather than green; and **a below-gate frame leaves no trail at all**
+    (v1.50), so the trail is green throughout and shows only the part of a sweep that
+    was worth reading. Those frames still age the trail window along, so holding
+    below-gate fades the trail out rather than freezing the last good pass on screen.
+    Moving the gate re-selects and repaints the trail already on screen. Default 5.0,
+    the same line that stamps a capture `noisy`.
   - **Air age matters more than it looks.** The gauge goes amber at 60 s because a
     60 s-old reference already carries ~1 mV/cell — the order of a weak target
     (DESIGN §17.10). Re-arm air often.
-  - **Mixed profile geometries are allowed here and marked** — squares/diamonds and a
-    standing banner for captures from another profile. They are comparable in kind,
+  - **Marker shape says where a capture came from** — circle for a registered target
+    on the live profile, **triangle for a scratch object**, square for another
+    profile's geometry (diamond if both), plus a dashed outline and a standing banner
+    for the foreign ones. Filled = above the SNR gate, hollow = below. They are
+    comparable in kind,
     **not calibrated against each other**. Nothing here writes a corpus.
+  - **Material tags (v1.43).** Each point carries its target's material beside it
+    (`Al`, `Fe`, `SS`, `Fe/Zn` for a plated target…), taken from `targets_v1.csv`;
+    the same tag is appended to every Crossing Ladder row. A capture whose
+    `target_id` is not in the registry reads `?` — that includes every scratch
+    object. The tag takes the marker's colour, so under Colour = family a red `Al`
+    is a non-ferrous material reading ferrous. Uncheck **Material tags** to clear
+    them; they also drop out on their own above 200 drawn points.
+  - **Custom band range is per axis (v1.43).** X and Y have their own lo/hi band
+    spins, so "custom band range" on both axes compares two different ranges rather
+    than plotting a feature against itself. Colour-by "custom band range" reads the
+    X pair.
+  - **What a band-range axis actually is.** `early`/`mid`/`late`/`custom` are all the
+    same quantity — the plain mean of the **unit shape** (`vec` ÷ ‖vec‖₂, so amplitude
+    and therefore distance are divided out) over a range of bands. `custom bands 4–6`
+    on the 7×9 profile is the mean of 27 of the 63 unit-shape cells, those being the
+    three longest pulse widths across all nine threshold columns. Sign follows DESIGN
+    §2: ferrous positive, non-ferrous negative. Two consequences worth knowing:
+    - It is **hard-bounded** at ±1/√(k·n_delays) — ±0.1925 for 3 of 7 bands — and the
+      2026-07-23 corpus reaches 0.160, 83% of that ceiling. Clusters press against a
+      wall, which is what the **Scale** control below is for.
+    - The empty band across the middle is **the family decision boundary, not a data
+      gap**: Colour = family is read off the signs of these same two axes, so points
+      near zero are marginal calls and there are few real objects there.
+  - **Scale, per axis (v1.47).** Changes the *spacing* along one axis only. Every
+    option maps the drawn set's min and max onto themselves — a point keeps its value,
+    the ticks still read real feature units, and switching never moves the view.
+    - **Expand ends (cube)** and **(atanh)** stretch the two extremes and squeeze the
+      middle, which is the right way round for a bounded axis with the decision
+      boundary in the void. On the corpus above, the dead middle goes from 48% of the
+      Y axis to 15% (cube) or 14% (atanh); atanh is the stronger of the two.
+    - **Rank** spaces the drawn points evenly — the most spread of all (dead middle 6%)
+      but position stops meaning anything physical and shifts as the drawn set changes.
+    - **There is no log option, deliberately.** Log expands near zero and compresses
+      the extremes; here nothing lives near zero and everything lives at the extremes,
+      so it is backwards — measured, it drives the dead middle from 48% to **85%**.
+    - A non-linear axis says so in its label (`custom bands 4–6 [cube]`). The Scale
+      combo greys out on **crossing µs**, which already owns its own log-µs ticks.
+    - **A rank axis drops its gridlines** (v1.48) — a rank axis is ordinal, so a grid
+      over it would draw a metric that is not there. Per axis: rank on Y alone keeps
+      the vertical gridlines. The two **zero rails stay** either way, and they follow
+      the spacing curve, so the family decision boundary is drawn where the value 0
+      actually lands rather than at the middle of the plot. A rail whose axis has no
+      zero in range (log₁₀ amplitude, distance) simply stays off-view.
+  - **Clicking either the scatter or the ladder** opens that capture in the Tile
+    Inspector and rings it in both panels. The ladder holds gated captures only, so
+    a below-gate selection rings on the plane and nowhere on the ladder.
   - **Save Scratch…** captures an *unregistered* object to
     `src/data/scratch/gui_scratch_<date>.csv` — never into `src/data/corpora/`.
     Promotion means registering the object in `targets_v1.csv` and recapturing
     through the Analysis tab.
+    - **It is plotted the moment it is saved (v1.46)**, as a **triangle**, and joins
+      the Analysis tab's signature list under a `△` prefix (the way an editable file's
+      rows carry `✎`). It sits *alongside* any loaded reference corpus rather than
+      replacing it — which is the point: a scratch grab is taken to see where the
+      object lands against that corpus. Saving again re-reads the whole day's scratch
+      file, so every scratch taken today stays on the plane.
 - **Session-dump recorder:** self-describing per-session CSV to
   `src/data/sessions/` — embedded profile JSON, per-column map, `# mark:` /
   `# mark_target:` lines — the input format for `pimd_features.py`.

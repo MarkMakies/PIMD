@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.25
+# PIMD Delay Calibration v1.29
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -21,6 +21,10 @@
 #   G                                      — start Mode 2 streaming
 #
 # History (full detail in CHANGELOG.md):
+#   v1.29 profile save dialog (filename = profile name) + auto-generated notes
+#   v1.28 Compare Profiles tab; measured-voltage cache from thermal/Auto soaks
+#   v1.27 THERMAL auto-starts on sweep completion (checkbox, default on)
+#   v1.26 fine step in ns down to the 8 ns PWM grid (was 10 ns floor, µs)
 #   v1.25 APP_VERSION constant re-synced with header (was stuck at 1.19)
 #   v1.24 Auto Nudge zigzag respects the signal-detect ceiling (down-only past it)
 #   v1.23 sp_auto_max_iter range 1-20 -> 1-100
@@ -63,16 +67,16 @@ from statistics import stdev as _stdev
 os.environ.setdefault('QT_API', 'pyqt6')
 
 from PyQt6.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QDoubleSpinBox, QSpinBox, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QMainWindow, QWidget, QVBoxLayout,
+    QHBoxLayout, QPushButton, QLabel, QDoubleSpinBox, QSpinBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QGroupBox, QFormLayout,
-    QFileDialog, QHeaderView, QPlainTextEdit, QSplitter,
+    QFileDialog, QHeaderView, QInputDialog, QPlainTextEdit, QSplitter, QTabWidget,
 )
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.25'
+APP_VERSION = '1.29'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -129,6 +133,17 @@ class MainWindow(QMainWindow):
         self._coarse_step  = 1.0   # µs — snapshot of sp_coarse_step at run time
         self._signal_uV    = 4_900_000  # µV — snapshot of sp_signal_v at run time
 
+        # Provenance for the exported profile's 'notes' field.  A locked profile
+        # has to say when it was swept and under what sweep parameters, or the
+        # calibration is not reproducible; and a new epoch's notes should not
+        # lose what the profile it was derived from recorded.
+        self._sweep_started_at: 'datetime | None' = None
+        self._sweep_ended_at:   'datetime | None' = None
+        self._auto_note   = ''   # one-line Auto Nudge outcome, set by _auto_finish
+        self._carried_notes = '' # 'notes' of the last imported profile
+        self._carried_from  = '' # its name, for attribution
+        self._last_save_name = ''  # basename (no .json) last chosen in the save dialog
+
         # Thermal / profile state
         self._thermal_state      = 'idle'       # 'idle' | 'running'
         self._thermal_remaining  = 0.0
@@ -141,6 +156,14 @@ class MainWindow(QMainWindow):
         self._thermal_last_redraw = 0.0         # rate-limit redraws to ~10 Hz
         self._thermal_display_order: list = []  # display_row → protocol_band (asc pulse_us)
         self._thermal_proto_to_display: dict = {}  # protocol_band → display_row
+        self._thermal_profile: 'dict | None' = None  # profile actually sent this run
+
+        # Measured-voltage cache for the Compare tab.  A cell's voltage is a
+        # function of (freq_hz, pulse_us, delay_ns), not of which file it came
+        # from — so a saved profile whose delays match a streamed run picks its
+        # measurements up automatically.
+        self._meas_cache: dict = {}   # (freq_hz, pulse_us, delay_ns) → (mean_uV, ts)
+        self._cmp_rows: list = []     # last comparison, for CSV export
 
         # Auto Nudge state
         # Two modes (toggled by cb_sequential):
@@ -217,7 +240,9 @@ class MainWindow(QMainWindow):
         self.pb_export_profile = QPushButton('Export Profile')
         self.pb_export_profile.setFixedWidth(110)
         self.pb_export_profile.setEnabled(False)
-        self.pb_export_profile.clicked.connect(self.export_profile)
+        # lambda, not a bare connect: clicked() passes `checked` as the first
+        # positional arg, which would land on export_profile's `interactive`.
+        self.pb_export_profile.clicked.connect(lambda: self.export_profile())
         top.addWidget(self.pb_export_profile)
 
         self.pb_import_profile = QPushButton('Import Profile')
@@ -253,12 +278,13 @@ class MainWindow(QMainWindow):
         self.sp_start.setDecimals(2)
         form.addRow('Start delay:', self.sp_start)
 
-        self.sp_step = QDoubleSpinBox()
-        self.sp_step.setRange(0.01, 5.0)
-        self.sp_step.setSingleStep(0.01)
-        self.sp_step.setValue(0.10)
-        self.sp_step.setSuffix(' us')
-        self.sp_step.setDecimals(2)
+        self.sp_step = QSpinBox()
+        self.sp_step.setRange(8, 5000)
+        self.sp_step.setSingleStep(8)
+        self.sp_step.setValue(100)
+        self.sp_step.setSuffix(' ns')
+        self.sp_step.setToolTip(
+            'Fine sweep step (ns, multiple of the 8 ns PWM grid).')
         form.addRow('Fine step:', self.sp_step)
 
         self.sp_coarse_step = QDoubleSpinBox()
@@ -375,6 +401,13 @@ class MainWindow(QMainWindow):
         self.pb_thermal_stop.setEnabled(False)
         self.pb_thermal_stop.clicked.connect(self._stop_thermal)
         ctrl.addWidget(self.pb_thermal_stop)
+
+        self.cb_auto_thermal = QCheckBox('Auto on completion')
+        self.cb_auto_thermal.setChecked(True)
+        self.cb_auto_thermal.setToolTip(
+            'Start THERMAL automatically when a calibration sweep finishes.\n'
+            'Also caches the measured mean per cell for the Compare Profiles tab.')
+        ctrl.addWidget(self.cb_auto_thermal)
 
         ctrl.addSpacing(16)
         ctrl.addWidget(QLabel('Std dev N:'))
@@ -525,10 +558,291 @@ class MainWindow(QMainWindow):
         self.h_splitter.addWidget(right_w)
         self.h_splitter.setStretchFactor(0, 0)
         self.h_splitter.setStretchFactor(1, 1)
-        root.addWidget(self.h_splitter, stretch=1)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.h_splitter, 'Calibration')
+        self.tabs.addTab(self._build_compare_tab(), 'Compare Profiles')
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        root.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
         self.statusBar().showMessage('Not connected')
+
+    # ------------------------------------------------------------------
+    # Compare Profiles tab
+    #
+    # Answers "did the timings converge?": for every cell the two profiles
+    # share — same band (freq/pulse) and same intended target voltage — show
+    # both delays and their difference in ns, alongside the measured voltages
+    # cached from any thermal/Auto soak that streamed those delays.
+    # ------------------------------------------------------------------
+    CMP_HEADERS = ['Cell', 'Tgt V', 'P1 (us)', 'P2 (us)', 'Δ (ns)',
+                   'P1 V', 'P2 V', 'ΔV (mV)', 'P1 err (mV)', 'P2 err (mV)']
+    CURRENT_TABLE_ENTRY = '<current calibration table>'
+
+    def _build_compare_tab(self):
+        w = QWidget()
+        col = QVBoxLayout(w)
+        col.setContentsMargins(6, 6, 6, 6)
+        col.setSpacing(4)
+
+        sel = QHBoxLayout()
+        sel.setSpacing(6)
+
+        sel.addWidget(QLabel('Profile 1:'))
+        self.cb_cmp_1 = QComboBox()
+        self.cb_cmp_1.setMinimumWidth(260)
+        sel.addWidget(self.cb_cmp_1)
+
+        sel.addSpacing(10)
+        sel.addWidget(QLabel('Profile 2:'))
+        self.cb_cmp_2 = QComboBox()
+        self.cb_cmp_2.setMinimumWidth(260)
+        sel.addWidget(self.cb_cmp_2)
+
+        sel.addSpacing(10)
+        self.pb_cmp_run = QPushButton('Compare')
+        self.pb_cmp_run.setFixedWidth(90)
+        self.pb_cmp_run.clicked.connect(self._compare_profiles)
+        sel.addWidget(self.pb_cmp_run)
+
+        self.pb_cmp_csv = QPushButton('Export CSV')
+        self.pb_cmp_csv.setFixedWidth(100)
+        self.pb_cmp_csv.setEnabled(False)
+        self.pb_cmp_csv.clicked.connect(self._export_compare_csv)
+        sel.addWidget(self.pb_cmp_csv)
+
+        sel.addStretch()
+        col.addLayout(sel)
+
+        self.tbl_cmp = QTableWidget(0, len(self.CMP_HEADERS))
+        self.tbl_cmp.setHorizontalHeaderLabels(self.CMP_HEADERS)
+        self.tbl_cmp.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_cmp.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        col.addWidget(self.tbl_cmp, stretch=1)
+
+        self.lbl_cmp_summary = QLabel(
+            'Select two profiles and press Compare.')
+        self.lbl_cmp_summary.setWordWrap(True)
+        col.addWidget(self.lbl_cmp_summary)
+
+        self._refresh_profile_list()
+        return w
+
+    def _on_tab_changed(self, index: int):
+        if self.tabs.tabText(index).startswith('Compare'):
+            self._refresh_profile_list()
+
+    def _refresh_profile_list(self):
+        """Rescan PROFILES_DIR, preserving each selector's current choice."""
+        try:
+            files = sorted(
+                (f for f in os.listdir(PROFILES_DIR) if f.endswith('.json')),
+                reverse=True)
+        except OSError:
+            files = []
+        entries = [self.CURRENT_TABLE_ENTRY] + files
+
+        for combo in (self.cb_cmp_1, self.cb_cmp_2):
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(entries)
+            idx = combo.findText(prev)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+
+        # Default the two selectors to different profiles on first population
+        if (self.cb_cmp_2.currentIndex() == 0 and len(entries) > 1
+                and self.cb_cmp_1.currentIndex() == 0):
+            self.cb_cmp_2.setCurrentIndex(1)
+
+    def _load_compare_profile(self, name: str):
+        """Resolve a selector entry to a profile dict, or None."""
+        if name == self.CURRENT_TABLE_ENTRY:
+            if not self._fp_pairs or not self._targets_v:
+                return None
+            return self._build_profile()
+        try:
+            with open(os.path.join(PROFILES_DIR, name)) as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _profile_cells(profile):
+        """Flatten a profile to {(freq_hz, pulse_us, target_v): delay_us}."""
+        cells = {}
+        for band in profile.get('bands', []):
+            targets = band.get('threshold_v', [])
+            for c, delay in enumerate(band.get('delays_us', [])):
+                if c < len(targets):
+                    key = (band['freq_hz'], round(band['pulse_us'], 3),
+                           round(targets[c], 6))
+                    cells[key] = delay
+        return cells
+
+    def _measured_uV(self, freq_hz, pulse_us, delay_us):
+        """Cached mean µV for this cell, or None if never streamed."""
+        hit = self._meas_cache.get(
+            (freq_hz, round(pulse_us, 3), int(round(delay_us * 1000))))
+        return hit[0] if hit else None
+
+    def _compare_profiles(self):
+        name1 = self.cb_cmp_1.currentText()
+        name2 = self.cb_cmp_2.currentText()
+
+        p1 = self._load_compare_profile(name1)
+        p2 = self._load_compare_profile(name2)
+
+        self.tbl_cmp.setRowCount(0)
+        self.pb_cmp_csv.setEnabled(False)
+        self._cmp_rows = []
+
+        for p, name in ((p1, name1), (p2, name2)):
+            if p is None:
+                self.lbl_cmp_summary.setText(
+                    f'Could not load "{name}" — '
+                    'run or import a calibration first if using the current table.')
+                return
+            if not p.get('bands'):
+                self.lbl_cmp_summary.setText(f'"{name}" has no bands.')
+                return
+        if name1 == name2:
+            self.lbl_cmp_summary.setText(
+                'Both selectors point at the same profile — pick two different ones.')
+            return
+
+        cells1 = self._profile_cells(p1)
+        cells2 = self._profile_cells(p2)
+        matched = [k for k in cells1 if k in cells2]
+
+        if not matched:
+            self.lbl_cmp_summary.setText(
+                'No cells in common — the two profiles share no '
+                '(freq, pulse, target V) combination.')
+            return
+
+        # Row order follows profile 1: band order, then its own target order
+        order = {k: i for i, k in enumerate(cells1)}
+        matched.sort(key=lambda k: order[k])
+
+        rows = []
+        for freq_hz, pulse_us, target_v in matched:
+            d1 = cells1[(freq_hz, pulse_us, target_v)]
+            d2 = cells2[(freq_hz, pulse_us, target_v)]
+            v1 = self._measured_uV(freq_hz, pulse_us, d1)
+            v2 = self._measured_uV(freq_hz, pulse_us, d2)
+            target_uV = target_v * 1_000_000
+            rows.append({
+                'label':    self._row_label(freq_hz / 1000, pulse_us),
+                'target_v': target_v,
+                'd1':       d1,
+                'd2':       d2,
+                'delta_ns': round((d2 - d1) * 1000),
+                'v1':       v1,
+                'v2':       v2,
+                'dv_mv':    None if (v1 is None or v2 is None) else (v2 - v1) / 1000.0,
+                'e1_mv':    None if v1 is None else (v1 - target_uV) / 1000.0,
+                'e2_mv':    None if v2 is None else (v2 - target_uV) / 1000.0,
+            })
+
+        self._cmp_rows = rows
+        self._render_compare(rows)
+        self._set_compare_summary(rows, cells1, cells2, name1, name2)
+        self.pb_cmp_csv.setEnabled(True)
+
+    def _render_compare(self, rows):
+        def fmt_mv(x):
+            return '—' if x is None else f'{x:+.1f}'
+
+        self.tbl_cmp.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            cells = [
+                row['label'],
+                f"{row['target_v']:.3f}",
+                f"{row['d1']:.3f}",
+                f"{row['d2']:.3f}",
+                f"{row['delta_ns']:+d}",
+                '—' if row['v1'] is None else f"{row['v1'] / 1e6:.3f}",
+                '—' if row['v2'] is None else f"{row['v2'] / 1e6:.3f}",
+                fmt_mv(row['dv_mv']),
+                fmt_mv(row['e1_mv']),
+                fmt_mv(row['e2_mv']),
+            ]
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 4:      # Δ (ns) — colour by PWM grid steps
+                    mag = abs(row['delta_ns'])
+                    item.setBackground(_COL_DONE         if mag <= 8  else
+                                       _COL_AUTO_QUEUED  if mag <= 40 else
+                                       _COL_AUTO_FLAGGED)
+                elif c >= 5 and text == '—':
+                    item.setBackground(_COL_NR)
+                self.tbl_cmp.setItem(r, c, item)
+
+    def _set_compare_summary(self, rows, cells1, cells2, name1, name2):
+        deltas    = [abs(r['delta_ns']) for r in rows]
+        worst     = max(rows, key=lambda r: abs(r['delta_ns']))
+        rms       = (sum(d * d for d in deltas) / len(deltas)) ** 0.5
+        n_unmeas  = sum(1 for r in rows if r['v1'] is None or r['v2'] is None)
+
+        parts = [
+            f'{name1} → {name2}',
+            f'{len(rows)} matched cell(s)',
+            f'mean |Δ| {sum(deltas) / len(deltas):.1f} ns',
+            f'RMS {rms:.1f} ns',
+            f"max |Δ| {abs(worst['delta_ns'])} ns "
+            f"({worst['label']} @ {worst['target_v']:.3f} V)",
+            f'{len(rows) - n_unmeas}/{len(rows)} cell(s) measured both sides',
+        ]
+        summary = ' · '.join(parts)
+
+        def unmatched(a, b, tag):
+            extra = [k for k in a if k not in b]
+            if not extra:
+                return ''
+            shown = ', '.join(
+                f'{self._row_label(f / 1000, p)} @ {v:.3f} V' for f, p, v in extra[:6])
+            more = f' (+{len(extra) - 6} more)' if len(extra) > 6 else ''
+            return f'\n{len(extra)} cell(s) only in {tag}: {shown}{more}'
+
+        summary += unmatched(cells1, cells2, name1)
+        summary += unmatched(cells2, cells1, name2)
+        self.lbl_cmp_summary.setText(summary)
+
+    def _export_compare_csv(self):
+        if not self._cmp_rows:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Comparison CSV', 'profile_compare.csv', 'CSV files (*.csv)')
+        if not path:
+            return
+
+        def num(x, fmt):
+            return '' if x is None else format(x, fmt)
+
+        try:
+            with open(path, 'w') as f:
+                f.write(','.join(self.CMP_HEADERS) + '\n')
+                for row in self._cmp_rows:
+                    f.write(','.join([
+                        f"\"{row['label']}\"",
+                        f"{row['target_v']:.3f}",
+                        f"{row['d1']:.3f}",
+                        f"{row['d2']:.3f}",
+                        f"{row['delta_ns']:+d}",
+                        num(None if row['v1'] is None else row['v1'] / 1e6, '.3f'),
+                        num(None if row['v2'] is None else row['v2'] / 1e6, '.3f'),
+                        num(row['dv_mv'], '+.1f'),
+                        num(row['e1_mv'], '+.1f'),
+                        num(row['e2_mv'], '+.1f'),
+                    ]) + '\n')
+            self.statusBar().showMessage(f'Comparison saved: {path}')
+        except OSError as e:
+            self.statusBar().showMessage(f'Export error: {e}')
 
     # ------------------------------------------------------------------
     # Activity log
@@ -705,7 +1019,7 @@ class MainWindow(QMainWindow):
         self._pair_idx    = 0
         self._thresh_idx  = 0
         self._start_delay  = self.sp_start.value()
-        self._step_size    = self.sp_step.value()
+        self._step_size    = self.sp_step.value() / 1000.0   # ns → µs
         self._coarse_step  = self.sp_coarse_step.value()
         self._signal_uV    = int(round(self.sp_signal_v.value() * 1_000_000))
         self._step_count   = 0
@@ -724,6 +1038,10 @@ class MainWindow(QMainWindow):
         self.pb_export_profile.setEnabled(False)
         self.pb_thermal.setEnabled(False)
         self.pb_auto.setEnabled(False)
+
+        self._sweep_started_at = datetime.now()
+        self._sweep_ended_at   = None
+        self._auto_note        = ''
 
         self._log(f'Starting calibration — {len(fp_pairs)} pair(s), '
                   f'{len(targets_v)} threshold(s)')
@@ -869,6 +1187,7 @@ class MainWindow(QMainWindow):
 
     def _finish(self):
         self._state = 'done'
+        self._sweep_ended_at = datetime.now()
         self.send_command('E')
         self.pb_run.setEnabled(True)
         self.pb_stop.setEnabled(False)
@@ -880,6 +1199,10 @@ class MainWindow(QMainWindow):
         self.status_label.setText('Done — Export CSV / Export Profile / THERMAL / Auto.')
         self._log('Calibration done.')
         self.statusBar().showMessage('Calibration complete.')
+
+        if self.cb_auto_thermal.isChecked() and self.serial.isOpen():
+            self._log('Auto-starting THERMAL.')
+            self._start_thermal()
 
     def stop_calibration(self):
         self._state = 'idle'
@@ -899,7 +1222,62 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Profile export
     # ------------------------------------------------------------------
-    def _build_profile(self):
+    def _compose_notes(self):
+        """Auto-generated 'notes' text for an exported profile.
+
+        Carries three things a locked profile is useless without: when the sweep
+        actually ran, the sweep/nudge parameters that produced it, and whatever
+        the profile it was imported from had recorded (see §14.1 — calibrations
+        are only comparable if their conditions are).
+        """
+        parts = []
+
+        if self._sweep_started_at is not None:
+            span = self._sweep_started_at.strftime('%Y-%m-%d %H:%M:%S')
+            if self._sweep_ended_at is not None:
+                mins = (self._sweep_ended_at - self._sweep_started_at).total_seconds() / 60.0
+                span += (f' → {self._sweep_ended_at.strftime("%H:%M:%S")}'
+                         f' ({mins:.0f} min)')
+            else:
+                span += ' (sweep did not run to completion)'
+            parts.append(f'Sweep {span}, delaycal v{APP_VERSION}.')
+        else:
+            parts.append(f'No sweep this session — delays as imported or edited by hand. '
+                         f'Saved {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, '
+                         f'delaycal v{APP_VERSION}.')
+
+        parts.append(
+            f'Sweep parameters: start {self.sp_start.value():.2f} µs, '
+            f'coarse step {self.sp_coarse_step.value():.1f} µs, '
+            f'fine step {self.sp_step.value()} ns, '
+            f'max delay {self.sp_max.value():.1f} µs, '
+            f'averages N={self.sp_avg.value()}, '
+            f'signal detect {self.sp_signal_v.value():.1f} V.')
+
+        parts.append(
+            f'Auto Nudge parameters: threshold {self.sp_auto_threshold_mv.value():.2f} mV, '
+            f'step {self.sp_auto_nudge_ns.value()} ns, '
+            f'soak {self.sp_auto_soak_s.value()} s, '
+            f'max iter {self.sp_auto_max_iter.value()}, '
+            f'{"sequential" if self.cb_sequential.isChecked() else "parallel"}, '
+            f'std dev N={self.sp_thermal_n.value()}.')
+
+        if self._auto_note:
+            parts.append(self._auto_note)
+
+        if self._fp_pairs and self._targets_v:
+            parts.append(
+                f'Geometry: {len(self._fp_pairs)} bands × {len(self._targets_v)} '
+                f'thresholds = {len(self._fp_pairs) * len(self._targets_v)} cells; '
+                f'thresholds {self._targets_v[0]:g} → {self._targets_v[-1]:g} V.')
+
+        if self._carried_notes:
+            src = self._carried_from or 'imported profile'
+            parts.append(f'Carried forward from {src}: {self._carried_notes}')
+
+        return ' '.join(parts)
+
+    def _build_profile(self, name=None, notes=None):
         max_delay = self.sp_max.value()
         bands = []
         for r, (freq_khz, pulse_us) in enumerate(self._fp_pairs):
@@ -921,23 +1299,67 @@ class MainWindow(QMainWindow):
                 'threshold_v': list(self._targets_v),
             })
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        return {
-            'name':     f'cal_{ts}',
-            'averages': 32,
-            'bands':    bands,
-        }
+        profile = {'name': name or f'cal_{ts}'}
+        if notes:
+            profile['notes'] = notes
+        profile['averages'] = 32
+        profile['bands']    = bands
+        return profile
 
-    def export_profile(self):
+    def _default_save_name(self):
+        """Filename offered by the save dialog: last chosen, else imported, else stamp."""
+        if self._last_save_name:
+            return self._last_save_name
+        if self._carried_from:
+            return self._carried_from
+        return f'cal_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+
+    def export_profile(self, interactive=True):
+        """Write the calibration table as a classviz JSON profile.
+
+        interactive=True (the Export Profile button) asks for the filename and
+        lets the notes be edited before writing — the profile's 'name' field is
+        taken from the filename chosen, so a locked profile identifies itself by
+        the name it is referred to by (corpora record 'name', not the filename).
+        interactive=False is the unattended save at the end of Auto Nudge: it
+        keeps the historical timestamped auto-name and never blocks on a dialog.
+        """
         if not self._fp_pairs or not self._targets_v:
             self.statusBar().showMessage('No calibration data to export.')
             return
-        profile = self._build_profile()
         os.makedirs(PROFILES_DIR, exist_ok=True)
-        path = os.path.join(PROFILES_DIR, f"{profile['name']}.json")
+        notes = self._compose_notes()
+
+        if interactive:
+            path, _ = QFileDialog.getSaveFileName(
+                self, 'Save Profile',
+                os.path.join(PROFILES_DIR, f'{self._default_save_name()}.json'),
+                'JSON profiles (*.json)')
+            if not path:
+                return
+            if not path.endswith('.json'):
+                path += '.json'
+            notes, ok = QInputDialog.getMultiLineText(
+                self, 'Profile Notes',
+                'Notes stored in the profile (edit or add to the generated text):',
+                notes)
+            if not ok:
+                return
+            notes = notes.strip()
+        else:
+            path = os.path.join(PROFILES_DIR,
+                                f'cal_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+
+        name = os.path.splitext(os.path.basename(path))[0]
+        profile = self._build_profile(name=name, notes=notes)
         with open(path, 'w') as f:
             json.dump(profile, f, indent=2)
+
+        if interactive:
+            self._last_save_name = name
         self.statusBar().showMessage(f'Profile saved: {path}')
         self.status_label.setText(f'Profile → {os.path.basename(path)}')
+        self._log(f'Profile saved: {path} (name "{name}")')
 
     def _import_profile(self):
         """Load a JSON profile into the calibration table, bypassing a sweep."""
@@ -976,6 +1398,17 @@ class MainWindow(QMainWindow):
             self.pb_auto.setEnabled(connected)
 
             name = profile.get('name', os.path.basename(path))
+
+            # Carry the source profile's notes forward so the next export can
+            # attribute what it was derived from (USAGE §4 makes Import Profile
+            # the standard start of a recalibration, so this is the normal path).
+            self._carried_notes  = (profile.get('notes') or '').strip()
+            self._carried_from   = name
+            self._last_save_name = os.path.splitext(os.path.basename(path))[0]
+            self._sweep_started_at = None
+            self._sweep_ended_at   = None
+            self._auto_note        = ''
+
             self.progress_label.setText(
                 f'Imported: {name}  ({len(fp_pairs)} band(s), '
                 f'{len(targets_v)} threshold(s))')
@@ -1014,6 +1447,7 @@ class MainWindow(QMainWindow):
         self._thermal_n_bands    = n_bands
         self._thermal_n_cells    = n_cells
         self._thermal_n_channels = n_bands * n_cells
+        self._thermal_profile    = profile
         self._thermal_buf.clear()
         self._thermal_latest     = None
         self._thermal_remaining  = float(self.sp_thermal_secs.value())
@@ -1041,9 +1475,33 @@ class MainWindow(QMainWindow):
         self._log(f'THERMAL started ({int(self._thermal_remaining)} s)')
         self.statusBar().showMessage('Thermal monitoring started.')
 
+    def _capture_measurement(self):
+        """Cache the mean µV per cell of the profile just streamed.
+
+        Averaged over the last `Std dev N` frames rather than the single latest
+        frame, so the Compare tab reads a settled value.  Keyed on the physical
+        cell identity (freq, pulse, delay) — see `_meas_cache`.
+        """
+        profile = self._thermal_profile
+        if profile is None or len(self._thermal_buf) < 2:
+            return
+        recent = list(self._thermal_buf)[-self.sp_thermal_n.value():]
+        n_cells = self._thermal_n_cells
+        ts = time.time()
+        for b, band in enumerate(profile['bands']):
+            for c, delay_us in enumerate(band['delays_us']):
+                ch = b * n_cells + c
+                if ch >= self._thermal_n_channels:
+                    continue
+                mean_uV = sum(frame[ch] for frame in recent) / len(recent)
+                key = (band['freq_hz'], round(band['pulse_us'], 3),
+                       int(round(delay_us * 1000)))
+                self._meas_cache[key] = (mean_uV, ts)
+
     def _stop_thermal(self):
         if self._thermal_state != 'running':
             return
+        self._capture_measurement()
         self._thermal_state = 'idle'
         if self._thermal_timer:
             self._thermal_timer.stop()
@@ -1280,6 +1738,7 @@ class MainWindow(QMainWindow):
             ]
 
         self._thermal_buf.clear()
+        self._thermal_profile = self._auto_cur_profile   # delays as sent, for _meas_cache
         self.send_command('E')
         self.send_command(self._build_d_command(self._auto_cur_profile))
         self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
@@ -1320,6 +1779,7 @@ class MainWindow(QMainWindow):
         if self._auto_state != 'soaking':
             return
         self._auto_state = 'idle'
+        self._capture_measurement()
         self.send_command('E')
         QTimer.singleShot(200, self._auto_evaluate)
 
@@ -1645,7 +2105,19 @@ class MainWindow(QMainWindow):
         self.pb_export.setEnabled(True)
         self.pb_export_profile.setEnabled(True)
 
-        self.export_profile()
+        # One-line outcome for the exported profile's notes: the nudge count is
+        # the headline number for how tightly the rig could place its cells.
+        self._auto_note = (
+            f'Auto Nudge: {n_pass}/{n_active} active cells within '
+            f'{self.sp_auto_threshold_mv.value():.2f} mV'
+            + (f', {n_still_bad} flagged' if n_still_bad else '')
+            + f'; {len(adjusted)} delay(s) adjusted.')
+
+        # Unattended save — never block a finished run on a dialog.  The
+        # operator names the locked profile afterwards via Export Profile.
+        self.export_profile(interactive=False)
+        self._log('Auto-saved under a timestamp name — use Export Profile to '
+                  'save it under the locked profile name.')
 
     # ------------------------------------------------------------------
     # CSV export
@@ -1681,7 +2153,10 @@ class MainWindow(QMainWindow):
                 s = json.load(f)
             self.le_port.setText(             s.get('port',              self.le_port.text()))
             self.sp_start.setValue(           s.get('start_delay',       self.sp_start.value()))
-            self.sp_step.setValue(            s.get('step_size',         self.sp_step.value()))
+            step_ns = s.get('step_ns')
+            if step_ns is None and 'step_size' in s:   # migrate v1.25 µs value → ns
+                step_ns = int(round(float(s['step_size']) * 1000))
+            self.sp_step.setValue(       int(step_ns or self.sp_step.value()))
             self.sp_coarse_step.setValue(     s.get('coarse_step',       self.sp_coarse_step.value()))
             self.sp_signal_v.setValue(        s.get('signal_v',          self.sp_signal_v.value()))
             self.sp_max.setValue(             s.get('max_delay',         self.sp_max.value()))
@@ -1696,6 +2171,7 @@ class MainWindow(QMainWindow):
             self.sp_auto_nudge_ns.setValue(   s.get('auto_nudge_ns',     self.sp_auto_nudge_ns.value()))
             self.sp_auto_cap_ns.setValue(     s.get('auto_cap_ns',       self.sp_auto_cap_ns.value()))
             self.cb_sequential.setChecked(   bool(s.get('auto_sequential', False)))
+            self.cb_auto_thermal.setChecked( bool(s.get('auto_thermal', True)))
             # Window geometry
             w = int(s.get('window_w', 1440))
             h = int(s.get('window_h', 1200))
@@ -1719,7 +2195,7 @@ class MainWindow(QMainWindow):
         s = {
             'port':              self.le_port.text(),
             'start_delay':       self.sp_start.value(),
-            'step_size':         self.sp_step.value(),
+            'step_ns':           self.sp_step.value(),
             'coarse_step':       self.sp_coarse_step.value(),
             'signal_v':          self.sp_signal_v.value(),
             'max_delay':         self.sp_max.value(),
@@ -1734,6 +2210,7 @@ class MainWindow(QMainWindow):
             'auto_nudge_ns':     self.sp_auto_nudge_ns.value(),
             'auto_cap_ns':       self.sp_auto_cap_ns.value(),
             'auto_sequential':   self.cb_sequential.isChecked(),
+            'auto_thermal':      self.cb_auto_thermal.isChecked(),
             'window_w':          self.width(),
             'window_h':          self.height(),
             'window_x':          self.x(),

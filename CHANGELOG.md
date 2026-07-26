@@ -1,3 +1,684 @@
+### USAGE.md — v1.17 — delaycal v1.28 → v1.29
+
+§4's intent no longer claims exports land at a fixed `cal_<ts>.json` path. New **Export
+Profile** bullet: the filename sets the profile's `name`, and `name` — not the filename —
+is what corpora record as `profile_name` and what the cross-epoch guard reports, so naming
+the file names the epoch. Lists what the generated notes contain and says plainly that the
+operator's own conditions (thermal state, soak time, pack voltage) have to be added there or
+the calibration isn't reproducible. The Auto Nudge bullet now says its auto-save is
+unattended and timestamp-named, with Export Profile as the follow-up step; the Import bullet
+notes that notes and filename carry forward. §1 diagram: delaycal v1.28 → v1.29. (2026-07-26)
+
+---
+
+### src/pimd_delaycal.py — v1.29 — profile save dialog and auto-generated notes
+
+Locking `cal_63_air_bat_v3` exposed two gaps in the export path. **Filename:** exports went
+silently to `PROFILES_DIR/cal_<sweep timestamp>.json` with `name` set to the same stamp, so
+every locked profile had to be renamed by hand afterwards — and renaming the *file* left the
+`name` field, which is what `pimd_features.py` records as `profile_name` in every corpus row
+and what the cross-epoch guard reports, still holding the stamp. Export Profile now opens a
+save dialog (`.json` appended if omitted) and takes `name` from the basename chosen, so the
+profile identifies itself by the name it is referred to by. The dialog is pre-filled from the
+last save, else the imported profile's filename, else the timestamp.
+
+**Notes:** profiles carried no record of the sweep that produced them. `_compose_notes()`
+generates a `notes` field — sweep start → end and duration, sweep parameters (start, coarse
+step, fine step, max delay, averages N, signal detect), Auto Nudge parameters (threshold,
+step, soak, max iter, mode, std-dev N), the Auto Nudge outcome line, and the geometry — shown
+in an editable multi-line dialog before writing so operator conditions (thermal state, soak
+time, pack voltage) can be added. Notes and delays with no sweep behind them say so rather
+than implying a run. **Carry-forward:** `_import_profile()` keeps the source profile's `notes`
+and appends them attributed (`Carried forward from <name>: …`), so the v1/v2-style derivation
+rationale survives an epoch change instead of being retyped; since USAGE §4 makes Import
+Profile the standard start of a recalibration, this is the normal path.
+
+`_build_profile()` gains optional `name`/`notes`; called bare (Compare tab, thermal, Auto
+Nudge) it behaves exactly as before and emits no `notes` key. Field order is `name, notes,
+averages, bands`, matching the hand-written v1/v2 profiles. `export_profile()` gains
+`interactive`: the Auto Nudge completion save passes `interactive=False` and keeps the old
+unattended timestamped behaviour — a finished long run must not block on a modal dialog —
+and logs a pointer to Export Profile for the named save. The Export Profile button is
+connected through a lambda because `clicked()` would otherwise pass `checked` into
+`interactive`.
+
+Exercised headless (offscreen Qt) against the real profiles: import of `cal_63_air_v2`
+carries its 641-character notes forward attributed; a simulated completed sweep renders the
+timestamp/duration line; interactive export writes the chosen basename into `name` with
+operator text appended; both cancel paths (file dialog, notes dialog) write nothing;
+`_build_profile()` bare still returns the three original keys. (2026-07-26)
+
+---
+
+### src/data/profiles/cal_63_air_bat_v3.json — v3 — new locked profile: battery supply epoch
+
+New epoch **v3**, marking the move from bench PSU to the 6S 16650 battery pack. Locked
+profile `src/data/profiles/cal_63_air_bat_v3.json`.
+
+**Band plan is unchanged from `cal_63_air_v2`** — 7 bands (9 → 100 µs), 63 cells, verified
+band for band. **The threshold ladder is not:** it moves in one position, to
+4.9 / 4.8 / **4.75** / 4.4 / 4.2 / 3.8 / 2.4 / 1.5 / 0.5 V against v2's 4.70 in third place.
+The 4.70 column started misbehaving after ~30 minutes in classviz, so the profile was
+re-swept with that step raised. Of the 4.75/4.35/3.70 ladder trialled on 2026-07-24 only the
+4.75 step is adopted — 4.40 and 3.80 keep their original values, having come back clean under
+battery power. The two are unrelated observations: that trial's 4.40/3.80 elevation was
+supply-borne (see the §14.7 entry below), this 4.75 move is separate and later.
+
+Delays re-anchored for the supply change: **+40…+144 ns** against v2, band means +90 ns
+(100 µs) to +125 ns (30 µs). The third column is the outlier at +40…+72 ns and is **not** a
+like-for-like delta — that cell targets a different voltage, so its shift is threshold move
+plus supply change, and the two are not separated here.
+
+So this is **both a new calibration epoch and a threshold-geometry change**, which is weaker
+than a clean epoch change. Corpora stay in separate files and the
+`(profile_name, profile_sha8)` guard still hard-errors across them; cross-epoch comparison is
+interpretable for the eight columns whose target voltage is unchanged, but the third column is
+not comparable to v2's even feature-wise. That is exactly the §13 feature-level-portability
+question the 1.10 consolidation deferred, now live rather than hypothetical.
+
+Calibration conditions: pack 23.5 → 23.35 V, [FILL: thermal state / soak time].
+
+**Revised delaycal parameters** (record these — without them the calibration isn't
+reproducible): fine sweep 80 → 40, autonudge threshold 0.5 → 0.3 mV, nudge step 16 → 8 ns,
+soak 20 → 40 s, std dev n = 16.
+
+**Profile `name` corrected before locking.** As exported, the internal `name` field carried
+the sweep stamp `cal_20260726_122638` rather than the filename — and that field is what
+`pimd_features.py` records as `profile_name` in every corpus row, so it is the epoch identity
+the cross-epoch guard reports. Set to `cal_63_air_bat_v3` to match the filename and the v1/v2
+convention. The underlying trap — delaycal naming every export after the sweep timestamp, so
+this needed correcting by hand at every lock — is fixed in delaycal v1.29 above.
+
+**`notes` field written**, matching the v1/v2 convention (v3 as exported had none): epoch and
+lock date, fw v4.26, pack voltage across the sweep, the 4.70 → 4.75 change and its reason,
+what is and is not unchanged from v2, the re-anchoring figures with the third column called out
+as not like-for-like, the sweep and Auto Nudge parameters, the 0.3 mV convergence result, the
+grid-step thermal criterion, and the corpus rule. Recorded honestly as unknown: thermal soak
+time at lock, and the originating cal-run stamp for the re-sweep.
+
+All three edits (rename, notes, re-sweep) landed before any corpus was captured under v3, so no
+existing capture is invalidated by the `profile_sha8` changes they cause. Final `profile_sha8`
+for the locked file: **`4a2352d2`**. (2026-07-26)
+
+---
+
+### findings — battery supply lowered the achievable convergence threshold
+
+The headline result of the epoch change. **Convergence at a 0.3 mV autonudge threshold was
+never achievable under the bench PSU** — repeated attempts in earlier work failed to converge
+at that setting, which is why 0.5 mV became the working value. Under 6S battery power the same
+sweep converged at 0.3 mV with **only one cell of 63 requiring a single −8 ns nudge**; the
+nudge count would often exceed 10 cells before.
+
+Since the autonudge threshold is effectively a measurement of how tightly a cell can be placed
+against the noise, this is a direct quantitative statement about the new supply: the floor
+improved enough to make a previously unreachable calibration tolerance routine. Contributing
+changes, not separated from one another: 6S pack, heavier cabling, ferrite common-mode chokes
+on power and USB, 100 nF across the pack. (2026-07-26)
+
+---
+
+### findings — thermal convergence criterion replaces the thermistor check
+
+The TX damping-resistor thermistor is no longer fitted since the shielded case was built, so
+the documented "calibrate once the resistor reaches ~80 °C" precondition (§14.1) can't be
+applied. Replaced with a direct measurement of the thing it was a proxy for — successive
+calibrations compared cell by cell:
+
+- 15 min after the first calibration: differences up to **−24 ns**, concentrated in the
+  long-pulse bands.
+- Subsequent runs ~10 min apart: **±8 ns in 6 of 63 cells**, all others zero.
+
+8 ns is the PWM grid step, so those six cells are at the quantisation floor and the rig is as
+stable as the hardware can express. Working criterion going forward: **converged when
+successive calibrations differ by no more than one grid step, watching the 100 µs band**,
+which is consistently the most drift-sensitive. Delaycal's Compare Profiles tab (v1.28) is the
+tool for this. (2026-07-26)
+
+---
+
+### findings — the elevated threshold columns were supply-borne (partial §14.7 answer)
+
+The 4.40 V and 3.80 V columns that read ~5× the free-air noise floor on 2026-07-24 (with the
+bench PSU failed and an interim pack fitted) are **clean under the v3 battery supply**, which
+is why **those two steps** could revert to their original values. Confirmed from a Std Dev
+(rolling N) heatmap under v3. This narrows §14.7: that elevation was supply-borne, not
+intrinsic to the front end or the 1N4732 clamp.
+
+It does not close §14.7 — the original ~4.45–4.65 V keep-out zone is a separate,
+longer-standing observation and is unaffected. Nor does the ladder revert wholesale: the third
+step went to 4.75 V in the re-sweep after the 4.70 column misbehaved past ~30 minutes in
+classviz, which is a *different* symptom on a different column and is not addressed by this
+finding. [FILL: is the 4.70 misbehaviour drift into the ~4.45–4.65 keep-out zone as the rig
+warms — i.e. the §14.1 fingerprint — or a fresh mechanism? A Std Dev heatmap on the old 4.70
+cell after a 30 min soak would separate them.] (2026-07-26)
+
+---
+
+### USAGE.md — v1.16 — delaycal v1.25 → v1.28
+
+Follows the three delaycal changes below. §4's Sweep sub-bullet now says the fine step is
+set in ns down to the 8 ns PWM grid (100 ns default) rather than "0.1 µs"; the Thermal
+sub-bullet notes it auto-starts on sweep completion and why that matters; and a new
+Compare Profiles sub-bullet covers the tab — what a row is (same band, same intended
+target V), the Δ-in-ns colouring against the grid, and the fact that the measured voltages
+come from this session's soaks and do not survive a restart. §1 diagram: delaycal v1.25 →
+v1.28. (2026-07-26)
+
+---
+
+### src/pimd_delaycal.py — v1.28 — Compare Profiles tab
+
+There was no way to see how a freshly-swept profile differs from an earlier one short of
+exporting the JSON and eyeballing it. A second tab now answers the question that actually
+matters — **timing convergence**: for every cell the two profiles share, how far apart are
+the delays, and does that gap move the measured voltage?
+
+The window's content moved into a `QTabWidget` ("Calibration" / "Compare Profiles"); the
+top bar (port, Run, Stop, exports) stays global above the tabs, and splitter/geometry
+persistence is untouched. Two selectors list `data/profiles/*.json` plus a
+`<current calibration table>` entry backed by `_build_profile()` — so a sweep can be
+compared against a reference without exporting first, which is the point of doing this
+in-app rather than as a CLI. The list rescans on tab activation.
+
+Cells are matched on `(freq_hz, pulse_us, threshold_v)` — **matched rows only**, so every
+row is a genuine like-for-like comparison at the same intended target voltage. Columns:
+cell ident, target V, both delays (µs, 3 d.p.), **Δ in ns**, both measured voltages, their
+difference in mV, and each profile's error against the intended target. The Δ cell is
+coloured against the PWM grid — green within one 8 ns step, yellow within five, red
+beyond — reusing the existing palette. A footer carries matched count, mean/RMS/max |Δ|
+with the worst cell named, how many cells are measured on both sides, and a named list of
+cells present in only one profile. Degenerate cases (unloadable profile, empty current
+table, same profile twice, no shared cells) each set an explanatory footer instead of
+rendering an empty table. The comparison exports to CSV.
+
+Profiles store only `delays_us` and the intended `threshold_v` — no measured voltage — so
+the voltage columns come from a new in-memory `_meas_cache`, keyed on `(freq_hz, pulse_us,
+delay_ns)`. Keying on the physical cell rather than on a filename means a saved profile
+whose delays match a run that was streamed this session picks its measurements up for
+free. `_capture_measurement()` fills it at the end of every THERMAL run and every Auto
+Nudge soak, averaging the last `Std dev N` frames rather than the single latest frame so
+the value has settled. With v1.27 auto-starting THERMAL, a fresh sweep is measured without
+asking. Cells never streamed show `—` on a grey background; nothing is fabricated.
+
+Exercised headless against the real `cal_63_air_v1/v2` profiles: 63 matched cells, deltas
+hand-checked against the JSON, mean |Δ| 17.0 ns / max 56 ns; voltage columns populate from
+an injected capture and stay `—` where no measurement exists; CSV round-trips; all four
+degenerate cases produce their message. (2026-07-26)
+
+---
+
+### src/pimd_delaycal.py — v1.27 — THERMAL auto-starts on sweep completion
+
+A finished sweep left the board idle until THERMAL was pressed by hand, which also meant
+the cells were never measured unless someone remembered. `_finish()` now starts thermal
+monitoring itself, gated on a new "Auto on completion" checkbox beside the THERMAL button
+(default on, persisted as `auto_thermal`). The call sits after the existing button/label
+updates so `_start_thermal` gets the last word on button state, and is additionally gated
+on the port being open; `_start_thermal`'s own guards on `_fp_pairs`/`_targets_v` are
+unchanged. Nothing new goes to the wire — it is the same `E`/`D`/`Q`/`G` sequence the
+button has always sent. Beyond saving the keypress this feeds the v1.28 measurement
+cache, so every fresh profile arrives with its measured voltages. (2026-07-26)
+
+---
+
+### src/pimd_delaycal.py — v1.26 — fine step in ns, down to the 8 ns grid
+
+The fine sweep step was a µs spinbox with a 0.01 µs floor — 10 ns, which is both off the
+8 ns RP2040 PWM grid and unable to reach a single grid step. It is now a `QSpinBox` in ns:
+range 8–5000, 8 ns increments, displayed with a ` ns` suffix, matching the existing
+`sp_auto_nudge_ns` control. The sweep still carries `_step_size` internally in µs
+(converted once in `run_calibration`), so the coarse/fine phase decision, the step-count
+rebase after a coarse back-up, and the delay reconstruction are all untouched.
+
+Settings persistence moves to a new `step_ns` key. The old `step_size` key held µs, and
+loading `0.10` straight into a ns spinbox would clamp to 8 ns and silently change how a
+sweep runs, so `_load_settings` migrates a `step_size` value by ×1000 when `step_ns` is
+absent. Verified on the real settings file: a stored `0.08` µs comes back as 80 ns.
+(2026-07-26)
+
+---
+
+### USAGE.md — v1.15 — below-gate frames leave no trail
+
+Follows classviz v1.50. §5's SNR-gate sub-bullet now says a below-gate frame leaves no
+trail at all rather than a yellow one, and notes that every frame still ages the trail
+window along, so holding below-gate fades the trail out. §1 diagram and §5 heading:
+classviz v1.49 → v1.50. (2026-07-25)
+
+---
+
+### src/pimd_classviz.py — v1.50 — below-gate frames leave no trail at all
+
+v1.45 coloured trail points by their own SNR, yellow below the gate and green at or
+above it. The yellow half is now dropped entirely: **a below-gate frame leaves no mark**,
+so the trail draws only the part of a sweep that was worth reading and is green by
+construction. Below the gate the unit shape is normalised noise that still wanders the
+plane convincingly, and a trail drawn through it says "the target moved this way" about
+a frame carrying no target — the same reasoning that already draws below-gate captures
+hollow.
+
+Two details that make it behave well on a real sweep. Below-gate frames still enter the
+buffer and still **age the trail window along**, so a surviving mark keeps fading as
+they push it back and holding off-target fades the whole trail out within `Trail`
+frames — rather than freezing the last good pass on screen at full brightness, which is
+what re-basing the fade on the drawn subset would have done. And membership, like the
+cursor's colour, is decided against the **current** gate rather than the `gated` flag
+stamped at ingest, so moving the SNR gate spinbox re-selects the trail already on
+screen instead of only affecting later frames.
+
+The live cursor is unchanged: still yellow below the gate, green at or above it. The
+gate test moved out of `_shape_live_colour()` into `_shape_above_gate()`, which both
+now share. The tab's header comment and the SNR-gate and Trail tooltips follow.
+
+Exercised headless: a sweep of SNR 2→12→1.5 draws 4 of 10 frames, all green, with
+alphas reflecting their true age in the window; an all-below-gate buffer draws nothing
+while the cursor still shows yellow; an all-above-gate buffer draws every frame; three
+good frames followed by five below-gate keep their three marks but at faded alpha; and
+sliding the gate 5.0 → 3.0 → 1.0 → 20.0 re-selects 2 → 3 → 4 → 0 spots from an
+unchanged buffer. (2026-07-25)
+
+---
+
+### USAGE.md — v1.14 — classviz v1.49 version references
+
+Follows classviz v1.49. Version references only — §1 diagram and the §5 heading. The
+custom band range behaves as §5 already described it; nothing user-facing changed.
+(2026-07-25)
+
+---
+
+### src/pimd_classviz.py — v1.49 — FIX the custom band pair was lost on restart, clamped by the startup profile's narrower spin range
+
+**Bench report:** the Family Plane's Y custom band range, set to 4–6, comes back as
+4–4 after a restart. The settings file was innocent — it held `shape_band_y_hi: 6`
+correctly. The restore was destroying it.
+
+The band spinboxes are ranged `0 .. n_bands-1` of the **live** profile. At
+`_load_settings()` time the app is still on the built-in startup profile
+**CLASSIFY_EP, which has 5 bands**, so the spins are ranged 0..4 and
+`setValue(6)` silently clamps to 4 — QSpinBox does that without complaint.
+`_rebuild_shape_axes()` later widens the range to 0..6 when the real 7-band profile
+arrives, but by then the value is 4 and there is nothing left to widen it back from.
+The X pair survived only because 0..2 happens to fit inside 0..4, which is why this
+looked like a Y-specific fault.
+
+Worse, and the half that would have kept biting: `_save_settings()` wrote the
+**spinbox**, so merely launching the app and quitting — without ever loading the
+7-band profile — overwrote the saved 6 with the clamped 4. One clean start was enough
+to lose the setting permanently.
+
+The chosen pair is now held as a **preference** in `_shape_band_pref`, separate from
+what the spinboxes are currently able to represent. `_load_settings()` records the raw
+saved integers (after the `setValue` calls, which fire the range handler and would
+otherwise overwrite it with the clamped values); `_rebuild_shape_axes()` re-applies the
+preference clamped to whatever the live profile can show, so the pair reappears in full
+the moment a wide enough profile lands, and clamping stays display-only; and
+`_save_settings()` persists the preference rather than the spinbox. An operator edit
+replaces the preference for **that pair only** — the shared range handler is scoped to
+the edited pair, so adjusting X can no longer collapse a Y pair that is sitting clamped
+under a narrow profile.
+
+Exercised headless against a copy of the real settings file: the Y pair restores to 4–6
+once the 7-band profile lands, a save taken from the 5-band startup profile still
+writes 4–6, an operator edit to Y updates only Y's preference, a subsequent edit to X
+leaves Y's alone, and the whole lot round-trips. (2026-07-25)
+
+---
+
+### USAGE.md — v1.13 — no gridlines on a rank axis
+
+Follows classviz v1.48. §5's **Scale** sub-bullet gains the rank-axis grid rule and the
+note that the two zero rails follow the spacing curve. (2026-07-25)
+
+---
+
+### src/pimd_classviz.py — v1.48 — Family Plane: no gridlines on a rank axis; the zero rails follow the spacing curve
+
+**No gridlines on a rank axis (bench request).** Under the other scales a gridline
+still marks a real feature value at its real position, so it stays. A rank axis is
+ordinal — a grid over it draws a metric that is not there. Applied **per axis**, since
+the scales are: rank on Y alone keeps the vertical gridlines. The two zero rails stay
+in both cases; they are the family decision boundary, which is exactly the reference
+worth keeping when the grid goes.
+
+**The zero rails were in the wrong place under any curve.** They were static
+`InfiniteLine`s pinned at *plot* coordinate 0, added at build and never touched — but a
+v1.47 spacing curve maps the *feature* value 0 to wherever it falls between the drawn
+min and max, which is generally not 0. On the 2026-07-23 corpus with X = custom bands
+0–2 the X rail belonged at +0.064 under rank and −0.012 under cube, against the 0.0 it
+was drawn at: the boundary line was visibly off, and it was off by more the more
+skewed the drawn set. They are now held as attributes and repositioned on every static
+redraw. A rail whose axis does not contain 0 (log₁₀ amplitude, distance) stays at a
+literal 0 and therefore off-view — transforming an off-domain zero would clamp it to
+the edge of the plot and draw a boundary where there is none.
+
+**Colliding tick labels thinned.** The v1.47 ticks are round feature values, evenly
+spaced in VALUE but not in position, so a curve that compresses the middle printed
+−0.050 / 0.000 / 0.050 on top of each other — worst under rank, which is where the
+dead middle collapses hardest. Candidates are now kept greedily by priority rather
+than left to right, with 0 going in first so it always survives (it is the boundary and
+carries a drawn rail). The minimum separation is measured in **pixels** off the
+viewbox, because what collides is label text: a fixed fraction of the domain is either
+wasteful on a wide dock or still overlapping on a narrow one. The fraction survives as
+the fallback for the first pass, before layout has run.
+
+Exercised headless against the real corpus: gridlines follow each axis's own scale
+across the six linear/cube/rank combinations, each rail sits exactly where its axis
+draws feature 0, an axis whose domain excludes 0 keeps its rail at a literal 0, and the
+rank/rank view renders with readable non-overlapping ticks at both a wide and a narrow
+dock size. (2026-07-25)
+
+---
+
+### USAGE.md — v1.12 — the Family Plane's per-axis Scale, and what those axes are
+
+Follows classviz v1.47. §5's Family Plane bullet gains a **Scale** sub-bullet (the four
+curves, the range-preserving invariant, ticks staying in real feature units, and why
+no log is offered) and an **axis** sub-bullet spelling out what a band-range-mean axis
+actually is — mean of the unit shape over a band range, hard-bounded at ±1/√(k·n_delays),
+with the family colouring read off the signs of those same two numbers, which is why
+the middle of the plane is empty. §1 diagram and §5 heading: classviz v1.46 → v1.47.
+(2026-07-25)
+
+---
+
+### src/pimd_classviz.py — v1.47 — Family Plane per-axis Scale combo (expand-ends / rank spacing)
+
+**The problem (bench report).** On the family plane both families pile up against
+opposite ends of an axis with a wide void between them, so within-cluster structure is
+unreadable. Measured on `src/data/corpora/gui_signatures_targets_v1_20260723.csv`
+(66 drawn captures, cluster shares over the 55 gated 7×9 ones), Y = custom bands 4–6,
+as a percentage of plot height:
+
+| Y scale | non-ferrous | crossover | ferrous | dead middle |
+|---|---|---|---|---|
+| linear (was the only option) | 17.8 | 30.7 | 7.8 | **47.9** |
+| signed log — measured, NOT shipped | 4.4 | 10.4 | 1.7 | 84.6 |
+| cube | 36.7 | 38.5 | 20.0 | 14.9 |
+| atanh | 39.9 | 17.4 | 33.8 | 14.3 |
+| rank | 50.8 | 32.3 | 20.0 | 6.2 |
+
+Two facts explain the squash, and both are in the maths rather than the drawing.
+`band_range_mean()` over 3 of 7 bands is a mean of 27 elements of a **unit-L2**
+63-vector, so it cannot exceed ±1/√27 = ±0.1925 — and the corpus reaches 0.160, 83% of
+that ceiling. The clusters are pressed against a wall. And the empty middle is not a
+data gap: `pimd_shape.family()` is read off the **signs of these same two axes**, so
+the void is the decision boundary itself.
+
+**A log axis was asked for and is deliberately not offered.** Log expands near zero and
+compresses the extremes; here nothing lives near zero and everything lives at the
+extremes, so it is exactly backwards — measured above, it drives the dead middle from
+48% to 85%. What this data needs is expansion near the **ends**.
+
+**What shipped.** A `Scale:` combo per axis — Linear, Expand ends (cube), Expand ends
+(atanh), Rank — on one invariant that makes the rest tractable: *every curve maps the
+drawn captures' [min, max] onto itself, and only the interior spacing changes.* So
+auto-range is untouched, switching scales never moves the view, and a tick can always
+be labelled with its true feature value. Implemented as normalise to [−1, 1] → curve
+(t³, atanh(0.999t)/atanh(0.999), or ECDF position) → denormalise, all four verified
+monotone and range-preserving against the real corpus.
+
+The whole thing hangs off one seam: `_shape_plot_value()` already fed the capture
+spots, the live cursor, the trail and the selection ring, so applying the curve there
+needed no other wiring. The domain comes from the **captures only**, never the live
+frame — the cursor moves every frame and folding it in would rescale the plane under
+itself several times a second — and it spans every *drawn* capture, below-gate ones
+included, since those are on the plot too. `rank` interpolates into the drawn set's
+ECDF rather than taking a literal rank, so the live cursor and the selection ring,
+neither of which is in that set, still land somewhere consistent; out-of-domain values
+clamp to the edge rather than going infinite. The air-mode live-dot pin goes through
+the curves as well — 0 maps to itself only when the drawn range happens to be
+symmetric, which it generally is not.
+
+The `crossing` axis is excluded and its combo greys out: it owns its ticks (the
+profile's pulse ladder plus the `≤pos` / `never` sentinel rails) and a second transform
+would leave those labels pointing at the wrong rails.
+
+**Axis labelling.** A non-linear axis gets explicit ticks at round *feature* values
+placed through the curve, so a tick reading `-0.150` sits wherever −0.150 actually
+landed, and the label names the curve (`custom bands 4–6 [cube]`). That forces
+`enableAutoSIPrefix(False)` on those axes: pyqtgraph had latched a `(x0.001)` suffix
+that now flatly contradicts full-value tick strings. The standing warning in this file
+— that the flag does not clear `autoSIPrefixScale` — still holds and is now recorded
+as harmless in this case, because that scale only ever reaches `tickStrings()`, which
+explicit ticks bypass. Linear axes get the prefix back.
+
+Both selections persist (`shape_scale_x` / `shape_scale_y`). Colour-by continuous
+ranges deliberately keep reading the raw linear value: spacing is an axis concern.
+
+Exercised headless (offscreen Qt) against the real corpus with the live profile set to
+`cal_63_air_v2`: every curve monotone in the raw value and range-preserving, the table
+above reproduced, every tick sitting at the transformed position of the value it names,
+a live frame landing exactly where a capture of the same value lands, out-of-range
+values clamping without NaN, `crossing` keeping its sentinel ticks and greying the
+combo, the SI prefix off on scaled axes and back on linear ones, and both combos
+round-tripping through settings. No bench hardware involved. (2026-07-25)
+
+---
+
+### USAGE.md — v1.11 — a scratch save lands on the plane
+
+Follows classviz v1.46. §5's Family Plane bullet gains a **Save Scratch…** sub-bullet:
+the capture is plotted the moment it is written, as a **triangle**, and joins the
+Analysis tab's signature list under a `△` prefix alongside any loaded corpus rather
+than replacing it. The symbol legend in the mixed-geometry sentence changes star →
+triangle. §1 diagram and §5 heading: classviz v1.45 → v1.46. (2026-07-25)
+
+---
+
+### src/pimd_classviz.py — v1.46 — a scratch save plots immediately, as a triangle
+
+Saving a scratch capture wrote it to `src/data/scratch/` and nowhere else. The whole
+reason for grabbing one — see where this object lands against the loaded corpus —
+therefore needed a **Load signatures…** round trip to answer, and that round trip
+would have replaced the reference corpus being compared against.
+
+A save now merges the scratch file back into the shared template store under its own
+**`scratch`** source. Its own source, not `loaded` or `editable`: `_merge_template_
+list()` replaces a source wholesale, so reusing either would silently drop the corpus
+the scratch is being compared against. All three now coexist in one list, and scratch
+rows carry a `△` prefix the way editable rows carry `✎`. The whole file is re-read
+rather than just the row written — the store is keyed per capture and re-reading is
+also the only check that what went to disk reads back as a signature; a file that
+cannot be re-read says so in the status bar instead of silently plotting nothing. The
+new capture is marked auto-check first, so it lands ticked in the Analysis tab's
+overlays too, matching the corpus save path (v1.38). The Family Plane scatter draws
+every loaded capture regardless of tick state, so the point appears there either way.
+
+**Scratch objects are triangles.** `_SHAPE_SYMBOLS[(live profile, scratch)]` goes
+`star` → `t1`. Foreign-geometry scratch stays a diamond, so the geometry distinction
+survives; the mixed-geometry banner and the Save Scratch tooltip name the new symbol.
+
+Exercised headless (offscreen Qt, scratch dir redirected to a temp dir, two saves into
+one file with a pre-loaded reference capture in the store): both land as triangles
+with the reference still a circle, the second save does not clobber the first, the
+`loaded` entry survives both merges, and both scratch rows come back ticked.
+(2026-07-25)
+
+---
+
+### USAGE.md — v1.10 — the colorbar reads as a range slider; the live cursor's SNR colour
+
+Follows classviz v1.45. §5's **Heatmap colour scale** sub-bullet is rewritten around
+what the bar now shows — handles that sit at Min and Max, pale saturation tails
+outside them, a domain wider than the window so a handle can be dragged either way —
+replacing the v1.44 sentence that called the drag handles and the spinboxes "the same
+control" when the handles could not in fact show where the limits were. §5's Family
+Plane bullet: the live cursor is described as **yellow below the SNR gate, green at or
+above it** rather than flatly "a yellow dot", and the SNR-gate sub-bullet says so too.
+§1 diagram and §5 heading: classviz v1.44 → v1.45. (2026-07-25)
+
+---
+
+### src/pimd_classviz.py — v1.45 — FIX the heatmap colorbar's handles never showed Min/Max; live shape cursor and trail go green above the SNR gate
+
+**The colorbar handles could not show the range (bench report).** With **Scale** on
+Min 500 / Max 1000, the two handles under the bar sat at the same place they always
+sit, showing nothing about the limits just typed. Not a wiring fault: `ColorBarItem`'s
+handles are *relative* adjusters, not level markers — `_regionChanged()` calls
+`setRegion((63, 191))` after every drag, hard-snapping them back to 25%/75% of the
+bar. They encode drag *rate*, not value, so no amount of pushing levels at the widget
+would have moved them.
+
+The bar is now an absolute range slider. It is built with `interactive=False` and
+driven by our own `LinearRegionItem`: the axis spans a **domain** wider than the
+Min/Max window, the two handles sit at the values of Min and Max within it, and the
+pale flat tails outside them are the values the scale saturates on. The strip is
+painted clipped exactly as the image is (flat below Min, ramp across the window, flat
+above Max), written onto the bar pixmap directly rather than through
+`setColorMap()` — which would have pushed both the clipped map and the bar's domain
+levels into the heatmap image. Dragging either handle writes straight into the
+Min/Max spinboxes, rounded to what those spinboxes display so the two can never
+disagree.
+
+The domain is the window unioned with the data on screen, quantised, then held between
+50% and 90% of the bar — never so wide that a tight window on a Δ field reaching
+~500000 µV becomes an unreadable sliver, never so narrow that the handles pin to the
+bar's ends with nowhere to be dragged outwards to. It is **sticky**: an existing domain
+that still holds the window at a workable size is kept. Refitting every tick would
+re-centre the window after each drag and spring the handles back to 25%/75% — the
+exact behaviour being replaced. It is also frozen for the duration of a drag, so the
+value under the cursor does not move while the window is being dragged, and it is
+never taken unrounded off the live matrix, which would walk the axis a pixel a frame.
+In **Auto** the bar spans exactly the auto-computed range and the handles are hidden:
+there are no tails to show, and a drag would not survive the next tick anyway.
+
+**Live cursor and trail colour the SNR gate.** On the Family Plane scatter the live
+cursor and every trail point drew yellow unconditionally. They now draw **green at or
+above the SNR gate and yellow below it**, so a sweep shows where the frame crossed
+into being worth reading. This is not a family verdict — that still belongs to the
+loaded captures the cursor is compared against, and the cursor still takes no family
+colour. Colour is re-tested against the gate *as it stands at redraw*, not against the
+`gated` flag stamped at ingest, so moving the **SNR gate** spinbox repaints the trail
+already on screen. An infinite SNR (splithalf collapsed to zero) reads green; NaN
+reads yellow. The Band Curves and Crossing Ladder live markers are unchanged. The
+tab's header comment and the SNR-gate tooltip, both of which still described a live
+dot that "greys out and stops trailing" below the gate, now match the code.
+
+Exercised headless (offscreen Qt, synthetic 80-frame rolling buffer with two noisy
+threshold columns): handles land on Min and Max to within a µV across Std Dev and Δ
+modes, a drag writes back and the handles stay put across the following redraw ticks,
+the domain holds still while the data moves, the painted strip is verifiably flat
+outside the window, Auto hides the handles and leaves the image on the auto range —
+and a trail spanning SNR 2→12 colours y,y,y,G,G at gate 5.0, repainting to y,G,G,G,G
+at gate 3.0 and all-yellow at gate 20. No bench hardware involved. (2026-07-25)
+
+---
+
+### USAGE.md — v1.9 — the heatmap's Min/Max scale and the remembered signature directory
+
+Follows classviz v1.44. §5 gains two sub-bullets under the Analysis tab: the explicit
+**Min/Max** colour scale with the Std Dev reasoning (Auto anchors a rolling-σ field at
+0 and flattens it), and the signature dialogs reopening in the last directory used —
+with the note that **New file…** deliberately still defaults into
+`src/data/corpora/`. §1 diagram and §5 heading: classviz v1.43 → v1.44. (2026-07-24)
+
+---
+
+### src/pimd_classviz.py — v1.44 — Analysis heatmap manual scale is an explicit Min/Max; signature dialogs remember their directory
+
+**Min/Max colour scale.** The Analysis heatmap's manual scale was a single ± half-range
+spinbox: symmetric about 0 for the diverging modes, and `(0, val)` for RAW and Std Dev.
+That is the wrong window for **Std Dev (rolling N)**, which is where it matters most —
+a rolling σ field lives in a narrow band well above zero (quiet cells ~600 µV, a noisy
+threshold column ~3000 µV on the bench), so a range anchored at 0 spends most of the
+colour ramp on values that never occur and the whole heatmap reads as one shade. It is
+now two spinboxes, **Min** and **Max**, both signed and both stepping adaptively (one
+fixed step cannot serve a Δ range of ~500000 µV and a σ range of ~500 µV). Unchecking
+**Auto** seeds them from the levels currently on screen, so manual mode starts from
+what the operator is already looking at rather than a stale pair saved under some
+other display mode; the seed is on `clicked`, not `toggled`, so it cannot fire during
+`_load_settings` and eat the restored values.
+
+The spinboxes are now the single source of truth in manual mode and are re-applied
+every redraw tick. That is safe with the colorbar's drag handles because a drag writes
+the dragged values straight back into the spinboxes — what the tick re-applies is what
+was just dragged. The mode-dependent floor is gone with the half-range: whether a
+scale is symmetric or unipolar is the operator's call now, not a rule inferred from
+the display mode. A v1.43-or-earlier settings file has only the old
+`analysis_hm_scale_manual`, and migrates to the symmetric `(-half, +half)` pair it
+used to mean.
+
+**Signature dialogs remember their directory.** `Load signatures…` and `Open for
+editing…` opened on the process CWD every time. They now start in the last directory a
+signature file was picked from, persisted as `last_signature_dir` and validated at use
+time (not at load — a directory that exists at startup can be gone or unmounted by the
+time the dialog opens), falling back to `src/data/corpora/`. Only the directory is
+remembered, never a file path: a remembered path is the stale-pointer foot-gun
+`_load_settings` already refuses for the editable-file path. **New file…** still
+defaults into `src/data/corpora/` regardless — that is where the capture pipeline
+expects a corpus, and the last-used directory may well be somewhere a read-only corpus
+was browsed from.
+
+Exercised headless with a synthetic 80-frame rolling buffer carrying two deliberately
+noisy threshold columns: Auto gives (0, 3657) µV and flattens the field, Min/Max at
+(500, 3200) separates the noisy columns; a colorbar drag survives the next redraw
+tick; min ≥ max nudges the other spinbox instead of snapping back; and the settings
+round-trip, the v1.43 migration and the directory fallbacks all behave. (2026-07-24)
+
+---
+
+### USAGE.md — v1.8 — the fourth tab renamed, and its v1.43 additions
+
+Follows classviz v1.43. §5's tab bullet is renamed **Shape Space → Family Plane
+Analysis** (with the old name kept in parentheses, since every §5/§1 reference written
+before today says Shape Space) and gains three sub-bullets: material tags and what `?`
+means, the per-axis custom band ranges, and that a click on either the plane or the
+ladder drives the Tile Inspector. §1 diagram and the §5 heading: classviz v1.42 →
+v1.43. (2026-07-24)
+
+---
+
+### src/pimd_classviz.py — v1.43 — Shape Space renamed Family Plane Analysis; material tags, per-axis custom bands, ladder click
+
+**Renamed.** The tab is now **Family Plane Analysis** (`SHAPE_TAB_TITLE`), in the tab
+bar, its group box and the status lines it emits. Internal names stay `shape`/`_shape_*`
+and `pimd_shape.py` is untouched — the rename is what the operator reads, not a
+refactor. The v1.42 entries below, `DESIGN.md` §15/§17.9 and `USAGE.md` §5 all still
+say "Shape Space"; they describe the same tab.
+
+**Material on the plane.** Every capture now carries a material tag derived from the
+target registry (`material_class`, plus `plating_material` as `base/plating` — `Fe/Zn`
+for gal pipe, `SS/Ag` for the plated server). It is drawn beside the scatter point and
+appended to each Crossing Ladder row, and added to the hover tip and the Tile
+Inspector title in long form. Tags are drawn as text rather than as extra marker
+shapes because marker shape is already spoken for: `_SHAPE_SYMBOLS` encodes
+(foreign profile, scratch object), and colour encodes family/colour-by. Tag colour
+follows the marker, so under colour-by family a red `Al` is visibly a non-ferrous
+material reading ferrous — the comparison the tab exists to support. One tag per
+(target, distance) group, not per capture, or repeats redraw the same string in the
+same few pixels; suppressed above `SHAPE_LABEL_MAX` = 200 drawn points, and behind a
+"Material tags" checkbox (persisted). A capture whose `target_id` is not in the
+registry reads `?` rather than a guessed material — scratch objects are unregistered
+by design and another rig's corpus may carry ids this registry has never seen.
+
+**Custom band range is now per axis.** X and Y have their own inclusive lo/hi spin
+pairs. With the single shared pair, selecting "custom band range" on both axes plotted
+a feature against itself — every point on the y=x diagonal, which reads as a finding
+and is an artefact. Colour-by "custom band range" reads the X pair (it has no third
+pair). Axis labels now name the range they are reading (`custom bands 2–4`), since
+"custom band range" on both axes says nothing about what is being compared. A v1.42
+settings file restores the plane it was drawing: the new Y pair defaults to the saved
+X values.
+
+**Ladder points are clickable.** `shape_ladder_points` shares the scatter's
+`sigClicked` handler and carries the same `key` payload, so the panel where an outlier
+is spotted is now the panel it can be opened from. The selection ring is mirrored into
+the ladder (`shape_ladder_sel`, keyed off a new `target_id -> row` map, since row order
+is by median crossing width and cannot be derived anywhere else); a below-gate
+selection has no ladder row and correctly rings nothing. `_shape_redraw_static()` calls
+`_update_shape_selection_marker()` a second time after the ladder rebuild — the
+scatter's earlier pass ringed the previous layout's row.
+
+Exercised headless (offscreen Qt, synthetic captures across 12 registry targets plus a
+scratch id, an unregistered id and `air`): tags resolve as expected, custom-vs-custom
+gives two genuinely different axes, a ladder click drives the Tile Inspector and both
+rings, and the tag checkbox clears both the scatter tags and the row suffixes. No
+bench hardware involved. (2026-07-24)
+
+---
+
 ### DESIGN.md — 1.10 — consolidation pass (§18)
 
 Human-directed, read-only rule suspended per §18. Consolidates everything above the
