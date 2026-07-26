@@ -41,9 +41,11 @@ src/data/sessions/
 # and a corpus build hard-errors on those by design)
 src/data/scratch/
 
-# Superseded calibration profiles — kept on disk, not repo source. Only the
-# current *operating* profile is tracked (§10 firmware<->ML contract); it is
-# cal_63_air_v2.json, which is deliberately absent from this list.
+# Superseded calibration profiles — kept on disk, not repo source. The current
+# *operating* profile is tracked (§10 firmware<->ML contract); it is now
+# cal_63_air_bat_v3.json, deliberately absent from this list. cal_63_air_v2.json
+# is also still tracked — it is the epoch v3 was derived from and the reference
+# the Compare Profiles tab is pointed at; retire it here once that stops mattering.
 #
 # Listed file-by-file rather than as `src/data/profiles/*` + a negation: the
 # wildcard form is correct as far as git is concerned, but the dir/* + !negation
@@ -57,3 +59,9 @@ src/data/profiles/cal_72_air_v3.json
 # Previous-epoch profile8b captures — kept on disk, not repo source
 # (their DESIGN.md §15 rows were dropped at Doc-rev 1.8)
 References/profile8b-*
+
+# Working analysis bundles — kept on disk, not repo source. Same rationale as
+# ML/ above: these are session working docs and generated figures, and their
+# findings reach the repo through CHANGELOG.md, not as attachments.
+References/V3/
+References/Targets v1 Analysis/
