@@ -1,3 +1,223 @@
+### src/pimd_classviz.py — v1.62 — FIX repeat_idx stuck at r1
+
+Bench report: `Fe_spanner_01` rows reading `r1` where they should read `r2` — three rows
+showing `@180mm  x  r1`, same placement *and* same repeat. Confirmed in the corpus: every
+pair captured in the 15:39 session was stuck at r1. Two independent causes, and only one of
+them was recent.
+
+**The suggestion was never recomputed after a save — latent, not a regression.**
+`_update_sig_repeat_idx_suggestion()` is connected in exactly one place, to placement-*widget*
+change signals. `_reload_editable_signature_list()` rebuilds `_editable_repeat_counts` after
+every save and then never re-ran the suggestion, so the spinbox kept its stale value: two
+captures of one placement with nothing touched in between both saved as r1. Earlier sessions
+hid this by alternating placements between repeats (c13 x → c14 y → c15 x), where each widget
+change fired the signal; the 15:39 session did back-to-back repeats and exposed it. Fixed by
+calling the suggestion at the end of `_reload_editable_signature_list()` — save, delete and
+file-open all land on that one seam, so no second signal connection was needed.
+
+**The placement key split across the v1.60 boundary — this one v1.60 caused.** Rows captured
+before it carry `face_normal=z`; `_placement_from_widgets()` now yields `na`; both are in the
+placement tuple. So returning to any pre-v1.60 placement failed to match its own history and
+restarted at r1. It had already happened — c20 (`@180 x r1`, `z`) and c23 (`@180 x r1`, `na`)
+are the same physical placement. `_placement_tuple_key()` now takes both its field list and
+its per-field normalisation from `pimd_corpus_check` (below) instead of restating them, so
+the app and the checker cannot drift on what "the same placement" means — which was the
+constraint the v1.60 design turned on in the first place.
+
+Verified offscreen: `z` and `na` (and a non-zero offset) key identically while `long_axis`
+still separates; classviz's tuple equals `pimd_corpus_check.placement_key()` for the same
+dict; asking for `Fe_spanner_01 @180 y` after a reload suggests **r3** against two captures on
+file where it previously stayed at 1; a placement with no history still gives r1; and the
+cross-boundary case — `Cu_pipe_01 @60 z`, whose file rows carry `face_normal=z` — now counts
+them and suggests r3. Nine harnesses pass under `-W error::DeprecationWarning`.
+
+**Not yet run on the bench**: capture twice at one placement without touching a control; the
+second must save as r2. (2026-07-28)
+
+---
+
+### src/pimd_corpus_check.py — v1.7 — placement key normalises the fields v1.60 froze
+
+`placement_key()` and `target_key()` route each field through a new `placement_value()`, which
+substitutes the not-applicable constant for the three fields classviz v1.60 stopped accepting
+as inputs (`PLACEMENT_CONSTANT_FIELDS` = `face_normal` `na`, both offsets `0`). Without it a
+corpus straddling that change splits one physical placement into a `z` group and an `na`
+group, so a repeat reads as a fresh base and the repeat-consistency check compares nothing
+against nothing. classviz imports both the field tuple and this helper, so there is one
+definition rather than two that agree by inspection.
+
+Honest about the cost, in the constant's own comment: this discards information in principle
+— a corpus with genuinely different offsets would collapse to one placement. It does not in
+practice, since no corpus on disk has a non-zero offset or a `face_normal` other than
+`z`/`na`, and neither can be entered any more.
+
+Effect on the live corpus, with the repaired repeat_idx values: the run goes from **30 checks
+to 90**. Repeat-consistency now pairs a base against a repeat for the spanner placements
+instead of seeing duplicates, and **distance-falloff runs at all** — it had been SKIPping for
+want of a target at ≥3 distances, and now fits copper pipe at n = 2.05 / 1.81 and the spanner
+at n = 1.42 / 1.63. The FAIL count rises with the check count; those are the noise-floor
+problem already recorded for this corpus, not a metadata one. (2026-07-28)
+
+---
+
+### findings — 8 captures renumbered in the v3 corpus (repeat_idx collisions)
+
+Data repair, recorded because it edits captured data. Eight captures in
+`gui_signatures_targets_v3_20260728_142316.csv` carried a `repeat_idx` colliding with another
+capture at the same placement, caused by the two v1.62 bugs above:
+
+| capture | target | placement | was | now |
+|---|---|---|---|---|
+| `..._153912_c22` | Fe_spanner_01 | @180 y | r1 | r2 |
+| `..._153912_c23` | Fe_spanner_01 | @180 x | r1 | r2 |
+| `..._153912_c25` | Fe_spanner_01 | @120 y | r1 | r2 |
+| `..._153912_c27` | Fe_spanner_01 | @120 x | r1 | r2 |
+| `..._153912_c29` | Fe_spanner_01 | @120 z | r1 | r2 |
+| `..._153912_c31` | Fe_spanner_01 | @60 z | r1 | r2 |
+| `..._153912_c33` | Fe_spanner_01 | @60 y | r1 | r2 |
+| `..._153912_c35` | Fe_spanner_01 | @60 x | r1 | r2 |
+
+`c23` is the cross-version one: it pairs with `c20`, which carries `face_normal=z` from before
+v1.60, and only groups with it under the v1.7 normalisation.
+
+Method: group by the normalised placement key, order by `captured_at`, assign 1..n. Idempotent
+where the data was already right — Cu_pipe's existing r1/r2 pairs were untouched — and a
+re-run reports no changes. `src/data/corpora/` is gitignored, so a timestamped `.bak-` copy was
+taken first; git could not have restored it. The write proved itself rather than being trusted:
+same header, same 2205 rows, and **only** the `repeat_idx` column differing from the backup
+(504 cells = 8 captures × 63 cells).
+
+Assumption made visible rather than buried: renumbering by capture time presumes no repeat_idx
+was deliberately set out of order. Every affected value was the default 1, so nothing suggests
+otherwise. (2026-07-28)
+
+---
+
+### src/pimd_classviz.py — v1.61 — signature rows carry long axis + repeat; colour is per target
+
+Reported as detail the signature list had lost. It had not: `git log -S` finds no commit
+that ever carried it, and the label format is unchanged since **v1.30**. The detail existed
+in the v1.58/v1.59 build that ran on the bench today and is not on disk (see the v1.60
+entry). So this is a restore from description rather than a revert, and worth recording as
+such — the repo was never the source it was lost from.
+
+**Rows now identify their capture.** `✎ Cu_pipe_01 @120mm  z  r2   amp=24 SNR=27.4 [ok]`.
+Today's corpus is one target across four distances × three orientations × two repeats, so
+six captures shared the string `Cu_pipe_01 @120mm` and nothing on the row separated them.
+`long_axis` and `repeat_idx` already arrived from `_scan_editable_signature_file()` for the
+editable and scratch sources; they were simply not formatted in. A `long_axis` of `na`
+carries nothing and is omitted, as is the whole pair for the legacy 3-tuple key shape.
+
+**Colour is now per target, not per row.** It was `pg.intColor(i, hues=…)` on the row's
+index, so a target's colour changed whenever the list grew or re-sorted and two captures of
+one target looked unrelated. New `_template_color()` takes the hue from the target_id and
+steps **value** (230 → 140) across that target's captures, with a ±10° hue jitter alongside.
+
+Three things that shaped it:
+
+- The colour is not only the list row. It is stored into `_analysis_templates[key]['color']`
+  and is the pen for the **chart overlay curves** and the **Family Plane markers**, so a flat
+  per-target colour would have made two overlaid orientations of the same target
+  indistinguishable. Hue-per-target with shade-per-capture serves both.
+- The hue comes from **`zlib.crc32`, not the builtin `hash()`**. Python salts str hashing per
+  process, so `hash()` would repaint every target on each launch — a subtler version of the
+  instability being fixed, and one that passes every in-process check. There is a test that
+  runs the helper in two subprocesses under different `PYTHONHASHSEED` values, because that
+  is the only place the trap is visible.
+- Value alone cannot separate many captures of one target: at 17 captures the steps are ~5
+  units apart. The hue jitter helps and is honestly not a full answer — 17 distinct shades of
+  one hue do not exist. The label is what identifies a row; the colour groups.
+
+`_merge_template_list()` splits into two passes, because the shade needs each capture's
+ordinal within its target and that is not known until every key is resolved. Pass 1 only
+hoists the existing key-shape branch unchanged; pass 2 builds the items. Group sizes are per
+source batch exactly as the old row index was, and the hue does not depend on them.
+
+Verified offscreen against the real corpora: every v3 row carries its axis and `r<n>`, and
+the six rows sharing `Cu_pipe_01 @120mm` are now six distinct strings; `Cu_pipe_01`'s 17
+captures occupy hues 10–30 and values 140–230 while `Fe_spanner_01`'s occupy 320–340, with
+the two bands asserted not to overlap; the helper returns identical colours under
+`PYTHONHASHSEED` 0 and 12345; and overlays rebuild over a checked selection with every stored
+colour valid. Noted while testing: `pimd_corpus_check.load_corpus()` dropped legacy-schema
+support at v1.5 and **both** corpora on disk are v1.32+, so `_merge_template_list`'s 3-tuple
+branch is defensive dead code for any real file — it is exercised synthetically rather than
+left untested. All eight harnesses pass under `-W error::DeprecationWarning`. **Not yet run
+on the bench.** (2026-07-28)
+
+---
+
+### USAGE.md — v1.23 — classviz v1.60 → v1.61
+
+§5's Analysis bullet gains what a signature row reads and what its colour means (one hue per
+target_id, shaded per capture, stable between sessions because it is derived from the id).
+§1 diagram version follows. (2026-07-28)
+
+---
+
+### src/pimd_classviz.py — v1.60 — remove the face_normal / offset X / offset Y capture inputs
+
+Three of the structured placement inputs were never used, and one of them was actively
+writing junk. `face_normal` is a *persisted* combo (`sig_face_normal`), so a value chosen
+once silently rode along on every later capture: all 12 captures in the first v3 corpus —
+`Cu_pipe_01`, a **tube** — carry `face_normal=z`, a field its own tooltip reserves for the
+dim_a × dim_b face of plates/discs/sheets and defines as `na` where meaningless. The X/Y
+offsets were 0 throughout, which is the correct "centred" value, but nobody was setting
+them either.
+
+The three widgets are gone from `_build_target_placement_widget_set()`. Row B now reads
+Long axis · Medium · Repeat #, absorbing Repeat # from the row the offsets used to share —
+on its own it did not earn a row, so the form drops from three rows to two.
+
+**The schema does not change, and that is the point of the design.**
+`_placement_from_widgets()` still returns all eight keys, now with `face_normal='na'` and
+both offsets `0` as literals, so the corpus CSV columns, the session dump's `mark_target:`
+line, `_placement_tuple_key()` and the `pimd_features.Plateau` construction are all
+untouched. Removing the columns would have broken
+`pimd_corpus_check.PLACEMENT_FIELDS`, which keys repeat-consistency grouping on all seven
+placement fields, and stranded the two existing corpora that carry real values in them. The
+placement tuple keeps all seven fields for the same reason: three are constant now, so it is
+effectively (target, distance, long_axis, medium), but it must stay field-for-field aligned
+with the checker's or the two tools would disagree about what "the same placement" is.
+
+Settings save/restore for the three keys is deleted rather than migrated. A stale
+`sig_face_normal` sitting in an existing `classviz_settings.json` is simply never read
+again, which is precisely what ends the leak.
+
+**Version skips 1.58 and 1.59, deliberately.** Ten captures in the current v3 corpus are
+stamped `pimd_classviz.py v1.59`, and that version is in no commit, stash or reflog entry.
+Investigated rather than assumed: there is exactly one `pimd_classviz.py` on the machine, and
+the app producing those captures is a process launched at ~14:58 that has been running since,
+so it loaded this file at a moment when it read `1.59`; the file has since been restored to
+`1.57` with no git trace, and `git diff` confirms nothing but this change is uncommitted, so
+no work was lost. Releasing a v1.58 *after* captures stamped v1.59 would make version order
+contradict time order in exactly the provenance field that exists to record it, so the next
+release is **1.60**. The gap is this paragraph, not an accident.
+
+Verified offscreen: the three widgets are absent while target/distance/long_axis/medium/
+repeat_idx remain; `_placement_from_widgets()` still returns all eight keys with `na`/0/0;
+`_placement_tuple_key()` is asserted equal to `tuple(str(p[f]) for f in
+pimd_corpus_check.PLACEMENT_FIELDS)` — against the checker's own constant, not a copy, so the
+two cannot drift; `pimd_features.CORPUS_HEADER` still carries all three columns; both
+existing corpora still scan (66 and 18 captures, `face_normal='z'` preserved on read); and a
+settings file containing the six removed keys loads without error and saves without them.
+All seven harnesses pass under `-W error::DeprecationWarning`, and the rendered form reads
+Target/Distance on one row, Long axis/Medium/Repeat # on the next. **Not yet run on the
+bench** — the check is that a new capture writes `face_normal=na, offset_x_mm=0,
+offset_y_mm=0` and that `pimd_corpus_check.py` groups it as expected. (2026-07-28)
+
+---
+
+### USAGE.md — v1.22 — classviz v1.57 → v1.60
+
+§5's Analysis bullet: the placement field list drops `axes, offsets` for `long_axis`, and
+gains a paragraph on why `face_normal`/offsets are no longer inputs but are still written
+`na`/0/0, plus the `long_axis` x/y/z convention spelled out in physical terms (coil long
+axis / coil short axis and rover travel / coil normal) — that convention was queried on the
+bench and is worth stating where it is used, not only in a tooltip. §1 diagram version
+follows. (2026-07-28)
+
+---
+
 ### src/pimd_classviz.py — v1.57 — show the surviving central-frame count; Frames default 60 → 100
 
 Prompted by the question "aren't some of those 120 profiling frames discarded?". They are —

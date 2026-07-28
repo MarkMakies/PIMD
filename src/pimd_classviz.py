@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.57
+# PIMD Signature Visualiser (ClassViz) v1.62
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,9 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.62 FIX repeat_idx stuck at r1 (re-suggest after reload; normalise the placement key)
+#   v1.61 signature list rows carry long axis + repeat; colour is per target
+#   v1.60 remove the face_normal / offset X / offset Y capture inputs (schema unchanged)
 #   v1.57 show the central-frame count that survives the trim; Frames default 60 -> 100
 #   v1.56 Training A/B labels name the gate holding each phase up (σ/Δ vs threshold)
 #   v1.55 lift the v1.41 manual latch: Space-forced placements auto-detect removal too
@@ -89,8 +92,9 @@ import math
 import os
 import sys
 import time
+import zlib
 from datetime import datetime, date, timedelta
-from collections import deque
+from collections import Counter, deque
 
 import numpy as np
 
@@ -122,7 +126,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.57'
+APP_VERSION = '1.62'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -398,9 +402,10 @@ def _csv_default_path():
 class ScratchDialog(QDialog):
     """Save Scratch… — the small form behind a quick capture of an
     unregistered object. Deliberately not the Analysis tab's structured
-    placement widget set: a scratch object has no registry row, so long_axis /
-    face_normal / offsets have nothing to be measured against and are written
-    as 'na'/0 rather than invented."""
+    placement widget set: a scratch object has no registry row, so `long_axis`
+    has no dim_a to point along and is written 'na' rather than invented.
+    (face_normal and the offsets stopped being inputs anywhere at v1.60, so
+    they are no longer part of the distinction.)"""
 
     def __init__(self, parent, air2_available, default_distance_mm=50):
         super().__init__(parent)
@@ -1434,8 +1439,7 @@ class MainWindow(QMainWindow):
     def _build_target_placement_widget_set(self, layout, prefix, emphasise_target=False):
         """Builds a target-registry combo + structured placement widgets into
         `layout`, storing them as self.{prefix}_target, {prefix}_distance_mm,
-        {prefix}_long_axis, {prefix}_face_normal, {prefix}_offset_x_mm,
-        {prefix}_offset_y_mm, {prefix}_medium, {prefix}_repeat_idx. Pure
+        {prefix}_long_axis, {prefix}_medium, {prefix}_repeat_idx. Pure
         construction -- caller wires signals and calls
         _populate_target_combo() to fill the target combo from the currently
         loaded registry. Kept as a separate builder (rather than inlined into
@@ -1484,53 +1488,31 @@ class MainWindow(QMainWindow):
         setattr(self, '{0}_long_axis'.format(prefix), long_axis)
         row_b.addWidget(long_axis)
 
-        row_b.addWidget(QLabel('Face normal:'))
-        face_normal = QComboBox()
-        face_normal.addItems(['na', 'x', 'y', 'z'])
-        face_normal.setToolTip(
-            'Normal of the dim_a × dim_b face (plates/discs/sheets). Same x/y/z '
-            'convention as Long axis. na where meaningless.')
-        setattr(self, '{0}_face_normal'.format(prefix), face_normal)
-        row_b.addWidget(face_normal)
-
         row_b.addWidget(QLabel('Medium:'))
         medium = QComboBox()
         medium.addItems(['air', 'soil', 'other'])
         setattr(self, '{0}_medium'.format(prefix), medium)
         row_b.addWidget(medium)
-        layout.addLayout(row_b)
 
-        row_c = QHBoxLayout()
-        row_c.addWidget(QLabel('Offset X (mm):'))
-        offset_x_mm = QSpinBox()
-        offset_x_mm.setRange(-500, 500)
-        offset_x_mm.setToolTip('Target centroid offset from coil centre, coil long axis. 0 = centred.')
-        setattr(self, '{0}_offset_x_mm'.format(prefix), offset_x_mm)
-        row_c.addWidget(offset_x_mm)
-
-        row_c.addWidget(QLabel('Offset Y (mm):'))
-        offset_y_mm = QSpinBox()
-        offset_y_mm.setRange(-500, 500)
-        offset_y_mm.setToolTip('Target centroid offset from coil centre, coil short axis. 0 = centred.')
-        setattr(self, '{0}_offset_y_mm'.format(prefix), offset_y_mm)
-        row_c.addWidget(offset_y_mm)
-
+        # Repeat # shared row B with the offsets' row until v1.60 removed
+        # those; on its own it did not earn a row of its own.
         repeat_tip = (
             'Provenance metadata only — distinguishes repeated captures of the '
-            'same placement tuple (target, distance, axes, offsets, medium) so '
+            'same placement tuple (target, distance, long axis, medium) so '
             'they don\'t collide as one signature in the corpus CSV. '
             'Auto-suggested as count+1 from the open file\'s existing captures; '
             'editable. Not used in any matching/classification math.')
         lbl_repeat = QLabel('Repeat #:')
         lbl_repeat.setToolTip(repeat_tip)
-        row_c.addWidget(lbl_repeat)
+        row_b.addWidget(lbl_repeat)
         repeat_idx = QSpinBox()
         repeat_idx.setRange(1, 999)
         repeat_idx.setValue(1)
         repeat_idx.setToolTip(repeat_tip)
         setattr(self, '{0}_repeat_idx'.format(prefix), repeat_idx)
-        row_c.addWidget(repeat_idx)
-        layout.addLayout(row_c)
+        row_b.addWidget(repeat_idx)
+        row_b.addStretch(1)
+        layout.addLayout(row_b)
 
     def _populate_target_combo(self, combo, selected_target_id=None):
         combo.blockSignals(True)
@@ -1552,9 +1534,17 @@ class MainWindow(QMainWindow):
             'target_id': target_combo.currentData(),
             'distance_mm': getattr(self, '{0}_distance_mm'.format(prefix)).value(),
             'long_axis': getattr(self, '{0}_long_axis'.format(prefix)).currentText(),
-            'face_normal': getattr(self, '{0}_face_normal'.format(prefix)).currentText(),
-            'offset_x_mm': getattr(self, '{0}_offset_x_mm'.format(prefix)).value(),
-            'offset_y_mm': getattr(self, '{0}_offset_y_mm'.format(prefix)).value(),
+            # Not inputs since v1.60 -- they were never set, and face_normal
+            # being a *persisted* combo meant a value chosen once silently
+            # attached itself to every later capture (all 12 captures of a
+            # tube in the v3 corpus carry face_normal=z, which is meaningless
+            # for that shape). Still keys of this dict, so the CSV column, the
+            # session dump's mark_target: line and the placement tuple are all
+            # unchanged -- pimd_corpus_check.PLACEMENT_FIELDS still expects
+            # them, and older corpora carry real values.
+            'face_normal': 'na',
+            'offset_x_mm': 0,
+            'offset_y_mm': 0,
             'medium': getattr(self, '{0}_medium'.format(prefix)).currentText(),
             'repeat_idx': getattr(self, '{0}_repeat_idx'.format(prefix)).value(),
             # The Notes entry box was dropped in v1.38 (dead weight in the
@@ -1634,8 +1624,7 @@ class MainWindow(QMainWindow):
         self.sig_target.currentIndexChanged.connect(self._update_sig_capture_gating)
         for widget, signal_name in (
             (self.sig_target, 'currentIndexChanged'), (self.sig_distance_mm, 'valueChanged'),
-            (self.sig_long_axis, 'currentIndexChanged'), (self.sig_face_normal, 'currentIndexChanged'),
-            (self.sig_offset_x_mm, 'valueChanged'), (self.sig_offset_y_mm, 'valueChanged'),
+            (self.sig_long_axis, 'currentIndexChanged'),
             (self.sig_medium, 'currentIndexChanged'),
         ):
             getattr(widget, signal_name).connect(self._update_sig_repeat_idx_suggestion)
@@ -2951,6 +2940,46 @@ class MainWindow(QMainWindow):
     # say which file a row came from without a second column.
     _TEMPLATE_SOURCE_PREFIX = {'editable': '✎ ', 'scratch': '△ '}
 
+    # Distinct hues the per-target colouring draws from. With a handful of
+    # targets in a corpus a collision is unlikely; two sharing a hue is
+    # cosmetic and the label still separates them, which is a better trade
+    # than a scheme that reshuffles colours to stay unique.
+    TEMPLATE_HUES = 36
+
+    @staticmethod
+    def _template_color(target_id, ordinal, n_for_target):
+        """Hue from the target, value stepped across that target's captures
+        (v1.61). Every capture of a target reads as one family in the list,
+        while its individual captures stay separable -- which matters because
+        this colour is also the pen for the chart overlay curves and the Family
+        Plane markers, where a flat per-target colour would make two overlaid
+        orientations of the same target indistinguishable.
+
+        The hue comes from zlib.crc32, NOT the builtin hash(): str hashing is
+        salted per process (PYTHONHASHSEED), so hash() would hand a target a
+        different colour on every launch -- a subtler version of the per-row
+        instability this replaces, and one that passes every in-process test.
+
+        Value rather than saturation carries most of the shade: these are
+        list-item foreground colours on a light background, where darker stays
+        readable and lighter does not. A small hue jitter runs alongside it,
+        because value alone cannot separate many captures of one target -- at
+        17 captures the steps are ~5 units apart and adjacent overlay curves
+        would be indistinguishable. Two dimensions help; they do not make 17
+        shades of one hue genuinely distinct, and the label is what identifies
+        a row. Deliberately kept narrow so the family still reads as one."""
+        idx = zlib.crc32((target_id or '?').encode('utf-8')) % MainWindow.TEMPLATE_HUES
+        h, s, _v, a = pg.intColor(idx, hues=MainWindow.TEMPLATE_HUES).getHsv()
+        if n_for_target > 1:
+            frac = ordinal / (n_for_target - 1)          # 0.0 .. 1.0
+            v = int(round(230 - 90 * frac))
+            h = int(round(h + 20 * (frac - 0.5))) % 360   # +/- 10 degrees
+        else:
+            v = 185
+        out = QColor()
+        out.setHsv(h, s, max(0, min(255, v)), a)
+        return out
+
     def _merge_template_list(self, sigs, source):
         """Replace only the entries tagged `source` ('loaded' = read-only
         reference corpus, 'editable' = the active editable file, 'scratch' =
@@ -2973,10 +3002,13 @@ class MainWindow(QMainWindow):
 
         keys_sorted = sorted(sigs.keys(), key=lambda k: tuple(str(v) for v in k))
         prefix = self._TEMPLATE_SOURCE_PREFIX.get(source, '')
-        for i, key in enumerate(keys_sorted):
+
+        # Two passes (v1.61): the colour's shade needs each capture's ordinal
+        # WITHIN its target, which isn't known until every key is resolved.
+        # Pass 1 only hoists the existing key-shape branch, unchanged.
+        resolved = []
+        for key in keys_sorted:
             sig = sigs[key]
-            amp, splithalf, quality = sig['amp'], sig['splithalf'], sig['quality']
-            snr = amp / splithalf if splithalf > 1e-9 else float('inf')
             if len(key) == 3:
                 # 'loaded'/legacy source (pimd_corpus_check.load_corpus(),
                 # still old target/distance_cm schema -- see its own
@@ -2991,9 +3023,35 @@ class MainWindow(QMainWindow):
                 display_target = sig.get('target_id') or capture_id
                 display_place = '{0}mm'.format(sig['distance_mm']) if sig.get('distance_mm') else 'air'
                 target_id, distance_mm = sig.get('target_id', ''), sig.get('distance_mm', '')
-            label = '{0}{1} @{2}  amp={3:.0f} SNR={4:.1f} [{5}]'.format(
-                prefix, display_target, display_place, amp, snr, quality)
-            color = pg.intColor(i, hues=max(len(sigs), 9))
+            resolved.append((key, sig, session, display_target, display_place,
+                              target_id, distance_mm))
+
+        # Group sizes are per source batch, exactly as the old row index was.
+        # The HUE doesn't depend on them -- it comes from the target_id -- so a
+        # target keeps its colour whichever source it arrives from.
+        target_counts = Counter(r[5] for r in resolved)
+        target_seen = {}
+
+        for key, sig, session, display_target, display_place, target_id, distance_mm in resolved:
+            amp, splithalf, quality = sig['amp'], sig['splithalf'], sig['quality']
+            snr = amp / splithalf if splithalf > 1e-9 else float('inf')
+            ordinal = target_seen.get(target_id, 0)
+            target_seen[target_id] = ordinal + 1
+
+            # Orientation + repeat, so the six captures that share
+            # 'Cu_pipe_01 @120mm' are tellable apart. Legacy corpora predate
+            # the schema and carry neither -- omitted silently rather than
+            # padded, and a long_axis of 'na' says nothing worth a column.
+            place = display_place
+            axis = str(sig.get('long_axis') or '').strip()
+            if axis and axis != 'na':
+                place += '  {0}'.format(axis)
+            repeat = str(sig.get('repeat_idx') or '').strip()
+            if repeat:
+                place += '  r{0}'.format(repeat)
+            label = '{0}{1} @{2}   amp={3:.0f} SNR={4:.1f} [{5}]'.format(
+                prefix, display_target, place, amp, snr, quality)
+            color = self._template_color(target_id, ordinal, target_counts[target_id])
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             # Signatures captured in this app session default to *checked* so
@@ -3009,7 +3067,7 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setForeground(QBrush(color))
             item.setToolTip('{0} @{1} ({2})  amp={3:.3f}mV  splithalf={4:.3f}mV  SNR={5:.2f}  quality={6}'.format(
-                display_target, display_place, session, amp, splithalf, snr, quality))
+                display_target, place, session, amp, splithalf, snr, quality))
             self.lw_analysis_templates.addItem(item)
             # target_id/distance_mm/geometry are carried through (v1.42) rather
             # than only being formatted into `label`: the Shape Space tab plots
@@ -3857,9 +3915,6 @@ class MainWindow(QMainWindow):
         self.sig_target.setEnabled(has_file)
         self.sig_distance_mm.setEnabled(has_file)
         self.sig_long_axis.setEnabled(has_file)
-        self.sig_face_normal.setEnabled(has_file)
-        self.sig_offset_x_mm.setEnabled(has_file)
-        self.sig_offset_y_mm.setEnabled(has_file)
         self.sig_medium.setEnabled(has_file)
         self.sig_repeat_idx.setEnabled(has_file)
         self.sp_sig_capture_n.setEnabled(has_file)
@@ -3999,9 +4054,17 @@ class MainWindow(QMainWindow):
         auto-increments against. Accepts either a _scan_editable_signature_
         file() value dict (string fields, from CSV) or a
         _placement_from_widgets() dict (int/str fields, from live widgets) --
-        stringified so both sides compare equal."""
-        return tuple(str(sig[k]) for k in ('target_id', 'distance_mm', 'long_axis',
-                                            'face_normal', 'offset_x_mm', 'offset_y_mm', 'medium'))
+        stringified so both sides compare equal.
+
+        Field list and per-field normalisation both come from
+        pimd_corpus_check rather than being restated here, so the app and the
+        checker cannot drift on what "the same placement" is. The
+        normalisation matters since v1.60: rows captured before it carry
+        face_normal='z' and the widgets now yield 'na', so without it a
+        placement fails to match its own history and repeat_idx restarts at 1
+        (v1.62)."""
+        return tuple(pimd_corpus_check.placement_value(f, sig[f])
+                      for f in pimd_corpus_check.PLACEMENT_FIELDS)
 
     def _reload_editable_signature_list(self):
         if self._editable_sig_path is None:
@@ -4020,6 +4083,13 @@ class MainWindow(QMainWindow):
         # save silently merges into the same id (v1.39 field failure).
         self._editable_sig_seq = max(
             [self._capture_id_seq(cid) for _, cid in sigs] or [0])
+        # Re-suggest now the counts have moved (v1.62). Without this the
+        # spinbox only ever updated on a placement-WIDGET change, so two
+        # captures of one placement with nothing touched in between both saved
+        # as r1 -- which is exactly what the 15:39 session on 2026-07-28 did.
+        # Hooked here rather than at each caller: save, delete and file-open
+        # all land on this one seam.
+        self._update_sig_repeat_idx_suggestion()
 
     @staticmethod
     def _capture_id_seq(capture_id):
@@ -7243,9 +7313,10 @@ class MainWindow(QMainWindow):
                 self._populate_target_combo(self.sig_target, selected_target_id=sig_target_id)
                 self.sig_distance_mm.setValue(int(s.get('sig_distance_mm', 50)))
                 self.sig_long_axis.setCurrentText(s.get('sig_long_axis', 'na'))
-                self.sig_face_normal.setCurrentText(s.get('sig_face_normal', 'na'))
-                self.sig_offset_x_mm.setValue(int(s.get('sig_offset_x_mm', 0)))
-                self.sig_offset_y_mm.setValue(int(s.get('sig_offset_y_mm', 0)))
+                # sig_face_normal / sig_offset_x_mm / sig_offset_y_mm are no
+                # longer read (v1.60). Leaving them unread rather than
+                # migrating the file is the point: a stale persisted
+                # face_normal is exactly what was leaking into captures.
                 self.sig_medium.setCurrentText(s.get('sig_medium', 'air'))
 
             self.cb_hm_norm.setCurrentIndex(int(s.get('analysis_hm_norm_idx', 0)))
@@ -7426,9 +7497,6 @@ class MainWindow(QMainWindow):
             'sig_target_id':   self.sig_target.currentData(),
             'sig_distance_mm': self.sig_distance_mm.value(),
             'sig_long_axis':   self.sig_long_axis.currentText(),
-            'sig_face_normal': self.sig_face_normal.currentText(),
-            'sig_offset_x_mm': self.sig_offset_x_mm.value(),
-            'sig_offset_y_mm': self.sig_offset_y_mm.value(),
             'sig_medium':      self.sig_medium.currentText(),
 
             'sig_q_amp_mv':       self.sp_sig_q_amp_mv.value(),

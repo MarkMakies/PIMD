@@ -2,7 +2,7 @@
 """
 pimd_corpus_check.py — corpus-level acceptance checks for a PIMD signature corpus.
 
-Version: 1.6
+Version: 1.7
 
 Reads the v1.32+ target-registry corpus schema (the CORPUS_HEADER schema that
 pimd_classviz.py's Training capture and pimd_features.py's corpus builder both
@@ -10,7 +10,10 @@ write). The authoritative column list is pimd_features.CORPUS_HEADER_FIELDS;
 real files live at src/data/corpora/gui_signatures_*.csv. Capture identity is
 (session, capture_id); the *physical* identity used for cross-capture checks is
 the placement tuple (target_id, distance_mm, long_axis, face_normal,
-offset_x_mm, offset_y_mm, medium) -- mirrors pimd_classviz._placement_tuple_key.
+offset_x_mm, offset_y_mm, medium) -- mirrors pimd_classviz._placement_tuple_key,
+which imports the field list and the per-field normalisation from here so the
+two cannot drift. face_normal and the offsets stopped being capture inputs at
+classviz v1.60 and are normalised when keying (PLACEMENT_CONSTANT_FIELDS).
 
 Distances are read from the data (whatever distance_mm values were captured),
 not hardcoded -- a target seen at >= 2 distances gets shape-invariance rows and
@@ -19,6 +22,7 @@ has no distance at all (blank distance_mm column): it appears in the split-half
 SNR check labelled '@air' and is excluded from every distance-keyed check.
 
 # History (full detail in CHANGELOG.md):
+#   v1.7 placement key normalises the fields classviz v1.60 froze (face_normal/offsets)
 #   v1.6 FIX air captures (blank distance_mm) aborted the whole run
 #   v1.5 migrate to the v1.32+ target_id/distance_mm schema; retire canary check; repeats via repeat_idx
 #   v1.4 loud rejection of the v1.32+ schema (stopgap, superseded by v1.5)
@@ -58,6 +62,30 @@ CROSS_CAMPAIGN_COS_MIN = 0.99
 PLACEMENT_FIELDS = ('target_id', 'distance_mm', 'long_axis', 'face_normal',
                     'offset_x_mm', 'offset_y_mm', 'medium')
 TARGET_FIELDS = tuple(f for f in PLACEMENT_FIELDS if f != 'distance_mm')
+
+# Fields that stopped being capture inputs at classviz v1.60 and are written
+# na/0/0 from then on. Keying normalises them to those constants so a capture
+# made before the change groups with one made after -- otherwise the same
+# physical placement splits on face_normal 'z' vs 'na' and a repeat reads as a
+# fresh base. That is not hypothetical: it happened across the v1.60 boundary
+# in the 2026-07-28 corpus (see that day's findings entry).
+#
+# This does discard information in principle -- a corpus with genuinely
+# different offsets would collapse to one placement. It does not in practice:
+# no corpus on disk has a non-zero offset or a face_normal other than z/na,
+# and neither can be entered any more. Revisit if that stops being true.
+PLACEMENT_CONSTANT_FIELDS = {'face_normal': 'na', 'offset_x_mm': '0', 'offset_y_mm': '0'}
+
+
+def placement_value(field, value):
+    """The keying value for one placement field -- the stored value, or the
+    v1.60 constant for the three fields that no longer vary. Shared with
+    pimd_classviz._placement_tuple_key() so the two tools cannot disagree
+    about what 'the same placement' means."""
+    if field in PLACEMENT_CONSTANT_FIELDS:
+        return PLACEMENT_CONSTANT_FIELDS[field]
+    return str(value)
+
 
 # target_id values that are not physical objects and are excluded from the
 # object-centric checks (per-capture air anchors are captured separately and
@@ -194,11 +222,11 @@ def label_of(sig):
 
 
 def placement_key(sig):
-    return tuple(str(sig[f]) for f in PLACEMENT_FIELDS)
+    return tuple(placement_value(f, sig[f]) for f in PLACEMENT_FIELDS)
 
 
 def target_key(sig):
-    return tuple(str(sig[f]) for f in TARGET_FIELDS)
+    return tuple(placement_value(f, sig[f]) for f in TARGET_FIELDS)
 
 
 def one_per_distance(sigs):

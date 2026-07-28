@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.21
+# PIMD — Usage Guide (USAGE.md) v1.23
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,13 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.23 2026-07-28 classviz v1.60 → v1.61. §5's Analysis bullet: signature rows now
+                carry long axis and repeat, and the row colour is per target
+                (one hue per target_id, shaded per capture). §1 diagram.
+v1.22 2026-07-28 classviz v1.57 → v1.60. §5's Analysis bullet: face_normal and the
+                X/Y offsets are no longer capture inputs (written na/0/0; the CSV
+                schema is unchanged). Note the targets_v1.csv → targets_v3.csv
+                registry reference. §1 diagram.
 v1.21 2026-07-28 classviz v1.56 → v1.57. §5's Training paragraph: the central-60%
                 trim is now named, A carries the surviving count, and Frames
                 defaults to 100 (below which every capture is stamped 'short').
@@ -117,7 +124,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.29)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.57)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.61)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │        └─ uses src/pimd_shape.py (v1) — shared feature maths
                      │              (family / crossing / decay persistence)
@@ -283,8 +290,15 @@ validated against the target registry.
 - **Stats tab:** per-cell Latest / Mean / Std with green/yellow/red thresholds.
 - **Analysis tab:** live comparison charts, a **Signatures** group (signature file
   management, registry-validated target combo from `targets_v1.csv` via
-  `pimd_target_check.py`, structured placement fields — distance_mm, axes, offsets,
-  medium, repeat_idx — a per-parameter green/amber/red readout and Save/Delete)
+  `pimd_target_check.py`, structured placement fields — distance_mm, long_axis,
+  medium, repeat_idx — a per-parameter green/amber/red readout and Save/Delete;
+  each signature row reads `target @distance  axis  r<n>  amp=… SNR=… [quality]`,
+  v1.61, so the several captures that share a target and distance are tellable
+  apart, and its **colour is per target** — one hue per `target_id`, shaded and
+  jittered slightly across that target's captures, so a target reads as one family
+  while its individual overlay curves stay separable on the charts. The hue is
+  derived from the target_id itself, so it is the same colour in every session and
+  does not shift as the list grows)
   and a **Training** group
   (v1.35): an automated auto-detect capture cycle. Press **Start Training**; two
   status areas show **A** = state and **B** = the next instruction. Since v1.56 both
@@ -333,6 +347,16 @@ validated against the target registry.
   turns amber, because every capture at that setting is stamped `short` in the corpus. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
+  **`face_normal` and the X/Y offsets are not capture inputs (v1.60).** They were never
+  set, and `face_normal` being a *persisted* combo meant a value chosen once silently
+  rode along on every later capture — all 12 captures of a tube in the first v3 corpus
+  carry `face_normal=z`, which is meaningless for that shape. They are still written to
+  the CSV, the session dump's `mark_target:` line and the placement tuple, at `na`/0/0:
+  the schema and `pimd_corpus_check.PLACEMENT_FIELDS` are unchanged, and older corpora
+  keep their real values. **`long_axis`** stays, and is the direction the registry's
+  `dim_a` points: `x` = coil long axis (520 mm), `y` = coil short axis (360 mm, the rover's
+  direction of travel), `z` = coil normal (vertical, target standing at right angles to
+  the coil plane).
   - **Trigger Levels (v1.51–v1.54).** A five-gauge column at the top-left of the
     Analysis tab's chart area, for setting the Training thresholds against the live
     signal instead of guessing and then debugging a cycle. Each bar carries a dashed
