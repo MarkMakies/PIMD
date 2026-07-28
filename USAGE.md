@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.18
+# PIMD — Usage Guide (USAGE.md) v1.19
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,10 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.19 2026-07-28 classviz v1.54 → v1.55. §5's Training paragraph: a Space-forced
+                placement now auto-detects removal as well (the v1.41 latch is
+                lifted), with Space still the fallback for a target too weak for
+                either direction. §1 diagram.
 v1.18 2026-07-28 classviz v1.50 → v1.54. §5 gains a Trigger Levels bullet (the
                 five-gauge column, draggable thresholds, what each Detect mode
                 measures) and an Auto-start bullet. §5's Training paragraph:
@@ -105,7 +109,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.29)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.54)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.55)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │        └─ uses src/pimd_shape.py (v1) — shared feature maths
                      │              (family / crossing / decay persistence)
@@ -297,6 +301,11 @@ validated against the target registry.
   leading air, so after deciding you just press Space again. A missed 30 s
   countdown aborts that signature (session stays live). The **Space override**
   checkbox lets Space also force-advance a phase manually if auto-detect stalls.
+  A Space-forced *placement* still gets removal auto-detect (v1.55 — the v1.41 latch
+  that blocked it existed for the old removal rule, which could fire on the first
+  settled frame); Space stays permitted through the rest of that cycle without the
+  override checkbox, because a target too weak to clear Detect going on will not
+  clear it coming off either.
   Collection stays settledness-gated (mean rolling σ ≤ **Settle ≤ mV**, default
   1.0) and glitch-excluded. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.54
+# PIMD Signature Visualiser (ClassViz) v1.55
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.55 lift the v1.41 manual latch: Space-forced placements auto-detect removal too
 #   v1.54 FIX removal auto-detect: transient + fresh target ref; Air age = cycle budget
 #   v1.53 auto-connect + run the last profile at launch; gauge row spacing; np.bool_ warning
 #   v1.52 FIX Detect gauge read a stale air reference; Air age gauge; readout under the label
@@ -119,7 +120,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.54'
+APP_VERSION = '1.55'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -3225,12 +3226,19 @@ class MainWindow(QMainWindow):
         return self.MY_RED if remaining <= 5 else self.MY_YELLOW
 
     def _sig_enter_target(self, manual=False):
-        """manual=True means Space forced the placement because auto-detect
-        never fired -- i.e. this target's |Δ| from air stays under Detect. The
-        removal test is that same comparison inverted, so it would read
-        'removed' on the first settled frame of await_remove and skip the
-        removal wait entirely (v1.40 field failure). Latch it and require
-        Space to leave await_remove as well."""
+        """manual=True means Space forced the placement rather than auto-detect
+        firing -- often because this target's |Δ| from air stays under Detect,
+        sometimes just impatience.
+
+        v1.41 used this to block removal auto-detect entirely: the removal test
+        was then the placement comparison inverted, so it read 'removed' on the
+        first settled frame of await_remove and skipped the removal wait (v1.40
+        field failure). v1.54 replaced that test -- removal now needs a settle
+        transient AND a departure from the target snapshot, neither of which
+        holds on arrival -- so v1.55 lifted the block and auto-detect is tried
+        for manual placements too. The flag still keeps Space permitted through
+        the rest of the cycle without the override checkbox, which is the
+        fallback when a target is too weak for either direction to fire."""
         self._stop_await_flash()
         self._sig_target_manual = manual
         self._sig_train_phase = 'target'
@@ -3426,10 +3434,14 @@ class MainWindow(QMainWindow):
                     if dev is not None and dev > self.sp_sig_detect_mv.value():
                         self._sig_enter_target()
                         return
-                # ...but only when auto-detect saw the target go on. If
-                # placement was forced by Space, the operator is driving the
-                # cycle by hand and must Space out of await_remove too (v1.41).
-                elif not self._sig_target_manual and self._sig_removal_armed:
+                # Runs for a Space-forced placement too (v1.55 lifted the v1.41
+                # latch): the target snapshot exists however the phase was
+                # entered, and neither half of this test can be satisfied on
+                # arrival, so the v1.40 instant-skip cannot recur. A target too
+                # weak to clear Detect going on will not clear it coming off
+                # either -- that cycle simply falls through to Space, which
+                # stays permitted for a manual placement.
+                elif self._sig_removal_armed:
                     dev = self._current_dev_from_target()
                     if dev is not None and dev > self.sp_sig_detect_mv.value():
                         self._sig_enter_air_trail()
@@ -3507,7 +3519,10 @@ class MainWindow(QMainWindow):
             b_text = 'Profiling target…'
         elif phase == 'await_remove':
             rem = self._sig_await_remaining()
-            b_text = ('Remove target, then press Space — {0}s' if self._sig_target_manual
+            # Auto-detect is attempted either way since v1.55, but a manual
+            # placement is the case most likely to need the Space fallback, so
+            # that label names both rather than promising auto-detect alone.
+            b_text = ('Remove target — auto, or Space — {0}s' if self._sig_target_manual
                       else 'Remove target now — {0}s').format(rem)
             b_style = self._await_flash_style(rem)
         elif phase == 'air_trail':

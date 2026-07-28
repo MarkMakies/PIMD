@@ -1,3 +1,40 @@
+### src/pimd_classviz.py — v1.55 — lift the v1.41 manual latch on removal auto-detect
+
+v1.41 blocked removal auto-detect whenever placement had been forced by Space. That was
+correct for the removal rule of the day: it was the placement comparison inverted, so for a
+target that had never cleared Detect going on, "|Δ| below Detect" was already true on the
+first settled frame of `await_remove` and the cycle skipped the removal wait outright (the
+v1.40 field failure). The latch was a guard on a test that could fire on arrival.
+
+v1.54 replaced that test — removal now needs a settle-loss transient **and** a departure
+from the target snapshot — and neither half can be satisfied on arrival, so the failure the
+latch existed to prevent is no longer reachable. The block is lifted: a Space-forced
+placement gets removal auto-detect like any other. `_sig_target_manual` is *not* retired; it
+still keeps Space permitted through the rest of that cycle without the override checkbox,
+which is the fallback for a target too weak for either direction to fire. The `await_remove`
+instruction reads `Remove target — auto, or Space` for a manual placement rather than
+promising auto-detect alone, since that is the case most likely to need the fallback.
+
+Verified offscreen, two new cases beside the four from v1.54. A manual placement followed by
+a real removal (transient, then re-settle at air) now advances to `air_trail` where it
+previously stalled — and, at the top of that case, `await_remove` is asserted still current
+on arrival, which is the v1.40 regression under test. A **weak target** case covers the
+other side: 0.2 mV against a 0.5 mV Detect, transient seen and latch armed, removal
+correctly *declines* at 0.215 mV of departure and falls through to Space. The v1.54 cases
+are unchanged and still pass, including the decisive one (1.66 mV of drift-driven deviation
+with no transient does not advance). **Not yet run on the bench.** (2026-07-28)
+
+---
+
+### USAGE.md — v1.19 — classviz v1.54 → v1.55
+
+§5's Training paragraph gains the lifted latch: a Space-forced placement now auto-detects
+removal too, with Space still permitted as the fallback and the reason why (a target too
+weak to clear Detect going on will not clear it coming off). §1 diagram version follows.
+(2026-07-28)
+
+---
+
 ### src/pimd_classviz.py — v1.54 — FIX removal auto-detect; Air age against the cycle budget
 
 Acts on the concern flagged (deliberately unfixed) at v1.52, now confirmed on the bench:
