@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.17
+# PIMD — Usage Guide (USAGE.md) v1.18
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,11 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.18 2026-07-28 classviz v1.50 → v1.54. §5 gains a Trigger Levels bullet (the
+                five-gauge column, draggable thresholds, what each Detect mode
+                measures) and an Auto-start bullet. §5's Training paragraph:
+                removal auto-detect now requires an unsettle transient and tests
+                the target snapshot, not the aged leading air (§17.10). §1 diagram.
 v1.17 2026-07-26 delaycal v1.28 → v1.29 (Export Profile save dialog: filename sets the
                 profile `name`, plus an editable auto-generated notes field). §4's
                 intent, Auto Nudge, Import and new Export bullets; §1 diagram.
@@ -100,7 +105,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.29)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.50)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.54)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │        └─ uses src/pimd_shape.py (v1) — shared feature maths
                      │              (family / crossing / decay persistence)
@@ -279,7 +284,14 @@ validated against the target registry.
   30 s **place target** countdown. The app **auto-detects** placement (signal
   re-settles with mean |Δ| from the locked air above the **Detect ≥ mV**
   threshold), profiles the target, then prompts **remove target** (another 30 s)
-  and **auto-detects** removal (Δ back below Detect) to take the trailing air.
+  and **auto-detects** removal (v1.54: the signal must first *unsettle* — lifting
+  the object is a physical event — and then re-settle more than Detect away from
+  the **target** snapshot taken moments earlier). Removal used to be tested as
+  "Δ back below Detect" against the *leading air*, a reference by then a whole
+  target window older; DESIGN §17.10 measured that as unable to work, since at
+  ~50 µV/s a 150 s-old air reference reads more deviation than the target does,
+  so removing the object made |Δ| go **up**. Both halves of the new test matter:
+  drift can pass Detect on magnitude alone, but it never unsettles the signal.
   The completed signature's metrics are presented with flashing **Save Sig /
   Ignore Sig**; meanwhile the trailing air keeps rolling as the next cycle's
   leading air, so after deciding you just press Space again. A missed 30 s
@@ -289,6 +301,27 @@ validated against the target registry.
   1.0) and glitch-excluded. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
+  - **Trigger Levels (v1.51–v1.54).** A five-gauge column at the top-left of the
+    Analysis tab's chart area, for setting the Training thresholds against the live
+    signal instead of guessing and then debugging a cycle. Each bar carries a dashed
+    marker you can **drag** to set the underlying value: **Settle ≤** (mean rolling σ,
+    the gate itself), **Detect ≥**, **Amp (log)** (the Green-when Amp threshold) and
+    **SNR** (the Family Plane gate). **Air age** is read-only.
+    The **Detect** row names its own reference in the unit column, because it changes
+    with the phase: `mV vs air` while waiting for placement, `mV vs target` while
+    waiting for removal, and `mV wander` the rest of the time — the latter being how
+    far the air moves on its own over one settle window, i.e. the floor the Detect
+    level has to clear. Green always means "the thing you are waiting for": air
+    quieter than Detect in wander mode, a crossing in the two gated phases.
+    **Air age** is how long ago the leading air was locked, against the budget for one
+    healthy cycle (two collecting windows plus two 30 s guards, scaled by the measured
+    sweep rate) — red means the cycle is dragging, not that anything is wrong with the
+    reading. On the bench in clean air expect wander around 0.2–0.3 mV, comfortably
+    under a working Detect of 0.5.
+  - **Auto-start (v1.53).** Launching the app connects to the remembered port and
+    loads & runs the remembered profile, so it comes up streaming. No remembered port,
+    a port that will not open, or no remembered profile each leave it idle exactly as
+    before with the reason in the status bar.
   - **Heatmap colour scale (v1.44).** The Analysis heatmap's **Scale** is either
     **Auto** or an explicit **Min**/**Max** in µV. Auto fits the whole data range,
     which is the wrong window for **Std Dev (rolling N)**: a rolling σ field sits in

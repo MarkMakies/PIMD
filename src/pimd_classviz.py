@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.53
+# PIMD Signature Visualiser (ClassViz) v1.54
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.54 FIX removal auto-detect: transient + fresh target ref; Air age = cycle budget
 #   v1.53 auto-connect + run the last profile at launch; gauge row spacing; np.bool_ warning
 #   v1.52 FIX Detect gauge read a stale air reference; Air age gauge; readout under the label
 #   v1.51 Analysis Trigger Levels gauges (Settle/Detect/Amp/SNR) with draggable thresholds
@@ -118,7 +119,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.53'
+APP_VERSION = '1.54'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -126,6 +127,11 @@ REDRAW_MS   = 33    # ~30 Hz
 # answered the E/V/Q4 handshake before the D/Q/G burst arrives -- the same beat
 # an operator leaves between clicking Connect and Load & Run.
 AUTOSTART_PROFILE_MS = 600
+
+# Assumed seconds per W-frame when no measured rate is available yet (the
+# _fps_hz readout needs a second of streaming first). ~3.3 Hz is the 63-cell
+# sweep -- the same figure behind "a 50-frame window is 15 s at the sweep rate".
+SWEEP_PERIOD_FALLBACK_S = 0.3
 
 # -- Analysis heatmap colorbar-as-range-slider (v1.45) ----------------------
 # ColorBarItem's internal coordinate space is a fixed 0..256 across the bar,
@@ -325,15 +331,6 @@ _HL_GREEN  = 'rgb(143, 240, 164)'
 _HL_YELLOW = 'rgb(249, 240, 107)'
 _HL_RED    = 'rgb(246,  97,  81)'
 _HL_BLUE   = 'rgb(153, 193, 241)'
-
-# Thermal drift a frozen air reference accumulates, mV per cell per second.
-# DESIGN §17.2/§17.10, measured: 0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at
-# 150 s. mean|Δ| from air is a per-cell mean, so this converts directly between
-# a reference's AGE and the deviation that age contributes on its own -- which
-# is what the Air-age gauge's limit is: the age at which drift alone equals the
-# Detect threshold, i.e. where a magnitude test against that reference stops
-# being able to tell target from time (§17.10).
-AIR_DRIFT_MV_PER_S = 0.05
 
 _R = int(Qt.AlignmentFlag.AlignRight) | int(Qt.AlignmentFlag.AlignVCenter)
 _C = int(Qt.AlignmentFlag.AlignCenter)
@@ -609,6 +606,8 @@ class MainWindow(QMainWindow):
         self._sig_air_ref_ts   = None   # wall time it was locked -- DESIGN §17.10 makes reference
                                         # AGE the ceiling on any frozen-reference measurement
         self._sig_await_deadline = None # wall-clock; 30 s guard for await_target/await_remove
+        self._sig_removal_armed = False # a settle-loss has been seen during await_remove, so
+                                        # the object has physically moved -- drift cannot set this
         self._sig_target_manual = False # placement was forced by Space, so auto-detect can't
                                         # see this target -- removal must be manual too (v1.41)
         self._sig_decide_pending = False  # a computed signature is awaiting Save/Ignore
@@ -2543,13 +2542,40 @@ class MainWindow(QMainWindow):
         except ValueError:
             return None
 
-    def _sig_dev_is_gated(self):
-        """True while the state machine is actually testing dev-from-air --
-        the only two phases in which a locked reference exists AND is being
-        compared against. Everywhere else a frozen reference is just ageing
-        (§17.10), so the Detect gauge shows air wander instead (v1.52)."""
-        return (self._analysis_training_active
-                and self._sig_train_phase in ('await_target', 'await_remove'))
+    def _sig_dev_mode(self):
+        """Which comparison the Detect gauge should be showing: 'air' and
+        'target' are the two phases where the state machine is actually
+        testing a fresh reference against Detect, and the gauge shows the very
+        number being tested. Everywhere else nothing is gated, so it shows air
+        wander instead of a reference quietly ageing (§17.10, v1.52)."""
+        if not self._analysis_training_active:
+            return 'wander'
+        return {'await_target': 'air', 'await_remove': 'target'}.get(
+            self._sig_train_phase, 'wander')
+
+    def _sig_cycle_budget_s(self):
+        """The longest a healthy cycle can legitimately take from the air lock
+        to the finished signature, and so the Air-age marker's limit (v1.54).
+
+        After the lock the cycle owes: await_target (guard), the target window,
+        await_remove (guard), the trailing-air window. Two collecting windows
+        and two guards -- air_lead is already spent by the time the lock
+        happens. At 120 frames and ~3.3 Hz that is ~132 s.
+
+        The limit used to be the drift budget, Detect / 0.05 mV/s (the
+        §17.2/§17.10 measured rate) -- 10 s at Detect 0.5, which went red
+        long before a 120-frame target
+        window could finish and so said nothing. That number described whether
+        a magnitude test against the frozen reference could still work; with
+        removal now testing against the target snapshot instead (v1.54),
+        nothing gates on the air reference's age any more, and the useful
+        question became "is this cycle dragging".
+
+        Sweep period comes from the measured rate when there is one -- a
+        63-cell profile sweeps slower than a 45-cell one, so a hardcoded period
+        would be wrong on half the profiles."""
+        period = 1.0 / self._fps_hz if self._fps_hz > 0.2 else SWEEP_PERIOD_FALLBACK_S
+        return 2.0 * self.sp_sig_capture_n.value() * period + 2.0 * self._SIG_AWAIT_SECONDS
 
     def _update_analysis_gauges(self):
         """Settle and Detect are the exact quantities _sig_train_ingest()
@@ -2573,25 +2599,29 @@ class MainWindow(QMainWindow):
         # which one is on screen -- reading 'vs air' when nothing is locked was
         # the whole v1.51 confusion.
         detect_thr = self.sp_sig_detect_mv.value()
-        gated      = self._sig_dev_is_gated()
-        dev_mv     = self._current_dev_from_air() if gated else self._current_air_wander_mv()
-        # The verdict flips with the mode, because "good" does. Gated: dev at
-        # or above Detect means the target registered. Wander: the air moving
-        # LESS than Detect is what you want -- green there means the trigger
-        # level clears the noise floor, which is the whole reason to look.
+        mode       = self._sig_dev_mode()
+        dev_mv, unit = {
+            'air':    (self._current_dev_from_air,    'mV vs air'),
+            'target': (self._current_dev_from_target, 'mV vs target'),
+        }.get(mode, (self._current_air_wander_mv, 'mV wander'))
+        dev_mv = dev_mv()
+        # The verdict flips with the mode, because "good" does. Gated (either
+        # reference): dev at or above Detect is the transition being waited for
+        # -- target arrived, or target departed. Wander: the air moving LESS
+        # than Detect is what you want, because that is the trigger level
+        # clearing the noise floor, which is the whole reason to look.
         self._set_gauge(
             self.analysis_gauges, 'detect', dev_mv,
             0.0, self._gauge_hi(dev_mv, detect_thr), detect_thr,
             '' if dev_mv is None else '{0:.3f}'.format(dev_mv),
-            good_above=gated, unit='mV vs air' if gated else 'mV wander')
+            good_above=mode != 'wander', unit=unit)
 
-        # Age of the locked reference against its drift budget: the age at
-        # which thermal drift alone equals Detect. Past that line a magnitude
-        # test cannot separate target from time (§17.10) -- which is why this
-        # row is worth a gauge and not a tooltip.
+        # Age of the locked air reference against the cycle budget -- "is this
+        # cycle dragging", not the old drift budget (see _sig_cycle_budget_s()
+        # for why that limit stopped being the right question at v1.54).
         age = (None if self._sig_air_ref_ts is None
                else time.time() - self._sig_air_ref_ts)
-        age_limit = detect_thr / AIR_DRIFT_MV_PER_S
+        age_limit = self._sig_cycle_budget_s()
         self._set_gauge(
             self.analysis_gauges, 'air_age', age,
             0.0, self._gauge_hi(age, age_limit, floor=30.0), age_limit,
@@ -3088,6 +3118,7 @@ class MainWindow(QMainWindow):
         self._sig_air_ref_ts = None
         self._sig_await_deadline = None
         self._sig_target_manual = False
+        self._sig_removal_armed = False
         self._clear_sig_decide()
         self._update_sig_readout()
         self._analysis_training_active = True
@@ -3210,6 +3241,8 @@ class MainWindow(QMainWindow):
         if not self._sig_can_commit():
             return
         self._sig_target = self._sig_train_snapshot()
+        # This removal needs its own transient -- arm from scratch (v1.54).
+        self._sig_removal_armed = False
         self._sig_train_phase = 'await_remove'
         self._sig_await_deadline = time.time() + self._SIG_AWAIT_SECONDS
         self._start_await_flash()
@@ -3246,6 +3279,7 @@ class MainWindow(QMainWindow):
         # roll straight into the next leading air (same deque, no reset);
         # the next cycle re-arms auto-detect from scratch
         self._sig_target_manual = False
+        self._sig_removal_armed = False
         self._sig_train_phase = 'air_lead'
         self._sig_start_sig_decide()
         self._update_sig_train_indicator()
@@ -3262,6 +3296,7 @@ class MainWindow(QMainWindow):
         self._sig_air_ref_ts = None
         self._sig_await_deadline = None
         self._sig_target_manual = False
+        self._sig_removal_armed = False
         self._stop_await_flash()
         self._sig_train_phase = 'air_lead'
         self._sig_train_restart_buffer()
@@ -3310,6 +3345,31 @@ class MainWindow(QMainWindow):
             return None
         return float(np.abs(np.median(mat, axis=0) - self._sig_air_ref).mean())
 
+    def _current_dev_from_target(self):
+        """Mean per-channel |Δ| in mV between the current settle window and the
+        TARGET snapshot -- how far the signal has moved away from what was just
+        captured. None if there is no target snapshot or too few frames.
+
+        This is the removal test's reference (v1.54), and the point of it is
+        that it is seconds old rather than minutes: `_sig_target` is taken in
+        _sig_finish_target(), immediately before await_remove begins. The old
+        test asked whether the signal had come back to within Detect of the
+        LEADING AIR, a reference by then a whole target window older -- and
+        DESIGN §17.10 measured that as unable to work: at ~50 µV/s, 150 s of
+        drift reads 5.2 mV where a spanner @60 mm reads 2.8 mV, so removing the
+        object makes |Δ| from stale air go UP, not down."""
+        if self._sig_target is None:
+            return None
+        ref = np.median(self._sig_target['frames_mV'], axis=0)
+        n_win  = self.sp_stats_window.value()
+        recent = list(self._rolling_buf)[-n_win:]
+        if len(recent) < 2:
+            return None
+        mat = np.array([arr for _, arr in recent], dtype=float) / 1000.0
+        if mat.shape[1] != ref.shape[0]:
+            return None
+        return float(np.abs(np.median(mat, axis=0) - ref).mean())
+
     def _current_air_wander_mv(self):
         """Mean per-channel |Δ| between the current settle window and the one
         immediately before it -- how far the air moves on its own over one
@@ -3342,25 +3402,36 @@ class MainWindow(QMainWindow):
         phase = self._sig_train_phase
 
         if phase in ('await_target', 'await_remove'):
-            # Guard countdown + auto-detect. A transition fires only when the
-            # signal is settled AND the |Δ| from the locked air crosses Detect
-            # (present > Detect, removed < Detect) -- the placement/removal
-            # transient (unsettled) is skipped naturally.
+            # Guard countdown + auto-detect. Both transitions now fire on the
+            # same shape of test -- settled, and |Δ| from a FRESH reference
+            # above Detect -- but each against its own reference: placement is
+            # a departure from the locked air, removal a departure from the
+            # target snapshot taken moments earlier (v1.54). The
+            # placement/removal transient (unsettled) is skipped naturally.
             if self._sig_await_deadline is not None and now >= self._sig_await_deadline:
                 self._sig_train_abort('timed out — signature discarded')
                 return
+
+            # Removal is a physical event: lifting the object unsettles the
+            # signal before it re-settles somewhere else. Latch that transient
+            # and require it, because drift never produces one -- it is what
+            # separates "target lifted" from "reference aged" (§17.10), and it
+            # is why a magnitude test alone could not be trusted here.
+            if phase == 'await_remove' and not settled:
+                self._sig_removal_armed = True
+
             if settled:
-                dev = self._current_dev_from_air()
-                if dev is not None:
-                    if phase == 'await_target' and dev > self.sp_sig_detect_mv.value():
+                if phase == 'await_target':
+                    dev = self._current_dev_from_air()
+                    if dev is not None and dev > self.sp_sig_detect_mv.value():
                         self._sig_enter_target()
                         return
-                    # ...but only when auto-detect saw the target go on. If
-                    # placement was forced by Space, dev never exceeded Detect
-                    # in the first place, so dev < Detect here means nothing
-                    # and the operator must Space out of await_remove.
-                    if (phase == 'await_remove' and not self._sig_target_manual
-                            and dev < self.sp_sig_detect_mv.value()):
+                # ...but only when auto-detect saw the target go on. If
+                # placement was forced by Space, the operator is driving the
+                # cycle by hand and must Space out of await_remove too (v1.41).
+                elif not self._sig_target_manual and self._sig_removal_armed:
+                    dev = self._current_dev_from_target()
+                    if dev is not None and dev > self.sp_sig_detect_mv.value():
                         self._sig_enter_air_trail()
                         return
             self._update_sig_train_indicator(settle_mv)
@@ -3507,6 +3578,7 @@ class MainWindow(QMainWindow):
         self._sig_air_ref_ts     = None
         self._sig_await_deadline = None
         self._sig_target_manual  = False
+        self._sig_removal_armed  = False
         self._sig_air_before = None
         self._sig_air_after  = None
         self._sig_target     = None

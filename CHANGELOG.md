@@ -1,3 +1,79 @@
+### src/pimd_classviz.py — v1.54 — FIX removal auto-detect; Air age against the cycle budget
+
+Acts on the concern flagged (deliberately unfixed) at v1.52, now confirmed on the bench:
+the Air-age marker does go red during `await_remove`, so the removal test was being asked
+to resolve a target against more accumulated drift than target.
+
+**Removal auto-detect reworked.** It tested whether the signal had come back to within
+Detect of the **leading air** — a reference by then a whole target-collection window older.
+DESIGN §17.10 measured that as unable to work: at ~50 µV/s a 150 s-old air reference reads
+5.2 mV where a spanner @60 mm reads 2.8 mV, so *removing the object makes |Δ| go up*. The
+new test has two halves, and both are load-bearing:
+
+- **A transient must have happened.** Lifting the object unsettles the signal before it
+  re-settles elsewhere; drift never does. `_sig_removal_armed` latches a settle-loss seen
+  during `await_remove` and the transition requires it. This is what separates "target
+  lifted" from "reference aged", and it is why a magnitude test alone was not enough.
+- **Then a departure from a *fresh* reference.** New `_current_dev_from_target()` compares
+  the settle window against `_sig_target`, the snapshot taken in `_sig_finish_target()`
+  moments before `await_remove` began — seconds old, not minutes. Removal fires on
+  dev > Detect, so both gated phases now share one shape of test (settled, and |Δ| from a
+  fresh reference above Detect), each against its own reference.
+
+The v1.41 manual latch is untouched: a Space-forced placement still requires Space to leave
+`await_remove`. It could now arguably be lifted, since the target snapshot exists however
+the phase was entered — left alone as a separate decision.
+
+**Air age now measures the cycle budget, not the drift budget.** The old limit,
+Detect / 0.05 mV/s, was 10 s at Detect 0.5 — red long before a 120-frame target window could
+finish, so it said nothing. That number described whether a magnitude test against the
+frozen reference could still work; with removal no longer using that reference, nothing
+gates on its age and the useful question became "is this cycle dragging".
+`_sig_cycle_budget_s()` returns what one healthy cycle owes after the lock — two collecting
+windows plus two 30 s guards — using the **measured** sweep rate (`_fps_hz`) where there is
+one, because a 63-cell profile sweeps slower than a 45-cell one and a hardcoded period would
+be wrong on half the profiles. 132 s at 120 frames and ~3.3 Hz. `AIR_DRIFT_MV_PER_S` is
+removed rather than left dead; the figure and its §17.2/§17.10 citation live in the new
+method's docstring.
+
+The Detect gauge gained a third mode to match (`_sig_dev_is_gated()` → `_sig_dev_mode()`,
+returning `air` / `target` / `wander`), so the unit column reads `mV vs target` through
+`await_remove` and the gauge always names the reference it is showing. Green still means
+"the thing you are waiting for", which is now a crossing *above* Detect in both gated
+phases.
+
+Verified offscreen, five state-machine cases driven through `_sig_train_ingest()` frame by
+frame. The decisive one: a target sitting still under 50 µV/s of drift reaches **1.66 mV of
+deviation from its own target reference — well past a 0.5 mV Detect — and the cycle does not
+advance**, because no transient occurred. A magnitude-only fix would have false-fired there.
+Also covered: a real removal (unsettle → re-settle at air) advances to `air_trail`; a knock
+that arms the latch but leaves the target in place does not advance; the v1.41 manual latch
+still blocks auto-advance; and `_sig_finish_target()` clears a stale arm so it cannot carry
+into the next cycle. Gauge-side: all three Detect modes assert the right source, unit text
+and value across a full phase walk, and the Air-age limit tracks Frames and the measured
+rate.
+
+**Bench-confirmed 2026-07-28**: cycles run through place and remove without operator
+intervention, and Air age no longer goes red inside a normal 120-frame cycle. Known
+remaining failure mode, unobserved so far: a target removed smoothly enough never to break
+the Settle gate will not arm the transient latch, and that cycle times out to Space override
+— the same fallback as before, but now this is the specific way it can happen. At the
+working Settle of 0.4 mV σ any real movement should trip it. (2026-07-28)
+
+---
+
+### USAGE.md — v1.18 — classviz v1.50 → v1.54
+
+§5 gains a **Trigger Levels** bullet (the five-gauge column, which thresholds are draggable,
+and what each of the Detect row's three modes measures — the phase-dependent reference was
+the thing that confused a reading on the bench, so it is spelled out) and an **Auto-start**
+bullet. §5's Training paragraph corrected: it still described removal as "Δ back below
+Detect" against the leading air, which v1.54 replaced — the new wording carries the §17.10
+reason, since the old rule looks more sensible than it is. §1 diagram version follows.
+(2026-07-28)
+
+---
+
 ### findings — air wander at the v3 operating point: 0.2–0.3 mV, and the v1.52 fix confirmed
 
 Bench check of the classviz v1.52 Detect gauge, `cal_63_air_bat_v3`, pack at **21.59 V**:
