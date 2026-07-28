@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.19
+# PIMD — Usage Guide (USAGE.md) v1.21
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,14 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.21 2026-07-28 classviz v1.56 → v1.57. §5's Training paragraph: the central-60%
+                trim is now named, A carries the surviving count, and Frames
+                defaults to 100 (below which every capture is stamped 'short').
+                §1 diagram.
+v1.20 2026-07-28 classviz v1.55 → v1.56. §5's Training paragraph rewritten around
+                the A/B status text: each state now names the gate holding it up
+                (σ vs Settle, Δ vs Detect) and the frame count, so a stalled
+                phase says why. §1 diagram.
 v1.19 2026-07-28 classviz v1.54 → v1.55. §5's Training paragraph: a Space-forced
                 placement now auto-detects removal as well (the v1.41 latch is
                 lifted), with Space still the fallback for a target too weak for
@@ -109,7 +117,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       ├─► src/pimd_delaycal.py (v1.29)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
       ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
-      └─► src/pimd_classviz.py (v1.55)      — Mode 2 heatmap; loads & runs saved
+      └─► src/pimd_classviz.py (v1.57)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │        └─ uses src/pimd_shape.py (v1) — shared feature maths
                      │              (family / crossing / decay persistence)
@@ -279,9 +287,16 @@ validated against the target registry.
   medium, repeat_idx — a per-parameter green/amber/red readout and Save/Delete)
   and a **Training** group
   (v1.35): an automated auto-detect capture cycle. Press **Start Training**; two
-  status areas show **A** = state, naming air vs target (yellow SETTLING → blue
-  COLLECTING with a frames-left countdown → green ACQUIRED; the leading air keeps
-  rolling, the target is held once captured) and **B** = the next instruction.
+  status areas show **A** = state and **B** = the next instruction. Since v1.56 both
+  carry the numbers behind the state, so a phase that is not advancing says why:
+  **A** pairs the live measurement with the gate currently blocking it —
+  `SETTLING air — σ0.512 > 0.400` while unsettled, `WAITING target — Δ0.028 < 0.500`
+  once settled but short of Detect, `COLLECTING target — 47/120 (28 central)` while a
+  window fills, `HOLDING target — lift it to release` when nothing has moved yet, then
+  `MOVING`/`MOVED` through a removal. **B** carries the instruction plus either the
+  guard countdown or the frame count. The colour ladder is unchanged (yellow settling
+  or waiting → blue collecting → green acquired); the leading air keeps rolling and the
+  target is held once captured.
   The place/remove countdowns in **B** flash (red in the final 5 s) with a beep
   when each prompt appears. Once the leading air is green, B says **Press Space** — the one
   Space press per cycle locks the last N frames as the leading air and starts a
@@ -307,7 +322,15 @@ validated against the target registry.
   override checkbox, because a target too weak to clear Detect going on will not
   clear it coming off either.
   Collection stays settledness-gated (mean rolling σ ≤ **Settle ≤ mV**, default
-  1.0) and glitch-excluded. Saves append to
+  1.0) and glitch-excluded.
+  **Not every collected frame is used (v1.57).** `pimd_features` trims 20% off each
+  end of the window — target *and* both air anchors — before taking stats
+  (`CENTRAL_FRACTION` 0.60), so 120 frames give 72 central. The `(N central)` in **A**
+  is what would survive if the window were committed *now*, so it doubles as the
+  warning before a Space force-advance; the row stays yellow until that count clears
+  `MIN_CENTRAL_FRAMES` (60), then goes blue and green. **Frames** therefore defaults to
+  **100**, the smallest value whose central 60% reaches 60 — below that the spinbox
+  turns amber, because every capture at that setting is stamped `short` in the corpus. Saves append to
   `src/data/corpora/gui_signatures_*.csv` with full provenance (profile_sha8,
   fw_version, tool_version, supply — `battery|psu`).
   - **Trigger Levels (v1.51–v1.54).** A five-gauge column at the top-left of the

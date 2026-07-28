@@ -1,3 +1,143 @@
+### src/pimd_classviz.py — v1.57 — show the surviving central-frame count; Frames default 60 → 100
+
+Prompted by the question "aren't some of those 120 profiling frames discarded?". They are —
+`pimd_features.CENTRAL_FRACTION` is 0.60, so `central_frames()` trims **20% off each end**
+(not 25%) of the target window *and* both air anchors before stats. At 120 frames, 72 feed
+the result. Nothing on screen said so.
+
+It is not a live "profiling but not sampling" phase, and the display does not pretend
+otherwise: every frame is sampled and buffered, and the trim is applied retrospectively to
+the finished window in `_compute_sig_stats()`. Which frames get dropped depends on where the
+window ends up, so the only honest live number is **how many of the frames held right now
+would survive** — which is also precisely the warning wanted before a Space force-advance.
+A now reads `COLLECTING target — 47/120 (28 central)`, and the colour follows that count:
+yellow below `MIN_CENTRAL_FRAMES`, then the existing blue/green. That extends the ladder
+rather than fighting it — yellow already meant "not ready" — so a phase reads yellow → blue
+→ green as frames bank up, and an `ACQUIRED` row still yellow means the Frames setting
+itself is too low. New `_central_frame_count()` routes through
+`pimd_features.central_frames()` with the same throwaway `Plateau` the stats path builds,
+so the trim keeps one definition and cannot drift from the corpus builder.
+
+**A defect found while checking it.** `quality_flags()` stamps `short` when
+`n_central < MIN_CENTRAL_FRAMES` (60), and the Training Frames default *was*
+`MIN_CENTRAL_FRAMES` itself — 60 frames trims to 36 central, below the very constant it was
+taken from, so a default-Frames capture was stamped `short` every single time. The Family
+Plane scratch path had already solved this at v1.46 by sizing its window to
+`ceil(MIN_CENTRAL_FRAMES / CENTRAL_FRACTION)` = 100, with a comment naming the problem; the
+Training group never got the same treatment. That expression is now the named constant
+`SIG_CAPTURE_N_DEFAULT`, used as the Frames default (fresh settings only — a persisted value
+still wins, so an existing 120 is untouched) and at the scratch call site in place of the
+inline `ceil`. Below it the spinbox turns amber and its tooltip states the arithmetic for the
+current value (`60 frames give 36 central`) plus the consequence. Not blocked: a deliberately
+short capture is still allowed, just marked.
+
+Flagged, not changed: `_sig_can_commit()` still accepts any window of ≥2 frames, so a Space
+force-advance can commit a tiny capture — the likeliest origin of the short capture in the v3
+corpus. The live count now warns before the press, and hard-blocking an override is a
+separate decision.
+
+Verified offscreen. `_central_frame_count()` is cross-checked against
+`pimd_features.central_frames()` directly for 0/2/10/60/100/120 → 0/2/6/36/60/72, with the
+old default (60 → 36 → `short`) and the new one (100 → 60 → `ok`) asserted as the defect and
+its fix. The Frames warning is checked at 60/99/100/120 for both the style and the tooltip
+numbers. The label walk asserts `(N central)` tracks the buffer and that the colour crosses
+exactly at `MIN_CENTRAL_FRAMES` — observed yellow at 1/120 (1 central), blue at 100/120
+(60 central). All six harnesses pass under `-W error::DeprecationWarning`; longest label is
+still 36 characters against the 52 ceiling. **Not yet run on the bench** — the check there is
+that a 120-frame cycle reads `(72 central)` when full and saves `quality=ok`, and a 60-frame
+one stays yellow at `ACQUIRED` and saves `short`. (2026-07-28)
+
+---
+
+### findings — one capture in the v3 corpus is stamped 'short'; the Frames default caused it
+
+Quality-flag census of the two tracked corpora, prompted by the v1.57 investigation:
+
+| corpus | rows | quality |
+|---|---|---|
+| `gui_signatures_targets_v1_20260723.csv` | 4158 | 2898 ok, 1260 noisy, **0 short** |
+| `gui_signatures_tragets_v3_20260727_171813.csv` | 819 | 756 ok, **63 short** |
+
+63 rows is exactly one capture at 63 cells, so **one of that session's 13 captures** carries
+the flag. The v1 corpus has none, so whatever produced it is new to the v3 session.
+
+Two candidate causes, not separated: the Frames default of 60 (which cannot clear
+`MIN_CENTRAL_FRAMES` at all — see the v1.57 entry), or a Space force-advance committing a
+partly-filled window, which `_sig_can_commit()` permits down to 2 frames. Either way the flag
+was only discoverable after the save; v1.57 surfaces the count live so the next one is
+visible before committing.
+
+Noted, not acted on: that corpus filename misspells "targets" as **`tragets`**. It is
+captured data carrying provenance, so renaming is the owner's call, not a tidy-up.
+(2026-07-28)
+
+---
+
+### USAGE.md — v1.21 — classviz v1.56 → v1.57
+
+§5's Training paragraph gains the central-60% trim: what it discards, what `(N central)`
+means and why it is the pre-commit warning, the yellow→blue→green ladder, and the Frames
+default of 100 with the reason for the amber warning below it. §1 diagram version follows.
+(2026-07-28)
+
+---
+
+### src/pimd_classviz.py — v1.56 — Training A/B labels name the gate holding each phase up
+
+The two await phases each rendered one fixed string — `WAITING for target…` and `ACQUIRED
+target — captured, remove now` — so an operator watching a 30 s countdown had no way to tell
+whether the rig was still settling, or settled and simply short of Detect. Those are
+different problems with different fixes (stop touching the bench / move the target closer),
+and nothing on screen distinguished them. Between "place target now" and "profiling target"
+there was no visible state at all.
+
+**A** now pairs the live measurement with whichever gate is currently blocking the
+transition, and **B** keeps the instruction plus either the guard countdown or the frame
+count:
+
+| state | A | B |
+|---|---|---|
+| leading air, unsettled | `SETTLING air — σ0.512 > 0.400` | `Acquiring leading air — waiting for settle` |
+| air ready | `ACQUIRED air — 20/20 (rolling)` | `Press Space` |
+| awaiting target, settled | `WAITING target — Δ0.028 < 0.500` | `Place target now — need Δ≥0.50 mV — 30s` |
+| awaiting target, disturbed | `MOVING — σ19.153 > 0.400` | as above |
+| profiling | `COLLECTING target — 47/120 (73 left)` | `Profiling target — 47/120 frames` |
+| awaiting removal, untouched | `HOLDING target — lift it to release` | `Remove target now — 30s` |
+| awaiting removal, disturbed | `MOVING — σ19.682 > 0.400` | as above |
+| awaiting removal, re-settled short | `MOVED — Δ0.119 < 0.500` | as above |
+
+`HOLDING target` is the v1.54 transient latch made visible: until something physically moves,
+removal cannot fire whatever the magnitude reads, and the label now says so rather than
+implying the app is waiting on a threshold. `_update_sig_train_indicator()` takes the
+deviation alongside the settle value; `_sig_train_ingest()` passes what it already computed,
+and it stays `None` while unsettled, which is what selects the σ form over the Δ form. The
+settle value falls back to measuring itself when a phase-transition call site does not supply
+one — otherwise every state change flashed a placeholder, which is the failure being fixed.
+
+Two wording decisions worth recording. `await_target`'s disturbed state is `MOVING`, not
+`SETTLING`: the collecting phases already use `SETTLING <subject>` and a bare `SETTLING`
+read as the same state. And the filling note is `waiting for settle`, not "window cleared" —
+the status is identical on a first fill, where nothing was cleared.
+
+Verified offscreen by walking a synthetic cycle through `_sig_train_ingest()` frame by frame
+and asserting the label at each of ten states an operator can sit in, including that A names
+σ-vs-Settle while unsettled and Δ-vs-Detect once settled, and that the manual-placement
+wording survives. Longest label rendered is 36 characters, checked against a 52-character
+ceiling so neither label can widen the Training group. One fixture bug found and fixed on the
+way (the synthetic clock outran the wall-clock guard deadline, aborting the cycle mid-walk),
+which is why the walk now asserts the phase after locking rather than trusting it.
+(2026-07-28)
+
+---
+
+### USAGE.md — v1.20 — classviz v1.55 → v1.56
+
+§5's Training paragraph rewritten around the A/B status text: each state now names the gate
+holding it up, with the actual label strings quoted, since the point of the change is that
+the operator reads these rather than guesses. §1 diagram version follows. (2026-07-28)
+
+---
+
 ### src/pimd_classviz.py — v1.55 — lift the v1.41 manual latch on removal auto-detect
 
 v1.41 blocked removal auto-detect whenever placement had been forced by Space. That was

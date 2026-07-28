@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.55
+# PIMD Signature Visualiser (ClassViz) v1.57
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,8 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.57 show the central-frame count that survives the trim; Frames default 60 -> 100
+#   v1.56 Training A/B labels name the gate holding each phase up (σ/Δ vs threshold)
 #   v1.55 lift the v1.41 manual latch: Space-forced placements auto-detect removal too
 #   v1.54 FIX removal auto-detect: transient + fresh target ref; Air age = cycle budget
 #   v1.53 auto-connect + run the last profile at launch; gauge row spacing; np.bool_ warning
@@ -120,7 +122,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.55'
+APP_VERSION = '1.57'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -133,6 +135,17 @@ AUTOSTART_PROFILE_MS = 600
 # _fps_hz readout needs a second of streaming first). ~3.3 Hz is the 63-cell
 # sweep -- the same figure behind "a 50-frame window is 15 s at the sweep rate".
 SWEEP_PERIOD_FALLBACK_S = 0.3
+
+# Smallest Training "Frames" value whose central 60% still clears
+# MIN_CENTRAL_FRAMES, so a full window is not stamped 'short' by
+# quality_flags(). pimd_features trims 20% off each end of every plateau
+# (CENTRAL_FRACTION) before taking stats, so only 60 of 100 frames feed them.
+# This used to default to MIN_CENTRAL_FRAMES itself -- 60 frames, trimmed to 36
+# central, which is BELOW the 60 the flag tests against, so a default-Frames
+# capture was stamped 'short' every time (v1.57). Same expression the Family
+# Plane scratch capture has sized its window with since v1.46.
+SIG_CAPTURE_N_DEFAULT = int(math.ceil(
+    pimd_features.MIN_CENTRAL_FRAMES / pimd_features.CENTRAL_FRACTION))   # 100
 
 # -- Analysis heatmap colorbar-as-range-slider (v1.45) ----------------------
 # ColorBarItem's internal coordinate space is a fixed 0..256 across the bar,
@@ -595,7 +608,7 @@ class MainWindow(QMainWindow):
         # Space press locks the leading air; target placement/removal are
         # auto-detected; the trailing air rolls straight into the next cycle's
         # leading air (same rolling deque).
-        self._sig_capture_n    = pimd_features.MIN_CENTRAL_FRAMES
+        self._sig_capture_n    = SIG_CAPTURE_N_DEFAULT
         self._analysis_training_active = False
         # phase: 'air_lead' | 'await_target' | 'target' | 'await_remove' | 'air_trail'
         self._sig_train_phase  = 'air_lead'
@@ -1649,9 +1662,9 @@ class MainWindow(QMainWindow):
         self.sp_sig_capture_n = QSpinBox()
         self.sp_sig_capture_n.setRange(10, 2000)
         self.sp_sig_capture_n.setValue(self._sig_capture_n)
-        self.sp_sig_capture_n.setToolTip(
-            'Frames per capture window. Applied at the next phase change or '
-            'settle-loss restart, not mid-window.')
+        self.sp_sig_capture_n.valueChanged.connect(self._update_sig_capture_n_warning)
+        self._sig_capture_n_last_style = None
+        self._update_sig_capture_n_warning(self.sp_sig_capture_n.value())
         row1.addWidget(self.sp_sig_capture_n)
 
         row1.addWidget(QLabel('Settle ≤ (mV):'))
@@ -1726,6 +1739,31 @@ class MainWindow(QMainWindow):
 
         self._update_sig_capture_gating()
         return box
+
+    def _update_sig_capture_n_warning(self, n):
+        """Frames below SIG_CAPTURE_N_DEFAULT cannot produce a capture that
+        clears MIN_CENTRAL_FRAMES, so every save at that setting is stamped
+        'short' by quality_flags(). Say so at the setting, not afterwards in
+        the corpus. Amber, not blocked -- a deliberately short capture is still
+        allowed, just marked. Style churn is guarded because this fires on
+        every keystroke in the spinbox."""
+        central = self._central_frame_count(n)
+        short = central < pimd_features.MIN_CENTRAL_FRAMES
+        tip = ('Frames per capture window. Applied at the next phase change or '
+               'settle-loss restart, not mid-window.\n\n'
+               'pimd_features trims {0:.0%} off each end before taking stats '
+               '(CENTRAL_FRACTION), so {1} frames give {2} central — the count '
+               'quality_flags() tests against MIN_CENTRAL_FRAMES ({3}).').format(
+                   (1 - pimd_features.CENTRAL_FRACTION) / 2, n, central,
+                   pimd_features.MIN_CENTRAL_FRAMES)
+        if short:
+            tip += ('\n\n⚠ Below {0} frames every capture is stamped '
+                    "'short'.".format(SIG_CAPTURE_N_DEFAULT))
+        self.sp_sig_capture_n.setToolTip(tip)
+        style = self.MY_YELLOW if short else ''
+        if style != self._sig_capture_n_last_style:
+            self.sp_sig_capture_n.setStyleSheet(style)
+            self._sig_capture_n_last_style = style
 
     def _build_sig_row3_readout_save(self, v):
         # Green-when thresholds for the readout colouring below (v1.38).
@@ -3322,6 +3360,25 @@ class MainWindow(QMainWindow):
         self._sig_train_status = 'settling'
         self._update_sig_train_indicator()
 
+    @staticmethod
+    def _central_frame_count(n_frames):
+        """How many of `n_frames` survive pimd_features' central trim -- the
+        count that actually feeds the stats, and the one quality_flags() tests
+        against MIN_CENTRAL_FRAMES.
+
+        Routed through central_frames() with the same throwaway Plateau that
+        _compute_sig_stats() builds, rather than re-deriving the arithmetic, so
+        the trim has one definition and cannot drift from what the corpus
+        builder does to the very same window."""
+        if n_frames <= 0:
+            return 0
+        plateau = pimd_features.Plateau(
+            target_id='', short_name='', distance_mm=None, long_axis='na', face_normal='na',
+            offset_x_mm=0, offset_y_mm=0, medium='air', repeat_idx=1, notes='',
+            is_air=False, start_idx=0, end_idx=int(n_frames))
+        c0, c1 = pimd_features.central_frames(plateau)
+        return c1 - c0
+
     def _current_settle_mv(self, n_win=None):
         """Mean per-channel rolling std in mV over a window of frames -- the
         v1.31 settle-gate metric, unchanged. None if <2 frames buffered
@@ -3428,6 +3485,7 @@ class MainWindow(QMainWindow):
             if phase == 'await_remove' and not settled:
                 self._sig_removal_armed = True
 
+            dev = None      # stays None while unsettled -- the label shows σ then
             if settled:
                 if phase == 'await_target':
                     dev = self._current_dev_from_air()
@@ -3446,7 +3504,7 @@ class MainWindow(QMainWindow):
                     if dev is not None and dev > self.sp_sig_detect_mv.value():
                         self._sig_enter_air_trail()
                         return
-            self._update_sig_train_indicator(settle_mv)
+            self._update_sig_train_indicator(settle_mv, dev)
             return
 
         # Collecting phases (air_lead / target / air_trail).
@@ -3471,9 +3529,18 @@ class MainWindow(QMainWindow):
             return
         self._update_sig_train_indicator(settle_mv)
 
-    def _update_sig_train_indicator(self, settle_mv=None):
+    def _update_sig_train_indicator(self, settle_mv=None, dev=None):
         """Renders A (colored status) and B (instruction). Stylesheet is only
-        touched on state change; text may update every frame."""
+        touched on state change; text may update every frame.
+
+        A carries the live measurement against the gate that is currently
+        holding the cycle up, so a stalled phase says *why* it is stalled: σ
+        against Settle while unsettled, |Δ| against Detect once settled. The
+        two await phases used to render one fixed string each ('WAITING for
+        target…'), which left the operator watching a countdown with no idea
+        whether the rig was still settling, or settled and just short of
+        Detect. B stays the instruction, plus the countdown or the frame count
+        for whichever window is filling (v1.56)."""
         if not self._analysis_training_active:
             self.lbl_sig_train_status.setText('Idle — press Start Training')
             self.lbl_sig_train_status.setStyleSheet('')
@@ -3485,22 +3552,70 @@ class MainWindow(QMainWindow):
         phase = self._sig_train_phase
         # subject for the collecting-phase labels (air_lead/target/air_trail)
         subj = 'target' if phase == 'target' else 'air'
+        settle_thr = self.sp_sig_settle_mv.value()
+        detect_thr = self.sp_sig_detect_mv.value()
+
+        def vs_settle():
+            """'σ0.412 > 0.400' -- the gate that is holding the phase up.
+
+            Falls back to measuring it: the phase-transition call sites don't
+            carry a settle value, and a label reading 'σ —' on every state
+            change is exactly the uninformative thing v1.56 is fixing. Only the
+            rare non-ingest callers pay for the extra reduction."""
+            s = settle_mv if settle_mv is not None else self._current_settle_mv()
+            if s is None:
+                return 'σ — (filling)'
+            return 'σ{0:.3f} > {1:.3f}'.format(s, settle_thr)
+
+        def vs_detect():
+            if dev is None:
+                return 'Δ — '
+            return 'Δ{0:.3f} < {1:.3f}'.format(dev, detect_thr)
+
         # -- A: status colour + text --
         if phase == 'await_target':
-            a_text, style = 'WAITING for target…', self.MY_YELLOW
-        elif phase == 'await_remove':
-            a_text, style = 'ACQUIRED target — captured, remove now', self.MY_GREEN
-        elif self._sig_train_status == 'settling':
-            a_text = 'SETTLING {0}'.format(subj) + (
-                '' if settle_mv is None else ' — {0:.3f} mV'.format(settle_mv))
+            # Settled-but-short-of-Detect and still-settling are different
+            # problems with different fixes (move it closer / stop touching the
+            # bench), and the countdown alone cannot tell them apart.
+            # MOVING/WAITING here, mirroring MOVING/MOVED in await_remove --
+            # and never a bare 'SETTLING', which the collecting phases use with
+            # a subject ('SETTLING air') and would read as the same state.
+            if dev is None:
+                a_text = 'MOVING — ' + vs_settle()
+            else:
+                a_text = 'WAITING target — ' + vs_detect()
             style = self.MY_YELLOW
-        elif self._sig_train_status == 'collecting':
+        elif phase == 'await_remove':
+            if not self._sig_removal_armed:
+                # No transient yet: nothing has physically moved (v1.54).
+                a_text, style = 'HOLDING target — lift it to release', self.MY_GREEN
+            elif dev is None:
+                a_text, style = 'MOVING — ' + vs_settle(), self.MY_YELLOW
+            else:
+                a_text, style = 'MOVED — ' + vs_detect(), self.MY_YELLOW
+        elif self._sig_train_status == 'settling':
+            a_text = 'SETTLING {0} — {1}'.format(subj, vs_settle())
+            style = self.MY_YELLOW
+        else:
+            # '(N central)' is what survives pimd_features' 20/20 trim of the
+            # window as it stands RIGHT NOW -- not the projected final count.
+            # That makes it the answer to "what do I get if I Space out of here",
+            # which is how a capture ends up stamped 'short'. Yellow while that
+            # count is under MIN_CENTRAL_FRAMES extends the existing ladder
+            # rather than fighting it (yellow already means not ready), so the
+            # phase reads yellow -> blue -> green as frames bank up. An ACQUIRED
+            # row still yellow means the Frames setting itself is too low.
             buf = self._sig_train_buf
-            a_text = 'COLLECTING {0} — {1} left'.format(subj, buf.maxlen - len(buf))
-            style = self.MY_BLUE
-        else:   # ready
-            a_text = 'ACQUIRED {0} — {1}/{1} (rolling)'.format(subj, self._sig_train_buf.maxlen)
-            style = self.MY_GREEN
+            central = self._central_frame_count(len(buf))
+            short = central < pimd_features.MIN_CENTRAL_FRAMES
+            if self._sig_train_status == 'collecting':
+                a_text = 'COLLECTING {0} — {1}/{2} ({3} central)'.format(
+                    subj, len(buf), buf.maxlen, central)
+                style = self.MY_YELLOW if short else self.MY_BLUE
+            else:   # ready
+                a_text = 'ACQUIRED {0} — {1}/{1} ({2} central)'.format(
+                    subj, buf.maxlen, central)
+                style = self.MY_YELLOW if short else self.MY_GREEN
         self.lbl_sig_train_status.setText(a_text)
         if style != self._sig_train_last_style:
             self.lbl_sig_train_status.setStyleSheet(style)
@@ -3509,14 +3624,26 @@ class MainWindow(QMainWindow):
         # -- B: instruction (decision overlays air_lead; the place/remove
         # countdowns flash yellow, then red in the final 5 s) --
         b_style = ''
+
+        def filling(label):
+            """'<label> — 47/120 frames', or a settle note when the count is
+            not the reason it is slow. Deliberately not 'window cleared': the
+            status is the same on a first fill, where nothing was cleared."""
+            buf = self._sig_train_buf
+            if buf is None:
+                return label
+            if self._sig_train_status == 'settling':
+                return '{0} — waiting for settle'.format(label)
+            return '{0} — {1}/{2} frames'.format(label, len(buf), buf.maxlen)
+
         if self._sig_decide_pending:
             b_text = 'Save signature?'
         elif phase == 'await_target':
             rem = self._sig_await_remaining()
-            b_text = 'Place target now — {0}s'.format(rem)
+            b_text = 'Place target now — need Δ≥{0:.2f} mV — {1}s'.format(detect_thr, rem)
             b_style = self._await_flash_style(rem)
         elif phase == 'target':
-            b_text = 'Profiling target…'
+            b_text = filling('Profiling target')
         elif phase == 'await_remove':
             rem = self._sig_await_remaining()
             # Auto-detect is attempted either way since v1.55, but a manual
@@ -3526,11 +3653,11 @@ class MainWindow(QMainWindow):
                       else 'Remove target now — {0}s').format(rem)
             b_style = self._await_flash_style(rem)
         elif phase == 'air_trail':
-            b_text = 'Final air…'
+            b_text = filling('Final air')
         elif self._sig_train_status == 'ready':   # air_lead ready
             b_text = 'Press Space'
         else:
-            b_text = 'Acquiring leading air…'
+            b_text = filling('Acquiring leading air')
         self.lbl_sig_train_instr.setText(b_text)
         self.lbl_sig_train_instr.setStyleSheet(b_style)
 
@@ -6127,7 +6254,7 @@ class MainWindow(QMainWindow):
         # was reading 'noisy' because it straddled the placement transient),
         # and a patient capture now clears MIN_CENTRAL_FRAMES honestly instead
         # of always being stamped 'short'.
-        n = int(math.ceil(pimd_features.MIN_CENTRAL_FRAMES / pimd_features.CENTRAL_FRACTION))
+        n = SIG_CAPTURE_N_DEFAULT
         since = self._shape_air_ref_ts or 0.0
         recent = [(ts, arr) for ts, arr in self._rolling_buf if ts >= since][-n:]
         if len(recent) < 2:
@@ -7150,7 +7277,7 @@ class MainWindow(QMainWindow):
             self.cb_strip_scale_auto.setChecked(bool(s.get('analysis_strip_scale_auto', True)))
             self.sp_strip_scale_manual.setValue(float(s.get('analysis_strip_scale_manual', 5.0)))
 
-            self.sp_sig_capture_n.setValue(int(s.get('sig_capture_n', pimd_features.MIN_CENTRAL_FRAMES)))
+            self.sp_sig_capture_n.setValue(int(s.get('sig_capture_n', SIG_CAPTURE_N_DEFAULT)))
             self.sp_sig_settle_mv.setValue(float(s.get('sig_settle_mv', 1.0)))
             self.sp_sig_detect_mv.setValue(float(s.get('sig_detect_mv', 0.5)))
             self.cb_sig_train_override.setChecked(bool(s.get('sig_train_override', True)))
