@@ -1,3 +1,234 @@
+### findings — air wander at the v3 operating point: 0.2–0.3 mV, and the v1.52 fix confirmed
+
+Bench check of the classviz v1.52 Detect gauge, `cal_63_air_bat_v3`, pack at **21.59 V**:
+clean air with no cycle running reads **0.2–0.3 mV steady** on the `mV wander` reading, and
+does not climb. That closes the loop on the v1.52 diagnosis — the same rig and the same
+setting read ~10 mV and creeping under v1.51, which was a Training air reference roughly
+200 s old being displayed as a live deviation, not the detector.
+
+Two things worth recording beyond the fix.
+
+**The Detect margin is wider than assumed.** 0.2–0.3 mV against the working Detect of
+0.5 mV is a factor of ~2, and better than the ~0.8 mV predicted from the §17.2 50 µV/s drift
+rate over a 50-frame (~16 s) window. Either the settle window in use is shorter than 50
+frames, or drift at this operating point is below the §17.2 figure — that figure is a
+pre-enclosure number on the §14 re-measurement backlog. Not separated here.
+
+**Pack was at 21.59 V.** §17.10's regulation result — coil drive constant, state of charge
+not reaching the operating point — is measured down to 23.05 V, and §12's working floor is
+21.0 V. A clean, steady air reading at 21.59 V is consistent with regulation still holding
+most of the way to that floor, but **it is not the same measurement**: §17.10's evidence is
+the direction of per-band delay shift under a falling pack, and air wander is drift plus
+noise over one window. It does not extend the regulated-window result on its own. The
+outstanding check remains the unmeasured pulse-instant rail sag (§12). (2026-07-28)
+
+---
+
+### src/data/targets/targets_v3.csv — registry — solder stick added
+
+New row `Sn_Pb_solder_stick_01` — solder stick, `rod`, 145 × 8 × 8 mm, solid (`wall_thickness_mm`
+0), `closed_loop` n, `magnet_test` none, `material_class` solder_sn_pb. **Mass 56 g, weighed**
+— it was first entered as a 62 g geometric estimate (a ø8 × 145 cylinder at the
+`pimd_target_check.py` table density of 8.5 g/cm³) and that placeholder is now replaced by
+the measured value.
+
+Noted, not acted on: 56 g over the 7.288 cm³ cylinder volume implies **7.68 g/cm³**, against
+the 8.5 the registry's density table carries for `solder_sn_pb` — which is what the
+mass-plausibility check tests against. It stays well inside the check (the solid *bounding
+box* at 8.5 is 78.9 g, and the row passes with 0 errors), so nothing is flagged. The gap is
+about 10 %, consistent with a higher-tin alloy than Sn60/Pb40 — pure tin is 7.31, Sn96/Ag
+7.4 — or with a stick slightly under its nominal 8 mm. Alloy is unconfirmed; the registry
+records the object as `solder_sn_pb` on the owner's identification, and the measured mass
+governs regardless. (2026-07-28)
+
+---
+
+### src/pimd_classviz.py — v1.53 — auto-start at launch; gauge row spacing; np.bool_ warning
+
+**Auto-start.** The app now connects and runs the remembered profile on launch, instead of
+waiting for Connect and then Load & Run — two clicks that were the invariable opening move
+of every session. `_autostart()` fires from a `QTimer.singleShot(0, …)` in the constructor,
+so the window is up and the event loop running before any serial I/O, then defers the
+profile send by `AUTOSTART_PROFILE_MS` (600 ms) so the `D`/`Q`/`G` burst does not race the
+`E`/`V`/`Q4` connect handshake — the same beat an operator leaves between the two clicks.
+Nothing is forced: no remembered port, a port that will not open, or no remembered profile
+each leave the app sitting exactly as it did before, with the reason in the status bar and
+the Connect button reddened by the existing `connect_port()` path.
+`_autostart_run_profile()` re-checks the port because the operator can disconnect inside the
+delay window.
+
+**Gauge row spacing.** The gauge column's row spacing goes 1 px → 8 px. With the v1.52
+two-line rows (name over readout) against a boxed plot, 1 px ran the five rows together into
+a single block and left the eye hunting for the boundaries. Analysis row 1 opens at 320 px
+to fit five 46 px rows plus the new gaps and the group title.
+
+**`np.bool_` DeprecationWarning.** `_set_gauge()` computed `has_value` as the bare
+`np.isfinite(value)` result — an `np.bool_`, not a `bool` — and fed it through to
+`QGraphicsItem.setVisible()`, which takes it as an *index*. NumPy warns on that, and at the
+~30 Hz redraw rate across five gauges it was thousands of `DeprecationWarning` lines per
+session on the console. Wrapped in `bool()`. A scan of every `setVisible`/`setEnabled`/
+`setChecked` call site for other numpy-bool leaks found none.
+
+**Also fixes a defect in v1.52 (never committed, caught on the render).** The Detect gauge
+painted its verdict `good_above=True` in both modes, so quiet air — 0.049 mV of wander
+against a 1.0 mV Detect, the *ideal* state — rendered red. The verdict direction has to
+follow the mode, because "good" does: gated, dev at or above Detect means the target
+registered; in wander mode the air moving *less* than Detect is what you want, because that
+is the trigger level clearing the noise floor, which is the entire reason to look at the
+row. Now `good_above=gated`.
+
+Verified offscreen: the v1.52 suite re-run under `-W error::DeprecationWarning` passes, which
+is the warning fix under test rather than eyeballed; new assertions cover all four
+verdict-direction cases (quiet air green, air past Detect red, gated dev under Detect red,
+gated dev over Detect green); a new autostart suite covers no-port, unopenable-port,
+disconnected-inside-the-delay and no-saved-profile degradation plus the happy path, asserting
+the exact command sequence `E,V,Q4` then `E, D…, Q5, G` onto `cal_63_air_bat_v3`. Both gauge
+columns re-rendered and inspected. **Auto-start is not yet exercised against the board** —
+the 600 ms handshake gap is reasoned from the manual click cadence, not measured; if the
+first frames arrive on the wrong profile, that constant is the thing to raise. (2026-07-28)
+
+---
+
+### src/pimd_classviz.py — v1.52 — FIX Detect gauge read a stale air reference; Air age gauge
+
+**Bench report:** the v1.51 Detect gauge read ~10 mV in clean air with no target and crept
+steadily higher, against a Detect setting of 0.5 mV that has always worked. Settle read
+0.2 mV σ at the same time. Diagnosed as a display fault, not a detector change.
+
+`_current_dev_from_air()` measures mean per-channel |Δ| against `_sig_air_ref`, the leading
+air a Training cycle locked. That reference is cleared on Start Training, Stop and
+timeout-abort — but **`_sig_finish_air_trail()` never cleared it**, so after a normal cycle
+completion it survived into the next cycle's `air_lead` and kept ageing. Harmless while
+nothing read it: the state machine consults dev only in `await_target`/`await_remove`, both
+entered from `_sig_lock_leading_air()` and so always against a fresh lock. v1.51 then put
+the number on screen and called it every redraw regardless of phase.
+
+DESIGN §17.10 already quantifies the result: at the §17.2 ~50 µV/s rate an air reference
+accumulates 0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at 150 s. **10 mV ⇒ a reference
+about 200 s old.** Settle at 0.2 mV σ corroborates it — the rig is quiet frame to frame, so
+that was a slow ramp, not noise. "Sometimes it behaves as previously" fits too: straight
+after a Space lock, or after an abort/Stop, the reference is fresh or `None`. Detect 0.5 mV
+was never wrong and the placement path is unchanged.
+
+Three fixes. **(1)** `_sig_finish_air_trail()` now clears `_sig_air_ref` — the reference dies
+with its cycle rather than being routed around. **(2)** The Detect gauge picks its source by
+phase (`_sig_dev_is_gated()`): in `await_target`/`await_remove` it shows
+`_current_dev_from_air()`, the very number being tested; everywhere else it shows a new
+`_current_air_wander_mv()` — mean per-channel |Δ| between the current settle window and the
+one immediately before it. Same reduction and units, so it is directly comparable to the
+Detect setting, but it reads the drift *rate* rather than an accumulating total: a planted
+0.05 mV/s ramp holds steady at ~0.48 mV instead of climbing without limit. The unit text
+names which is on screen (`mV vs air` / `mV wander`) — reading "vs air" when nothing was
+locked was the whole confusion. `_current_dev_from_air()` is deliberately **not** refactored
+into a shared window helper: it is on the state machine's gating hot path, and a few
+duplicated lines are cheaper than touching it. **(3)** New fifth gauge, **Air age**, with
+`_sig_air_ref_ts` recorded at the lock. Read-only marker (binding `None` — the limit is
+derived, not a setting) at the drift budget `Detect / AIR_DRIFT_MV_PER_S`, the age at which
+thermal drift alone equals the Detect threshold. New module constant
+`AIR_DRIFT_MV_PER_S = 0.05` carries the §17.2/§17.10 citation so the figure is auditable.
+
+**Flagged, not changed.** `_sig_train_ingest()` detects target *removal* by the same
+magnitude test against the leading-air reference, which by then is a whole
+target-collection window old. §17.10 measured this head-on — "a spanner @60 mm reads |Δ|
+2.8 mV while 150 s of drift reads 5.2 mV, so removing the object makes |Δ| go up. No
+magnitude test against a frozen reference can detect removal, which is why auto-release was
+abandoned by direction." That is a plausible mechanism for removal timeouts and it predates
+v1.51 (v1.34+). Left alone: the 30 s guard and Space override are the existing fallback, and
+this wants a bench observation before a design change. The Air-age gauge is what will show
+whether it is actually biting — if the age marker is red before the target comes off, the
+removal test cannot succeed on that cycle.
+
+Layout, both gauge columns: the numeric readout moved from its own column right of the bar
+to a second line under the row label, which gives every bar ~110 px back (~130 px → ~230 px
+at a 300 px column) and stops the tick labels colliding. One uniform left-block width still
+keeps all the bars starting at the same x, now measured on the whole two-line block rather
+than the label alone; the separate unit-width pass is gone since nothing follows the bar.
+Analysis row 1 opens at 300 px for the fifth row.
+
+Verified offscreen (no board): flat air reads 0.04 mV wander and stays there; a planted
+0.05 mV/s ramp reads 0.48 mV steady across three window-lengths rather than accumulating —
+the reported regression, inverted into a test; the unit text and value switch to
+`_current_dev_from_air()` in exactly `await_target`/`await_remove` across a full phase walk;
+a planted +4 mV step reads 4.008 mV against the locked reference; Air age reads its age with
+the marker tracking `Detect/0.05` and flipping green/red about it; `_sig_finish_air_trail()`
+leaves both reference and timestamp `None` and Air age at `—`; all v1.51 checks (drag
+write-back, clamping, spinbox→marker, Family Plane values) still pass. Both columns rendered
+and inspected. **Not yet run on the bench** — item 7 of the plan (clean air must read
+~0.8 mV steady, not 10 and climbing) is the confirmation. (2026-07-28)
+
+---
+
+### src/pimd_classviz.py — v1.51 — Analysis-tab Trigger Levels gauges (draggable thresholds)
+
+New **Trigger Levels** column on the Analysis tab, leftmost in the top-right pane
+(`row1_split`, left of Band Mean vs Time): four bar gauges — **Settle · Detect · Amp ·
+SNR** — each with a dashed threshold marker you can **drag** to set the underlying
+spinbox. The Training group's two auto-detect gates were previously set blind. Their
+metrics drive the state machine every frame but were never plotted; the only visible
+number was a settle reading smuggled into the status-label text (`SETTLING air — 0.412
+mV`). Picking a level meant guessing, running a cycle, and watching it stall or
+false-trigger. Now the bar shows the live quantity, the marker shows the gate, and the
+gate is dragged to wherever the noise stops.
+
+Settle and Detect read the *exact* helpers `_sig_train_ingest()` gates on —
+`_current_settle_mv()` (Stats-tab window) and `_current_dev_from_air()` — so the bar
+crossing the marker and the cycle advancing are one event rather than two things that
+ought to agree. That mattered: a straight copy of the Family Plane column would have been
+wrong twice over. Its `Settled` gauge uses the *Shape* window (`sp_shape_win_n`, 15
+frames), not the Stats window (50) the training gate applies, so the displayed number
+would not have been the gated number; and its `Amp ‖Δ‖₂` is a different quantity from the
+mean per-channel |Δ| that Detect compares against, so a Detect marker on the Amp bar
+would have been numerically meaningless. Hence Detect is its own row and the
+Family-Plane-only `Air age` row is dropped.
+
+Amp and SNR are context, not gates, and are measured against the Training cycle's **locked
+leading air** (`_sig_air_ref`) over the Stats window — new `_analysis_gauge_features()`,
+via `_shape_live_window(ref=, n_win=)`, which gained those two optional arguments and
+defaults to its previous behaviour for every existing caller. Without that they would have
+come from `_shape_live`, whose reference is the Family Plane's own and is *rolling* unless
+Space was pressed on that tab, so both would have sat at ~0 here. They still fall back to
+`_shape_live` before a cycle locks a reference. Their markers move
+`sp_sig_q_amp_mv` (log₁₀ axis, so a dragged position goes back through `10**x`) and
+`sp_shape_gate`.
+
+Implementation is a shared column, not a clone: `_build_shape_gauges_dock` /
+`_shape_set_gauge` were generalised into `_build_gauge_column(specs, store, value_w)` /
+`_set_gauge(store, key, …)`, and the Family Plane keeps its four gauges as read-only specs
+(`binding=None`). A spec's binding is `(spinbox_attr, to_axis, from_axis)` — the spinbox is
+named rather than passed because the Analysis column is built before the Family Plane tab
+exists, so `sp_shape_gate` cannot be resolved at build time. Two guards keep a drag from
+fighting its own redraw: `_set_gauge` skips repositioning a line while `gate.moving`, and
+`_gauge_marker_drag` suppresses the re-render triggered by the spinbox's own
+`valueChanged`. Dragged values are clamped to the spinbox range, rounded to its decimals,
+and the line is snapped to where the spinbox actually landed; `setBounds()` keeps a line on
+its own axis. A draggable gate stays visible with no reading (Detect has none until a cycle
+locks air — exactly when you want to pre-position it), while a read-only gate still hides
+with its value, so Family Plane behaviour is unchanged.
+
+Bar axes here are anchored on the **threshold** (`_gauge_hi`: `max(2×thr, 1.25×value,
+0.2)`), not on the reading the way the Family Plane's settle gauge is (`max(value*2,
+1.0)`) — a value-scaled axis slides the marker around under the cursor, and here the marker
+is the control being grabbed.
+
+Cosmetic, applied to both columns: row labels and unit suffixes are each given one uniform
+width, so every bar starts and ends at the same x. Per-row minimums could not do this — the
+widest name shortened its own bar and a unit-less row (`SNR`) ran 46 px longer than its
+neighbours. Analysis row 1 now opens at 260 px tall rather than 220 (four 46 px gauge rows
+plus the group title need ~210; at 220 they opened squashed to their 26 px minimum), and the
+row-1 splitter sizes persist as `analysis_row1_split_sizes` alongside the existing left-split
+entry.
+
+Verified offscreen (no board) against synthetic frames: Settle matches
+`_current_settle_mv()` to 3 d.p.; Detect stays `—` with no `_sig_air_ref` and then tracks a
+planted 3.0 mV step; verdict colours flip green/red about the marker; drags write back
+through both transforms (Amp to `10**pos`, not the raw log) and clamp at the spinbox
+minimum and the axis bound; typing into `sp_sig_settle_mv` / `sp_shape_gate` moves the
+marker the same frame; and the Family Plane column still renders and updates. Not yet
+exercised on the bench — the coincidence of Detect crossing its marker with the cycle
+advancing to `ACQUIRED target` is the check to make there. (2026-07-28)
+
+---
+
 ### src/pimd_target_check.py — v4 — CLI requires `-f`; `wall_thickness_mm` 0 = solid
 
 The CLI no longer defaults its registry path: `-f/--file` is now required (`--registry`

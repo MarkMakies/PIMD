@@ -35,3 +35,4 @@ H2O_water_bottle_01,500ml water,block,110,75,75,0,n,500,none,H2O,na,na
 Quartz_piece_01,quartz rock,block,60,50,40,0,n,142,none,mineral,na,na
 Sandstone_rock_01,sandstone rock,block,120,120,100,0,n,690,none,mineral,na,na
 Fe_heavy_pully,heavy pully,ring,150,150,28,66,y,3700,strong,steel,na,na
+Sn_Pb_solder_stick_01,solder stick,rod,145,8,8,0,n,56,none,solder_sn_pb,na,na

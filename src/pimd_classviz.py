@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.50
+# PIMD Signature Visualiser (ClassViz) v1.53
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,9 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.53 auto-connect + run the last profile at launch; gauge row spacing; np.bool_ warning
+#   v1.52 FIX Detect gauge read a stale air reference; Air age gauge; readout under the label
+#   v1.51 Analysis Trigger Levels gauges (Settle/Detect/Amp/SNR) with draggable thresholds
 #   v1.50 below-gate frames leave no trail at all; the trail is green by construction
 #   v1.49 FIX custom band pair lost on restart (clamped by the startup profile's narrower spin range)
 #   v1.48 Family Plane: no gridlines on a rank axis; the zero rails follow the spacing curve
@@ -115,9 +118,14 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.50'
+APP_VERSION = '1.53'
 
 REDRAW_MS   = 33    # ~30 Hz
+
+# Gap between the auto-start connect and the profile send, so the board has
+# answered the E/V/Q4 handshake before the D/Q/G burst arrives -- the same beat
+# an operator leaves between clicking Connect and Load & Run.
+AUTOSTART_PROFILE_MS = 600
 
 # -- Analysis heatmap colorbar-as-range-slider (v1.45) ----------------------
 # ColorBarItem's internal coordinate space is a fixed 0..256 across the bar,
@@ -318,8 +326,34 @@ _HL_YELLOW = 'rgb(249, 240, 107)'
 _HL_RED    = 'rgb(246,  97,  81)'
 _HL_BLUE   = 'rgb(153, 193, 241)'
 
+# Thermal drift a frozen air reference accumulates, mV per cell per second.
+# DESIGN §17.2/§17.10, measured: 0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at
+# 150 s. mean|Δ| from air is a per-cell mean, so this converts directly between
+# a reference's AGE and the deviation that age contributes on its own -- which
+# is what the Air-age gauge's limit is: the age at which drift alone equals the
+# Detect threshold, i.e. where a magnitude test against that reference stops
+# being able to tell target from time (§17.10).
+AIR_DRIFT_MV_PER_S = 0.05
+
 _R = int(Qt.AlignmentFlag.AlignRight) | int(Qt.AlignmentFlag.AlignVCenter)
 _C = int(Qt.AlignmentFlag.AlignCenter)
+
+
+# Value <-> bar-axis transforms for a gauge's draggable threshold marker.
+# Every gauge but the amplitude one plots the setting directly; that one plots
+# log₁₀ of it, so a dragged position has to come back through _pow10_axis
+# before it reaches the spinbox. Named functions rather than lambdas so a
+# traceback through a marker drag says which transform it was in.
+def _identity(x):
+    return x
+
+
+def _log10_axis(x):
+    return math.log10(max(x, 1e-3))
+
+
+def _pow10_axis(x):
+    return 10.0 ** x
 
 
 def _hl_qcolor(css_rgb):
@@ -572,6 +606,8 @@ class MainWindow(QMainWindow):
         self._sig_train_last_style = None    # stylesheet churn guard for the status label
         self._sig_glitch_skipped = 0    # glitch frames excluded from the current window (v1.31)
         self._sig_air_ref      = None   # np mV vector: median of the locked leading air (auto-detect ref)
+        self._sig_air_ref_ts   = None   # wall time it was locked -- DESIGN §17.10 makes reference
+                                        # AGE the ceiling on any frozen-reference measurement
         self._sig_await_deadline = None # wall-clock; 30 s guard for await_target/await_remove
         self._sig_target_manual = False # placement was forced by Space, so auto-detect can't
                                         # see this target -- removal must be manual too (v1.41)
@@ -590,6 +626,11 @@ class MainWindow(QMainWindow):
         self._sig_autocheck_keys = set()
 
         self._SIG_AWAIT_SECONDS = 30.0  # place/remove-target guard countdown
+
+        # Re-entry guard for the Trigger Levels gauges: a marker drag sets its
+        # bound spinbox, whose valueChanged re-renders the column, which would
+        # otherwise reposition the very line being dragged.
+        self._gauge_marker_drag = False
 
         # Analysis tab — session recording (alternate path to the Stats tab's
         # Record Session button; drives the same _session_start/_session_stop/
@@ -662,6 +703,13 @@ class MainWindow(QMainWindow):
         self._rate_timer.setInterval(1000)
         self._rate_timer.timeout.connect(self._update_rate)
         self._rate_timer.start()
+
+        # Auto-start (v1.53): reproduce the operator's own opening move --
+        # Connect, then Load & Run whatever profile the dropdown remembers.
+        # singleShot(0) rather than a direct call so the window is up and the
+        # event loop running before any serial I/O; degrades to a status-bar
+        # message and a normal idle app if there is no port or no profile.
+        QTimer.singleShot(0, self._autostart)
 
     # ------------------------------------------------------------------
     # Profile dimensions
@@ -1260,19 +1308,31 @@ class MainWindow(QMainWindow):
         left_split.setCollapsible(1, True)    # the heatmap may be dragged fully away
         self.analysis_left_split = left_split
 
-        # Right column: row1 (strips | chart2 side by side) + 8-grid + 9-grid.
+        # Right column: row1 (trigger gauges | strips | chart2 side by side)
+        # + 8-grid + 9-grid. The gauges sit leftmost and take no share of a
+        # resize -- they are four fixed-height rows, so extra width is wasted
+        # on them and wanted by the charts.
         row1_split = QSplitter(Qt.Orientation.Horizontal)
         row1_split.setHandleWidth(4)
+        row1_split.addWidget(self._build_analysis_gauges_group())
         row1_split.addWidget(self._build_analysis_strips_group())
         row1_split.addWidget(self._build_analysis_chart2_group())
-        row1_split.setSizes([700, 700])
+        row1_split.setSizes([300, 600, 600])
+        row1_split.setStretchFactor(0, 0)
+        row1_split.setCollapsible(0, True)
+        self.analysis_row1_split = row1_split
 
         right_split = QSplitter(Qt.Orientation.Vertical)
         right_split.setHandleWidth(4)
         right_split.addWidget(row1_split)
         right_split.addWidget(self._build_analysis_grid8_group())
         right_split.addWidget(self._build_analysis_grid9_group())
-        right_split.setSizes([220, 260, 260])
+        # Row 1 opens at 320 rather than the old 220: five 46 px gauge rows,
+        # the 8 px gaps between them and the group title need ~290, and
+        # anything less opens them squashed to their 26 px minimum. The handle
+        # still trades it back for grid height, and analysis_row1_split_sizes
+        # persists whatever you choose.
+        right_split.setSizes([320, 210, 210])
 
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.setHandleWidth(4)
@@ -1721,6 +1781,9 @@ class MainWindow(QMainWindow):
         for sp in (self.sp_sig_q_amp_mv, self.sp_sig_q_mean_mv, self.sp_sig_q_split_ratio):
             sp.valueChanged.connect(
                 lambda *_: self._set_sig_readout_from_stats(self._sig_last_stats))
+        # sp_sig_q_amp_mv is also the Amp gauge's marker, so the line has to
+        # follow a typed value the same frame.
+        self.sp_sig_q_amp_mv.valueChanged.connect(self._update_analysis_gauges)
 
         row_a = QHBoxLayout()
         self.lbl_sig_readout = QLabel('Amp: —  Mean|Δ|: —  Splithalf: —  SNR: —  Quality: —')
@@ -2414,6 +2477,141 @@ class MainWindow(QMainWindow):
             plot.disableAutoRange(axis=pg.ViewBox.YAxis)
             plot.setYRange(*y_range, padding=0)
 
+    # -- Trigger levels: the Training gates, plotted and settable ------------
+
+    def _build_analysis_gauges_group(self):
+        """Settle / Detect / Amp / SNR, so the two Training auto-detect
+        thresholds can be seen against the live signal and dragged to a level
+        that clears the noise, instead of being guessed at and then debugged by
+        running a cycle.
+
+        Settle and Detect carry draggable markers bound to the spinboxes in the
+        Training group. Amp and SNR are context -- their markers move the
+        quality/gate settings those two are judged against. Air age is
+        read-only (binding None): its limit is derived from the Detect setting
+        and the measured drift rate, so there is nothing to drag."""
+        box = QGroupBox('Trigger Levels')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(2)
+        self.analysis_gauges = {}
+        v.addWidget(self._build_gauge_column([
+            ('settle',   'Settle ≤',  'mV σ',      ('sp_sig_settle_mv', _identity, _identity)),
+            ('detect',   'Detect ≥',  'mV wander', ('sp_sig_detect_mv', _identity, _identity)),
+            ('amp',      'Amp (log)', 'mV',        ('sp_sig_q_amp_mv', _log10_axis, _pow10_axis)),
+            ('snr',      'SNR',       '',          ('sp_shape_gate', _identity, _identity)),
+            ('air_age',  'Air age',   's',         None),
+        ], self.analysis_gauges, value_w=58))
+        # Typing into the spinbox must move the marker now, not on the next
+        # frame. Guarded inside _update_analysis_gauges against the drag that
+        # set the spinbox in the first place. sp_sig_q_amp_mv already drives a
+        # readout refresh (_build_sig_row3_readout_save) and sp_shape_gate an
+        # axis redraw, so those two are picked up in their existing handlers.
+        self.sp_sig_settle_mv.valueChanged.connect(self._update_analysis_gauges)
+        self.sp_sig_detect_mv.valueChanged.connect(self._update_analysis_gauges)
+        return box
+
+    @staticmethod
+    def _gauge_hi(value, threshold, floor=0.2):
+        """Top of a threshold-anchored bar axis. Anchored on the THRESHOLD,
+        not on the reading the way the Family Plane's settle gauge is
+        (max(value*2, 1.0)): a value-scaled axis slides the marker around under
+        the cursor, and here the marker is the control you are trying to grab.
+        It still grows to fit an over-range reading rather than pinning it."""
+        hi = max(2.0 * threshold, floor)
+        if value is not None and np.isfinite(value):
+            hi = max(hi, 1.25 * value)
+        return hi
+
+    def _analysis_gauge_features(self):
+        """Live feature dict measured against the TRAINING cycle's locked
+        leading air (_sig_air_ref), over the Stats window the settle/detect
+        gates use -- so Amp/SNR here describe the same comparison the cycle is
+        making. None until a cycle locks an air reference; the caller then
+        falls back to _shape_live, which is measured against the Family Plane's
+        own reference and reads ~0 while that one is still rolling."""
+        if self._sig_air_ref is None:
+            return None
+        vec, splithalf = self._shape_live_window(
+            ref=self._sig_air_ref, n_win=self.sp_stats_window.value())
+        if vec is None or splithalf is None:
+            return None
+        try:
+            return self._shape_feature_dict(
+                vec, list(self._pulse_us_sorted), self._n_cells,
+                pimd_shape.amp_l2(vec), splithalf)
+        except ValueError:
+            return None
+
+    def _sig_dev_is_gated(self):
+        """True while the state machine is actually testing dev-from-air --
+        the only two phases in which a locked reference exists AND is being
+        compared against. Everywhere else a frozen reference is just ageing
+        (§17.10), so the Detect gauge shows air wander instead (v1.52)."""
+        return (self._analysis_training_active
+                and self._sig_train_phase in ('await_target', 'await_remove'))
+
+    def _update_analysis_gauges(self):
+        """Settle and Detect are the exact quantities _sig_train_ingest()
+        gates on -- same helpers, same windows -- so the bar crossing the
+        marker and the cycle advancing are one event, not two things that
+        ought to agree. Amp/SNR are context and gate nothing here."""
+        if not hasattr(self, 'analysis_gauges') or self._gauge_marker_drag:
+            return
+
+        settle_thr = self.sp_sig_settle_mv.value()
+        settle_mv  = self._current_settle_mv()
+        self._set_gauge(
+            self.analysis_gauges, 'settle', settle_mv,
+            0.0, self._gauge_hi(settle_mv, settle_thr), settle_thr,
+            '' if settle_mv is None else '{0:.3f}'.format(settle_mv), good_above=False)
+
+        # Which reference is honest right now. In the two gated phases show the
+        # very number the state machine is testing; otherwise show how far the
+        # air moves on its own, which is the floor Detect has to clear and does
+        # not accumulate the way a frozen reference does. The unit text names
+        # which one is on screen -- reading 'vs air' when nothing is locked was
+        # the whole v1.51 confusion.
+        detect_thr = self.sp_sig_detect_mv.value()
+        gated      = self._sig_dev_is_gated()
+        dev_mv     = self._current_dev_from_air() if gated else self._current_air_wander_mv()
+        # The verdict flips with the mode, because "good" does. Gated: dev at
+        # or above Detect means the target registered. Wander: the air moving
+        # LESS than Detect is what you want -- green there means the trigger
+        # level clears the noise floor, which is the whole reason to look.
+        self._set_gauge(
+            self.analysis_gauges, 'detect', dev_mv,
+            0.0, self._gauge_hi(dev_mv, detect_thr), detect_thr,
+            '' if dev_mv is None else '{0:.3f}'.format(dev_mv),
+            good_above=gated, unit='mV vs air' if gated else 'mV wander')
+
+        # Age of the locked reference against its drift budget: the age at
+        # which thermal drift alone equals Detect. Past that line a magnitude
+        # test cannot separate target from time (§17.10) -- which is why this
+        # row is worth a gauge and not a tooltip.
+        age = (None if self._sig_air_ref_ts is None
+               else time.time() - self._sig_air_ref_ts)
+        age_limit = detect_thr / AIR_DRIFT_MV_PER_S
+        self._set_gauge(
+            self.analysis_gauges, 'air_age', age,
+            0.0, self._gauge_hi(age, age_limit, floor=30.0), age_limit,
+            '' if age is None else '{0:.0f}'.format(age), good_above=False)
+
+        feat    = self._analysis_gauge_features() or self._shape_live
+        amp_thr = math.log10(max(self.sp_sig_q_amp_mv.value(), 1e-3))
+        # sp_shape_gate lives on the Family Plane tab, which is built after
+        # this one -- and _redraw() can fire in between.
+        gate = self._shape_gate() if hasattr(self, 'sp_shape_gate') else SHAPE_GATE_DEFAULT
+        if feat is None:
+            self._set_gauge(self.analysis_gauges, 'amp', None, -2, 3, amp_thr, '')
+            self._set_gauge(self.analysis_gauges, 'snr', None, 0, max(20.0, gate * 2), gate, '')
+        else:
+            self._set_gauge(self.analysis_gauges, 'amp', feat['log_amp'], -2, 3, amp_thr,
+                            '{0:.2f}'.format(feat['amp']))
+            self._set_gauge(
+                self.analysis_gauges, 'snr', feat['snr'], 0, max(20.0, gate * 2), gate,
+                '∞' if not np.isfinite(feat['snr']) else '{0:.1f}'.format(feat['snr']))
+
     # -- Strip: overall average delta vs time, one chart ---------------------
 
     def _build_analysis_strips_group(self):
@@ -2887,6 +3085,7 @@ class MainWindow(QMainWindow):
         self._sig_target     = None
         self._sig_last_stats = None
         self._sig_air_ref    = None
+        self._sig_air_ref_ts = None
         self._sig_await_deadline = None
         self._sig_target_manual = False
         self._clear_sig_decide()
@@ -2962,6 +3161,7 @@ class MainWindow(QMainWindow):
         self._sig_air_before = entry
         # air reference for the Detect threshold: median of the locked frames
         self._sig_air_ref = np.median(entry['frames_mV'], axis=0)
+        self._sig_air_ref_ts = time.time()
         self._sig_target    = None
         self._sig_air_after = None
         self._sig_train_phase = 'await_target'
@@ -3036,6 +3236,13 @@ class MainWindow(QMainWindow):
         self._sig_air_before = None
         self._sig_target     = None
         self._sig_air_after  = None
+        # The air reference dies with the cycle (v1.52). It used to survive
+        # into the next cycle's air_lead and keep ageing -- harmless to the
+        # gate, which only consults it in await_target/await_remove and always
+        # after a fresh lock, but the v1.51 Detect gauge read it every frame
+        # and so displayed minutes of accumulated drift as a live deviation.
+        self._sig_air_ref    = None
+        self._sig_air_ref_ts = None
         # roll straight into the next leading air (same deque, no reset);
         # the next cycle re-arms auto-detect from scratch
         self._sig_target_manual = False
@@ -3052,6 +3259,7 @@ class MainWindow(QMainWindow):
         self._sig_target     = None
         self._sig_air_after  = None
         self._sig_air_ref    = None
+        self._sig_air_ref_ts = None
         self._sig_await_deadline = None
         self._sig_target_manual = False
         self._stop_await_flash()
@@ -3101,6 +3309,31 @@ class MainWindow(QMainWindow):
         if mat.shape[1] != self._sig_air_ref.shape[0]:
             return None
         return float(np.abs(np.median(mat, axis=0) - self._sig_air_ref).mean())
+
+    def _current_air_wander_mv(self):
+        """Mean per-channel |Δ| between the current settle window and the one
+        immediately before it -- how far the air moves on its own over one
+        window (~16 s at 50 frames / ~3 Hz). None until two full windows are
+        buffered.
+
+        Same reduction and units as _current_dev_from_air(), so it is directly
+        comparable to the Detect threshold: this is the floor Detect has to
+        clear. It is what the Detect gauge shows when no cycle is gating on a
+        locked reference -- unlike a frozen reference, it does not accumulate,
+        so it reads the drift RATE rather than the drift total (v1.52).
+
+        Written out rather than sharing a window helper with
+        _current_dev_from_air(): that one is on the state machine's gating hot
+        path, and a few duplicated lines are cheaper than touching it."""
+        n = self.sp_stats_window.value()
+        recent = list(self._rolling_buf)[-2 * n:]
+        # both halves must be full, or "one window ago" is not one window ago
+        if n < 2 or len(recent) < 2 * n:
+            return None
+        mat  = np.array([arr for _, arr in recent], dtype=float) / 1000.0
+        half = len(mat) // 2
+        return float(np.abs(np.median(mat[half:], axis=0)
+                             - np.median(mat[:half], axis=0)).mean())
 
     def _sig_train_ingest(self, now, raw, glitch_mask):
         """Per-frame training logic, called from process_packet."""
@@ -3271,6 +3504,7 @@ class MainWindow(QMainWindow):
         self._sig_train_buf      = None
         self._sig_glitch_skipped = 0
         self._sig_air_ref        = None
+        self._sig_air_ref_ts     = None
         self._sig_await_deadline = None
         self._sig_target_manual  = False
         self._sig_air_before = None
@@ -4056,6 +4290,9 @@ class MainWindow(QMainWindow):
 
     def _on_shape_axis_changed(self, *_):
         self._shape_redraw_static()
+        # sp_shape_gate routes through here, and it is the SNR gauge's marker
+        # on the Analysis tab too.
+        self._update_analysis_gauges()
 
     def _shape_band_spins(self, role):
         """The (lo, hi) spin pair for an axis role. Only 'y' has its own pair
@@ -4265,30 +4502,52 @@ class MainWindow(QMainWindow):
         self.shape_tiles_plot.addItem(self.shape_tiles_img)
         return self.shape_tiles_gw
 
-    def _build_shape_gauges_dock(self):
-        """Four horizontal bars with numeric readouts. Each is its own mini
-        plot rather than one shared axis -- the four quantities have nothing
-        in common numerically, and each needs its own threshold line."""
+    # -- Gauge column (shared: Family Plane dock + Analysis trigger levels) ---
+
+    def _build_gauge_column(self, specs, store, value_w=88):
+        """A column of horizontal bars with numeric readouts. Each is its own
+        mini plot rather than one shared axis -- the quantities have nothing in
+        common numerically, and each needs its own threshold line.
+
+        A spec is (key, row label, unit, binding). `binding` is None for a
+        read-only gate line; otherwise (spinbox_attr, to_axis, from_axis),
+        which makes the line draggable and writes the released position back to
+        `self.<spinbox_attr>` through `from_axis`. The spinbox is named rather
+        than passed because the Analysis column is built before the Family
+        Plane tab exists, so `sp_shape_gate` cannot be resolved at build time.
+        `to_axis`/`from_axis` are the value<->axis pair (identity everywhere
+        except the log₁₀ amplitude bar).
+
+        Each row is a two-line left block (name over readout) and then bar, all
+        the way to the right edge. The readout used to sit in its own column to
+        the RIGHT of the bar, which cost ~110 px of every row: the bar is the
+        part being read, and at a 300 px column width it was down to ~130 px
+        with its tick labels running into each other.
+
+        `value_w` is the space the numeric readout reserves, and so the floor
+        under the left block's width. 88 fits the Family Plane's 'air mode'
+        word readout; a numbers-only column can go narrower."""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(4, 2, 4, 2)
-        v.setSpacing(1)
-        self.shape_gauges = {}
-        # (key, row label, unit shown after the value). The amplitude BAR is
-        # log₁₀ but its readout is plain mV, so the label — not the unit
-        # column — carries the "(log)" note.
-        specs = [
-            ('amp',      'Amp ‖Δ‖₂ (log)', ''),
-            ('snr',      'SNR',            ''),
-            ('settle',   'Settled',        'mV σ'),
-            ('baseline', 'Air age',        's'),
-        ]
-        for key, name, unit in specs:
+        # Rows are two lines of text against a boxed plot; at the old 1 px they
+        # ran together into one block and the eye had to find the boundaries.
+        v.setSpacing(8)
+        blocks = []
+        for key, name, unit, binding in specs:
             row = QHBoxLayout()
             row.setSpacing(4)
+
+            block = QWidget()
+            block_v = QVBoxLayout(block)
+            block_v.setContentsMargins(0, 0, 0, 0)
+            block_v.setSpacing(0)
             lbl = QLabel(name)
-            lbl.setMinimumWidth(64)
-            row.addWidget(lbl)
+            block_v.addWidget(lbl)
+            readout = QHBoxLayout()
+            readout.setSpacing(3)
+            blocks.append(block)
+            row.addWidget(block)
 
             # Height budget: the scale axis takes a fixed ~16 px and the
             # GraphicsLayout's default margins another ~18, so a 24 px strip
@@ -4314,24 +4573,82 @@ class MainWindow(QMainWindow):
             ax.setHeight(16)
             bar = pg.BarGraphItem(x0=[0], y=[0], height=0.8, width=[0], brush='#4caf50')
             plot.addItem(bar)
-            gate_line = pg.InfiniteLine(pos=0, angle=90,
+            gate_line = pg.InfiniteLine(pos=0, angle=90, movable=binding is not None,
                                         pen=pg.mkPen('#000000', width=1,
                                                       style=Qt.PenStyle.DashLine))
+            if binding is not None:
+                # A draggable gate is a control, not an annotation: widen the
+                # grab area and light it on hover so it reads as one.
+                gate_line.setHoverPen(pg.mkPen('#1565c0', width=2))
+                gate_line.setCursor(Qt.CursorShape.SizeHorCursor)
+                gate_line.sigPositionChangeFinished.connect(
+                    lambda _line, s=store, k=key: self._on_gauge_marker_dragged(s, k))
             plot.addItem(gate_line)
             row.addWidget(gw, stretch=1)
 
             value = QLabel('—')
-            value.setMinimumWidth(88)
-            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            row.addWidget(value)
+            value.setMinimumWidth(value_w)
+            readout.addWidget(value)
             unit_lbl = QLabel(unit)
-            unit_lbl.setMinimumWidth(46 if unit else 0)
-            row.addWidget(unit_lbl)
+            readout.addWidget(unit_lbl)
+            readout.addStretch(1)
+            block_v.addLayout(readout)
             v.addLayout(row)
-            self.shape_gauges[key] = {'plot': plot, 'bar': bar, 'gate': gate_line,
-                                       'value': value, 'unit': unit_lbl, 'unit_text': unit}
+            store[key] = {'plot': plot, 'bar': bar, 'gate': gate_line, 'value': value,
+                           'unit': unit_lbl, 'unit_text': unit, 'binding': binding}
+        # One width for every left block, so all the bars start at the same x
+        # (they already end at the same x -- nothing follows them now). A
+        # per-row minimum can't do this: the widest name or readout would
+        # shorten its own bar and the column would read as five unrelated
+        # charts rather than one stack. Measured after the loop so the widest
+        # readout string a row can hold is included, not just its label.
+        if blocks:
+            block_w = max(value_w, *(b.sizeHint().width() for b in blocks))
+            for b in blocks:
+                b.setFixedWidth(block_w)
         v.addStretch(1)
         return w
+
+    def _on_gauge_marker_dragged(self, store, key):
+        """A dragged gate line writes its new position back to the bound
+        spinbox -- that spinbox is the real setting; the line is just a handle
+        on it. The value is clamped to the spinbox's own range and rounded to
+        its decimals, then the line is snapped to where the spinbox actually
+        landed rather than left where the mouse was released."""
+        g = store[key]
+        spin_attr, to_axis, from_axis = g['binding']
+        sp = getattr(self, spin_attr, None)
+        if sp is None:
+            return
+        try:
+            val = from_axis(float(g['gate'].value()))
+        except (ValueError, OverflowError):
+            return
+        if not math.isfinite(val):
+            return
+        val = round(min(max(val, sp.minimum()), sp.maximum()), sp.decimals())
+        # The spinbox's own valueChanged re-renders this column; the flag stops
+        # that repositioning the line out from under the drag that caused it.
+        self._gauge_marker_drag = True
+        try:
+            sp.setValue(val)
+        finally:
+            self._gauge_marker_drag = False
+        g['gate'].setPos(to_axis(sp.value()))
+        self._update_analysis_gauges()
+
+    def _build_shape_gauges_dock(self):
+        """The Family Plane's four gauges. Read-only gate lines (binding None)
+        -- this tab reports against its thresholds, it does not set them. The
+        amplitude BAR is log₁₀ but its readout is plain mV, so the label — not
+        the unit column — carries the "(log)" note."""
+        self.shape_gauges = {}
+        return self._build_gauge_column([
+            ('amp',      'Amp ‖Δ‖₂ (log)', '',     None),
+            ('snr',      'SNR',            '',     None),
+            ('settle',   'Settled',        'mV σ', None),
+            ('baseline', 'Air age',        's',    None),
+        ], self.shape_gauges)
 
     # -- Features -----------------------------------------------------------
 
@@ -4565,7 +4882,7 @@ class MainWindow(QMainWindow):
 
     # -- Live frame ---------------------------------------------------------
 
-    def _shape_live_window(self):
+    def _shape_live_window(self, ref=None, n_win=None):
         """(vec, splithalf) for the current frame, in mV -- BOTH derived from
         the same window, mirroring pimd_features.compute_plateau_stats():
         `vec` is the window's per-cell median minus the Shape Space AIR
@@ -4590,12 +4907,18 @@ class MainWindow(QMainWindow):
 
         `vec` is returned in pimd_shape's convention (band-major, pulse
         ascending, thresholds high->low), so live and stored shapes are
-        directly comparable."""
-        n_win  = self.sp_shape_win_n.value()
+        directly comparable.
+
+        `ref`/`n_win` default to this tab's own air reference and window. The
+        Analysis tab's trigger-level gauges pass the Training cycle's locked
+        leading air and the Stats window instead, so the amplitude they show is
+        measured against the same reference the auto-detect gates use."""
+        n_win  = n_win or self.sp_shape_win_n.value()
         recent = list(self._rolling_buf)[-n_win:]
         if len(recent) < 4:
             return None, None
-        ref = self._shape_air_ref
+        if ref is None:
+            ref = self._shape_air_ref
         if ref is None:
             return None, None
         mat = np.array([arr for _, arr in recent], dtype=float) / 1000.0
@@ -5514,18 +5837,29 @@ class MainWindow(QMainWindow):
         self.shape_tiles_plot.setXRange(0, feat['n_delays'], padding=0)
         self.shape_tiles_plot.setYRange(0, feat['n_bands'], padding=0)
 
-    def _shape_set_gauge(self, key, value, lo, hi, threshold, text, good_above=True,
-                         unit=None):
+    def _set_gauge(self, store, key, value, lo, hi, threshold, text, good_above=True,
+                   unit=None):
         """`unit` overrides the row's fixed unit suffix -- pass '' when the
         readout is a word rather than a number, so 'air mode' does not render
         as 'air mode s'."""
-        g = self.shape_gauges[key]
+        g = store[key]
         g['unit'].setText(g['unit_text'] if unit is None else unit)
-        if value is None or not np.isfinite(value):
+        g['plot'].setXRange(lo, hi, padding=0)
+        # bool(), not the bare np.isfinite() result: that is an np.bool_, and
+        # PyQt's setVisible() takes it as an index rather than a bool --
+        # thousands of DeprecationWarnings per session at the redraw rate.
+        has_value = value is not None and bool(np.isfinite(value))
+        # A read-only gate is an annotation on a reading, so it goes away with
+        # the reading. A draggable one is the control you set the threshold
+        # with, so it stays -- Detect has no value at all until a cycle locks
+        # an air reference, which is exactly when you want to pre-position it.
+        g['gate'].setVisible(threshold is not None and (has_value or g['binding'] is not None))
+        if threshold is not None and not g['gate'].moving:
+            g['gate'].setBounds((lo, hi))
+            g['gate'].setPos(min(max(threshold, lo), hi))
+        if not has_value:
             g['bar'].setOpts(x0=[lo], width=[0])
             g['value'].setText('—')
-            g['plot'].setXRange(lo, hi, padding=0)
-            g['gate'].setVisible(False)
             return
         clamped = min(max(value, lo), hi)
         if threshold is None:
@@ -5536,11 +5870,12 @@ class MainWindow(QMainWindow):
             ok = (value >= threshold) if good_above else (value <= threshold)
             brush = _hl_qcolor(_HL_GREEN if ok else _HL_RED)
         g['bar'].setOpts(x0=[lo], width=[clamped - lo], brush=brush)
-        g['plot'].setXRange(lo, hi, padding=0)
-        g['gate'].setVisible(threshold is not None)
-        if threshold is not None:
-            g['gate'].setPos(min(max(threshold, lo), hi))
         g['value'].setText(text)
+
+    def _shape_set_gauge(self, key, value, lo, hi, threshold, text, good_above=True,
+                         unit=None):
+        self._set_gauge(self.shape_gauges, key, value, lo, hi, threshold, text,
+                        good_above=good_above, unit=unit)
 
     def _update_shape_gauges(self):
         """Amplitude / SNR / settledness / air age. Every input is an existing
@@ -5875,6 +6210,35 @@ class MainWindow(QMainWindow):
         else:
             self.serial.close()
             return True
+
+    def _autostart(self):
+        """Connect and run the remembered profile at launch, so opening the app
+        lands on a streaming board rather than on two clicks of ceremony.
+
+        Nothing here is forced: no port, a port that won't open, or no
+        remembered profile each leave the app sitting exactly as it did before
+        v1.53, with the reason in the status bar."""
+        if self.serial.isOpen():
+            return
+        if not self.le_port.text().strip():
+            self.statusBar().showMessage('Auto-start: no port remembered — connect manually')
+            return
+        self.connect_port()
+        if not self.serial.isOpen():
+            return      # connect_port() already reported it and reddened the button
+        if not self.cb_profile_file.currentText():
+            self.statusBar().showMessage('Auto-start: connected; no saved profile to run')
+            return
+        # The profile send waits out the connect handshake (E/V/Q4) rather than
+        # racing it -- same beat an operator leaves between the two clicks.
+        QTimer.singleShot(AUTOSTART_PROFILE_MS, self._autostart_run_profile)
+
+    def _autostart_run_profile(self):
+        """Second half of _autostart(), after the connect handshake. Re-checks
+        the port: the operator can disconnect inside the delay."""
+        if not self.serial.isOpen():
+            return
+        self._on_load_run_profile()
 
     def connect_port(self):
         if self.pb_connect.text() != 'Connected':
@@ -6387,6 +6751,7 @@ class MainWindow(QMainWindow):
         if self.tabs.currentIndex() == self._analysis_tab_index:
             self._update_analysis_charts()
             self._update_analysis_strips()
+            self._update_analysis_gauges()
 
         # Shape Space: only the live-frame-driven panels refresh per tick, and
         # only while the tab is showing. The capture points / ladder rows /
@@ -6720,6 +7085,11 @@ class MainWindow(QMainWindow):
             if isinstance(left_sizes, list) and len(left_sizes) == self.analysis_left_split.count():
                 self.analysis_left_split.setSizes([int(x) for x in left_sizes])
 
+            # Analysis row-1 split (trigger gauges | band-mean strip | chart 2).
+            row1_sizes = s.get('analysis_row1_split_sizes')
+            if isinstance(row1_sizes, list) and len(row1_sizes) == self.analysis_row1_split.count():
+                self.analysis_row1_split.setSizes([int(x) for x in row1_sizes])
+
             # Stats-tab Std colour thresholds.
             self.sp_std_lower.setValue(float(s.get('std_lower', 0.50)))
             self.sp_std_upper.setValue(float(s.get('std_upper', 1.00)))
@@ -6852,6 +7222,7 @@ class MainWindow(QMainWindow):
             'sig_q_split_ratio':  self.sp_sig_q_split_ratio.value(),
 
             'analysis_left_split_sizes': self.analysis_left_split.sizes(),
+            'analysis_row1_split_sizes': self.analysis_row1_split.sizes(),
 
             'shape_x':       self.cb_shape_x.currentData(),
             'shape_y':       self.cb_shape_y.currentData(),
