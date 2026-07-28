@@ -1,3 +1,122 @@
+### findings — the noise is a (9 µs, 4.9 V) corner, not a raised floor; not the battery
+
+*2026-07-28 · `cal_63_air_bat_v3` / sha `4a2352d2` · fw 4.26 · 6S battery · 50 captures over
+four sessions 14:25–16:38 (Cu_pipe_01 ×17, Fe_spanner_01 ×18, Fe_Cast_iron_trivet_01 ×13,
+air ×2)*
+
+**Correction to the 2026-07-28 air-wander entry.** That entry reported the noise floor as
+having doubled between the first two sessions. It was drawn from 12 captures and does not
+survive 50. Two batteries were swapped and left to settle before the 16:21 trivet session
+partly on the strength of it; the swap changed nothing, which is itself the useful result.
+
+**The floor is unchanged across the whole day.** Per-session `splithalf_floor`:
+
+| session | window | n | min | median | q3 | max |
+|---|---|---|---|---|---|---|
+| 142336 | 14:25–14:37 | 8 | 0.88 | 1.25 | 1.41 | 2.07 |
+| 150513 | 15:06–15:33 | 12 | 1.17 | 1.52 | 2.36 | 3.98 |
+| 153912 | 15:44–15:59 | 15 | 0.90 | 1.77 | 2.45 | 3.48 |
+| 161649 | 16:21–16:38 *(post battery swap)* | 15 | 0.90 | 1.67 | 2.53 | 3.45 |
+
+The post-swap session is indistinguishable from the two before it. The two **air** captures
+that close it — the purest noise probe in the corpus, no target coupling — read **0.899 and
+0.974**, as clean as the best capture of the day. So the floor sits at ~0.9 mV throughout and
+the supply is not implicated.
+
+**What changed is the rate of excursions, and it is intermittent rather than a trend.**
+Captures above 2.0 mV run 12% → 25% → 40% → 47% across the four sessions, but Spearman
+rank correlation of `splithalf_floor` against elapsed time is only **+0.10** over the 133-minute
+span. The distribution is growing a tail, not shifting: most captures still land at the floor
+while a rising minority spike to 3–4×. Against amplitude the correlation is **+0.15**, so
+`splithalf_floor` is target-independent as intended and the cross-session comparison is fair.
+
+**Tested and rejected:** that the first capture at a placement is noisier than its repeat (the
+rig still settling after handling). Across 21 placements holding both r1 and r2, r1 was
+noisier in 10 and r2 in 11, medians 1.64 vs 1.67. No effect.
+
+**Where the noise lives — 3 cells of 63.** Cell-by-cell noise/signal, from |noisy − clean|
+over the eight most-contrasting matched pairs against the mean signal in the same cells:
+
+| band | 4.9 V | 4.8 V | 4.75 V | 4.4 V | 4.2 V | 3.8 V | 2.4 V | 1.5 V | 0.5 V |
+|---|---|---|---|---|---|---|---|---|---|
+| **9.0 µs** | **5.31** | **1.52** | 0.48 | 0.39 | 0.38 | 0.50 | 0.45 | 0.32 | 0.13 |
+| **13.44 µs** | **0.61** | 0.47 | 0.42 | 0.31 | 0.37 | 0.31 | 0.21 | 0.19 | 0.10 |
+| 20 µs | 0.44 | 0.23 | 0.34 | 0.24 | 0.18 | 0.25 | 0.13 | 0.08 | 0.09 |
+| 30 µs | 0.28 | 0.33 | 0.22 | 0.17 | 0.09 | 0.14 | 0.07 | 0.06 | 0.04 |
+| 45 µs | 0.39 | 0.21 | 0.19 | 0.11 | 0.12 | 0.08 | 0.05 | 0.04 | 0.03 |
+| 67.2 µs | 0.48 | 0.28 | 0.22 | 0.09 | 0.08 | 0.08 | 0.04 | 0.04 | 0.03 |
+| 100 µs | 0.41 | 0.25 | 0.18 | 0.14 | 0.12 | 0.06 | 0.04 | 0.03 | 0.02 |
+
+**A per-axis view of this data is actively misleading, and the mistake is recorded because it
+is the kind that gets acted on.** Averaging down each column and across each band gives
+4.9 V = 0.93 and 9 µs = 0.94, which reads as two bad lines and argues for deleting a band and
+a threshold. Both averages are dragged up by the single 5.31 cell at their intersection. The
+4.9 V column's other six cells run 0.28–0.48; the 9 µs band's other seven run 0.13–0.50.
+**Neither line is bad.** The effect is `(9 µs, 4.9 V)`, `(9 µs, 4.8 V)` and, marginally,
+`(13.44 µs, 4.9 V)` — 4.8% of the grid. Because `splithalf_floor` is an L2 across all 63
+cells, that corner sets the noise figure for the whole capture, which is why it presents as a
+floor problem at capture level.
+
+The corner is marginal at every distance, not merely at range — mean |delta_mV| in the
+`(9 µs, 4.9 V)` cell against ~0.9 mV of noise there:
+
+| target | 60 mm | 120 mm | 180 mm | 240 mm |
+|---|---|---|---|---|
+| Cu_pipe_01 | 1.90 (SNR 2.0) | 2.08 (2.2) | 0.46 (0.5) | 0.16 (0.2) |
+| Fe_spanner_01 | 1.16 (1.3) | 1.50 (1.6) | 0.78 (0.8) | 0.66 (0.7) |
+| Fe_Cast_iron_trivet_01 | 2.04 (2.2) | 0.92 (1.0) | 2.94 (3.2) | — |
+
+**Decision: keep profiling, change nothing.** Excluding just those 3 cells cuts the
+paired-difference L2 (a `splithalf_floor` proxy) by **29% median / 32% mean** across 21
+placements — the whole benefit is available from 4.8% of the grid, at analysis time, and is
+reversible. A profile change is neither: it mints a new `profile_sha8`, the
+`(profile_name, profile_sha8)` guard hard-errors across corpora so today's 50 captures would
+stop being comparable with tomorrow's, and it needs a fresh delaycal sweep and lock (§10).
+Dropping the band and the column would discard 15 cells to fix 3, and would take the
+early-band discrimination §14.9 depends on with it. Cell exclusion or SNR weighting is a call
+to make once the target set is complete, not now.
+
+**The v3 profile's own fixes held.** 4.75 V — the step moved in the re-sweep after the 4.70
+column misbehaved — reads 0.25 at its worst, and the 4.40 / 3.80 columns that §17.10 found
+elevated under the failing supply read 0.09–0.17 and 0.06–0.50. Those are clean. This is the
+**top of the ladder meeting the shortest band**, a different observation from §14.7's
+~4.45–4.65 keep-out zone, and it is new.
+
+**Supply: the pack fell 23.77 V → ~22.5 V with no measurable effect.** §17.10 established that
+within the regulated window the L7815 holds coil drive constant and state of charge does not
+reach the operating point, *"at least down to 23.05 V"* — as far as that trial went. Today ran
+about **0.55 V below** that, and across the span amplitude reproducibility for repeats of one
+placement held at 0.937 / 0.946 / 1.072 (~6%) while the floor was unchanged, closing on air at
+0.899 / 0.974. So the regulated-window result now has evidence half a volt lower, and the
+day's supply behaviour independently corroborates the battery-swap null: neither swapping
+packs nor draining one by 1.27 V moved the noise. **This is not the measurement §17.10 used**,
+which was the *direction* of per-band delay shift under a falling pack; amplitude stability
+plus an unchanged floor is weaker, different evidence — consistent with regulation holding,
+not proof of it. Thermal drift was visible to the operator after soaking (§14.1). Flagged, not
+acted on: the corpus records `supply=battery` but **not pack voltage**, so this association is
+between the day's endpoints and the day's captures rather than per capture; adding a voltage
+column to `CORPUS_HEADER` would make it measurable next time, and is a schema decision of its
+own.
+
+**Confidence and what would settle it.** Eight matched pairs is a modest sample, and an
+r1-vs-r2 difference contains real repositioning as well as noise — though repositioning would
+scale *with* signal and this runs the other way. What carries the result is that the three
+implicated cells stand 3–10× above every one of the other sixty, in a monotonic ordering that
+chance does not produce. The direct confirmation is a **Std Dev (rolling N) heatmap under
+v3**, the same instrument §17.10 used to find the 4.40/3.80 elevation: it shows the grid
+per-cell rather than by inference from paired captures. Open until then.
+[FILL: does the heatmap show the same three cells? And is 4.9 V simply unreachable for a
+9 µs flyback — the crossing landing at or past the clamp, so the sample time is ill-defined —
+in which case the ladder's top step is the thing to reconsider, not the band?]
+
+**Protocol for 2026-07-29**, so the two days stay comparable: profile unchanged
+(`cal_63_air_bat_v3` / `4a2352d2`, one epoch across both days); Std Dev heatmap before any
+target; and an **air capture at the start and end of every session** — today's closing pair
+was the single most informative measurement of the day, being the only target-free probe of
+the floor, and two per session makes the floor trackable instead of inferred. (2026-07-28)
+
+---
+
 ### src/pimd_classviz.py — v1.62 — FIX repeat_idx stuck at r1
 
 Bench report: `Fe_spanner_01` rows reading `r1` where they should read `r2` — three rows
