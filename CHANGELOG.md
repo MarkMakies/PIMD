@@ -117,6 +117,62 @@ the floor, and two per session makes the floor trackable instead of inferred. (2
 
 ---
 
+### src/pimd_classviz.py — v1.63 — session logging auto-starts with the stream
+
+Session dumps were opt-in — `Record Session` on the Stats tab, or Session `Start` on the
+Analysis tab — and on 2026-07-29 that cost the day's most wanted measurement. Logging ran
+16:16–16:54 and then stopped; profiling ran 17:41–18:32, and the 47-minute pack-A settle
+between them went unrecorded too. Raw stream is not reconstructable after the fact, and the
+corpus carries no pack voltage, so the battery-settling question could only be answered from
+the 8 minutes that happened to be running. Forgetting to press Record is silent, and the
+loss is permanent.
+
+A dump now opens by itself whenever the stream starts (`start_stop`'s Running branch, and
+`_on_load_run_profile`, which sends its own `G` — the latter is the v1.53 launch auto-start,
+i.e. the entire warm-up and settle window before anyone presses anything). `Start Training`
+is a second-chance backstop, deliberately *not* the primary trigger: what mattered most on
+the 29th happened before any training began. `_apply_profile` already force-closed the dump
+on a dimension change because the header carries `profile_json`/`profile_sha8`; it now opens
+a fresh correctly-headed one instead of leaving the rest of the run dark.
+
+The preference (`Auto-log`, persisted as `session_autolog`) defaults **on**: the failure it
+guards against is unrecoverable, and the opposite mistake costs ~13 MB/hour of gitignored
+CSV — measured at ~220 KB/min from the 29th's own dumps. An explicit Stop latches
+`_session_autolog_suppressed` and stays stopped until the stream is next started, so "stop"
+means stop without meaning "stop for the day". The programmatic force-stops flag themselves
+via `_session_stop_is_forced`, since they reach `_toggle_record_frames` through the same
+`pb_record.setChecked(False)` an operator click does and would otherwise suppress logging as
+a side effect of changing profile.
+
+Auto-started dumps can't prompt — `QInputDialog` is modal and would stall the stream behind
+a dialog nobody asked for — so they get a generated notes line naming the trigger, profile,
+sha8 and supply, and the header records `# session_autostart: true|false`. Pressing Session
+`Start` while one is already running now **adopts** it: prompts, and appends the operator's
+notes mid-file as `# session_notes:` lines via `_append_session_notes` (same write+flush
+pattern as `_append_mark`), rather than refusing or restarting and discarding the frames
+already logged. Requires `pimd_features.py` v8 to read those late notes.
+
+Also fixed, and reachable only because of the above: `_session_start` named files at
+second resolution and opened with `'w'`, so a close-and-reopen inside the same second
+silently truncated the dump just closed. Two deliberate button presses never hit it; the
+auto-restart after a profile change does exactly that back-to-back. Colliding names now take
+a `_2`, `_3` suffix. Consumers glob `session_*.csv` and read the timestamp from the header,
+not the filename, so nothing downstream changes. (2026-07-29)
+
+---
+
+### src/pimd_features.py — v8 — parse mid-stream '# session_notes:' lines
+
+`parse_session_file` recognised `session_notes:` only in the header block; mid-stream it
+handled `mark_target:` and `mark:` and dropped everything else. With classviz v1.63
+auto-starting sessions, the header notes are generated and the operator's own notes are
+appended later, mid-stream — so without this they would be written and never read. One
+`elif`, appending to the same `notes_lines` the header branch fills, so `session_notes` reads
+as one block regardless of where in the file the lines landed. Additive; older session files
+parse identically. (2026-07-29)
+
+---
+
 ### src/pimd_classviz.py — v1.62 — FIX repeat_idx stuck at r1
 
 Bench report: `Fe_spanner_01` rows reading `r1` where they should read `r2` — three rows

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.62
+# PIMD Signature Visualiser (ClassViz) v1.63
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.63 session logging auto-starts with the stream; Session Start adopts a running log
 #   v1.62 FIX repeat_idx stuck at r1 (re-suggest after reload; normalise the placement key)
 #   v1.61 signature list rows carry long axis + repeat; colour is per target
 #   v1.60 remove the face_normal / offset X / offset Y capture inputs (schema unchanged)
@@ -126,7 +127,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.62'
+APP_VERSION = '1.63'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -540,6 +541,27 @@ class MainWindow(QMainWindow):
         # Session Pause button; read by process_packet.
         self._session_paused: bool = False
 
+        # Auto-logging (v1.63). A session dump opens by itself whenever the
+        # stream starts, so a bench run can't silently go unrecorded -- the
+        # 2026-07-29 session lost its whole profiling window and the 47-minute
+        # pack settle before it that way, and raw stream is not recoverable
+        # after the fact.
+        #   _session_autolog            -- operator preference, persisted.
+        #   _session_autolog_suppressed -- latched by an explicit Stop so "stop"
+        #                                  means stop; cleared at the next
+        #                                  stream start.
+        #   _session_autostarted        -- the open file was auto-opened, so
+        #                                  Session Start adopts it (adds notes)
+        #                                  instead of refusing.
+        #   _session_stop_is_forced     -- set by the programmatic force-stops
+        #                                  (_apply_profile, start_stop) so
+        #                                  _toggle_record_frames can tell them
+        #                                  apart from an operator click.
+        self._session_autolog            = True
+        self._session_autolog_suppressed = False
+        self._session_autostarted        = False
+        self._session_stop_is_forced     = False
+
         # Data state — stats
         self._freeze_stats = False
         self._stats_row_height = 22
@@ -818,8 +840,10 @@ class MainWindow(QMainWindow):
         self._set_profile_dims(profile, profile_idx, profile_raw_bytes)
 
         # Old-shape data must not survive a dimension change.
+        was_recording = self._recording
         if self._recording:
-            self.pb_record.setChecked(False)   # triggers _toggle_record_frames → auto-save
+            self._session_stop_is_forced = True   # not an operator Stop; don't suppress auto-log
+            self.pb_record.setChecked(False)      # triggers _toggle_record_frames → auto-save
         self._rolling_buf.clear()
         self._baseline_mean = None
         self._baseline_std  = None
@@ -855,6 +879,15 @@ class MainWindow(QMainWindow):
             self._refresh_analysis_overlays()  # tail-calls _shape_redraw_static()
         self.header_label.setText('Profile {0} — {1} ({2} bands × {3} cells)'.format(
             profile_idx, profile.get('name', '?'), self._n_bands, self._n_cells))
+
+        # v1.63: the dump we just force-closed was headed with the *old*
+        # profile_json/sha8, so continuing into it was never an option -- open
+        # a fresh, correctly-headed one rather than leave the rest of the run
+        # unlogged. Only if a recording was actually interrupted; a profile
+        # change while idle stays idle. Last in the method so the new header is
+        # written against the fully-applied profile.
+        if was_recording:
+            self._maybe_autostart_session('profile change')
 
     # ------------------------------------------------------------------
     # Colormaps
@@ -1265,6 +1298,13 @@ class MainWindow(QMainWindow):
         self._apply_profile(profile, DYNAMIC_PROFILE_INDEX, profile_raw_bytes)
         self.pb_start.setText('Running')
         self.pb_start.setStyleSheet(self.MY_GREEN)
+        # This path sends its own 'G' rather than going through start_stop(), so
+        # it has to arm auto-logging itself -- and it matters most here: it is
+        # the v1.53 launch auto-start, i.e. the whole warm-up and settle window
+        # before anyone presses anything. No double-open risk: if _apply_profile
+        # above already reopened a dump, _maybe_autostart_session no-ops.
+        self._session_autolog_suppressed = False
+        self._maybe_autostart_session('profile load + run')
         self.statusBar().showMessage('Loaded and running profile: {0}'.format(
             profile.get('name', name)))
 
@@ -1856,6 +1896,18 @@ class MainWindow(QMainWindow):
         self.pb_sig_session_mark.setEnabled(False)
         self.pb_sig_session_mark.clicked.connect(self._on_sig_session_mark)
         row_b.addWidget(self.pb_sig_session_mark)
+
+        self.cb_session_autolog = QCheckBox('Auto-log')
+        self.cb_session_autolog.setChecked(self._session_autolog)
+        self.cb_session_autolog.setToolTip(
+            'When checked, a session dump opens by itself as soon as the stream '
+            'starts (and again after a profile change, which needs a new header), '
+            'so nothing goes unrecorded. Start Training opens one too as a '
+            'backstop. Auto-started sessions get a generated notes line; press '
+            'Start to add your own to a session already running. An explicit Stop '
+            'suppresses auto-logging until the next stream start.')
+        self.cb_session_autolog.toggled.connect(self._on_session_autolog_toggled)
+        row_b.addWidget(self.cb_session_autolog)
 
         self.lbl_sig_session_status = QLabel('Not recording')
         row_b.addWidget(self.lbl_sig_session_status)
@@ -3207,6 +3259,12 @@ class MainWindow(QMainWindow):
             self.pb_sig_train_start.blockSignals(False)
             self.statusBar().showMessage(refuse)
             return
+        # v1.63 backstop. Stream start is the primary trigger and will normally
+        # have opened a dump already, in which case this no-ops; it only bites
+        # if logging was never armed or the stream predates the preference.
+        # Deliberately after the refuse-guard -- a training start that was
+        # rejected shouldn't leave a session file behind.
+        self._maybe_autostart_session('training start')
         self._sig_air_before = None
         self._sig_air_after  = None
         self._sig_target     = None
@@ -4240,15 +4298,63 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('Connect and start streaming before recording a session.')
             return
         if self._recording:
+            # v1.63: an auto-started session has only a generated notes line, so
+            # Start *adopts* it -- prompt, append the operator's notes mid-file
+            # and leave the recording running. Restarting would cost the frames
+            # already logged, which is the opposite of what auto-logging is for.
+            if self._session_autostarted:
+                notes, ok = QInputDialog.getMultiLineText(
+                    self, 'Session notes',
+                    'Notes for this (auto-started) session:')
+                if ok and notes.strip():
+                    self._append_session_notes(notes)
+                    self.statusBar().showMessage('Notes added to {0}'.format(self._session_path))
+                return
             self.statusBar().showMessage('A session is already recording — stop it first.')
             return
-        self._session_start()   # notes=None -> interactive prompt, same as the plain Stats-tab flow
+        self._begin_session()   # notes=None -> interactive prompt, same as the plain Stats-tab flow
+
+    def _begin_session(self, notes=None, auto=False):
+        """Open a session dump and bring the Analysis tab's Session controls and
+        the Stats tab's Record button into the recording state. Shared by the
+        Session Start button and the v1.63 auto-start path so the two can't
+        drift out of step; the pb_record sync is blockSignals'd because
+        _session_start() has already done the work _toggle_record_frames would."""
+        self._session_start(notes, auto=auto)
         self.pb_record.blockSignals(True)
         self.pb_record.setChecked(True)
         self.pb_record.blockSignals(False)
         self._analysis_session_recording = True
         self._set_sig_session_active_ui(True)
         self._update_sig_session_status_label()
+
+    def _on_session_autolog_toggled(self, checked):
+        self._session_autolog = checked
+        if checked:
+            # Re-arming by hand clears any suppression a previous Stop latched,
+            # otherwise ticking the box would look like it did nothing.
+            self._session_autolog_suppressed = False
+            self._maybe_autostart_session('auto-log enabled')
+        self._update_sig_session_status_label()
+
+    def _maybe_autostart_session(self, trigger):
+        """Open a session dump unattended, if one isn't already open and the
+        operator hasn't opted out. Silent no-op in every refusing case -- this
+        runs from stream start, training start and profile changes, none of
+        which should nag. `trigger` names the caller in the notes line so the
+        dump says why it exists."""
+        if not self._session_autolog or self._session_autolog_suppressed:
+            return
+        if self._recording:
+            return
+        if not self.serial.isOpen() or self.pb_start.text() != 'Running':
+            return
+        profile_name = (self._profile or {}).get('name', 'unknown')
+        self._begin_session(
+            notes='(auto) {0}; {1} / {2}; supply {3}'.format(
+                trigger, profile_name, self._profile_sha8, self.cb_supply.currentText()),
+            auto=True)
+        self.statusBar().showMessage('Auto-logging session: {0}'.format(self._session_path))
 
     def _on_sig_session_pause_toggled(self, checked):
         # process_packet's frame-write gate and the mark handler both read this
@@ -4304,10 +4410,19 @@ class MainWindow(QMainWindow):
 
     def _update_sig_session_status_label(self):
         if not self._analysis_session_recording:
-            self.lbl_sig_session_status.setText('Not recording')
+            # Naming the suppression is the point: after an explicit Stop the
+            # box is still ticked but nothing will auto-start until the stream
+            # is restarted, and a silent "Not recording" would hide that.
+            if self._session_autolog and self._session_autolog_suppressed:
+                self.lbl_sig_session_status.setText('Not recording (auto-log off until restream)')
+            elif self._session_autolog:
+                self.lbl_sig_session_status.setText('Not recording (auto-log armed)')
+            else:
+                self.lbl_sig_session_status.setText('Not recording')
         else:
-            self.lbl_sig_session_status.setText(
-                'Recording{0}'.format(' (paused)' if self._session_paused else ''))
+            self.lbl_sig_session_status.setText('Recording{0}{1}'.format(
+                ' (auto)' if self._session_autostarted else '',
+                ' (paused)' if self._session_paused else ''))
 
     # ------------------------------------------------------------------
     # Tab 3 — Family Plane Analysis (internally still `shape`; the tab was
@@ -6572,13 +6687,20 @@ class MainWindow(QMainWindow):
             self.pb_start.setText('Stopped')
             self.pb_start.setStyleSheet(self.MY_YELLOW)
             if self._recording:
-                self.pb_record.setChecked(False)   # auto-save recorded frames
+                self._session_stop_is_forced = True   # stopping the stream, not opting out of logging
+                self.pb_record.setChecked(False)      # auto-save recorded frames
         else:
             if not self.serial.isOpen():
                 return
             self.send_command('G')
             self.pb_start.setText('Running')
             self.pb_start.setStyleSheet(self.MY_GREEN)
+            # v1.63 primary auto-log trigger. A fresh stream is also the point
+            # at which a previous explicit Stop stops applying -- that latch is
+            # scoped to one streaming run, so "stop logging this run" doesn't
+            # quietly become "stop logging all day".
+            self._session_autolog_suppressed = False
+            self._maybe_autostart_session('stream start')
 
     # ------------------------------------------------------------------
     # Packet handling
@@ -6845,22 +6967,47 @@ class MainWindow(QMainWindow):
         if checked:
             self._session_start()
         else:
+            # v1.63: the programmatic force-stops (_apply_profile on a dimension
+            # change, start_stop on stream stop/disconnect) reach here through
+            # the same pb_record.setChecked(False) an operator click does, so
+            # they flag themselves first. Only a real click suppresses
+            # auto-logging -- otherwise changing profile would silently turn
+            # recording off for the rest of the run.
+            forced = self._session_stop_is_forced
+            self._session_stop_is_forced = False
             self._session_stop()
+            if not forced and self._session_autolog:
+                self._session_autolog_suppressed = True
+                self.statusBar().showMessage(
+                    'Session stopped — auto-logging suppressed until the stream is restarted.')
+                self._update_sig_session_status_label()
 
-    def _session_start(self, notes=None):
+    def _session_start(self, notes=None, auto=False):
         """Open a new self-describing session-dump CSV and write its header.
         notes: pre-supplied session notes, skipping the interactive prompt. If
-        None (both current callers -- the Stats tab's "Record Session" button
-        and the Analysis tab's Session Start), prompts the operator via
-        QInputDialog. The parameter is kept because _session_write_header takes
-        the notes either way; v1.39 removed the one caller that pre-supplied
-        them (the Training Session tab derived them from its run list)."""
+        None (the Stats tab's "Record Session" button and the Analysis tab's
+        Session Start), prompts the operator via QInputDialog.
+        auto: opened unattended by _maybe_autostart_session (v1.63), which
+        always supplies notes -- the QInputDialog is modal and would stall the
+        stream behind a dialog nobody asked for."""
         if notes is None:
             notes, _ = QInputDialog.getMultiLineText(
                 self, 'Session notes', 'Planned target order / notes for this session:')
+        self._session_autostarted = auto
         os.makedirs(SESSIONS_DIR, exist_ok=True)
         ts   = datetime.now()
-        path = os.path.join(SESSIONS_DIR, 'session_{0}.csv'.format(ts.strftime('%Y%m%d_%H%M%S')))
+        # Second-resolution names collide when a dump closes and reopens inside
+        # the same second, and 'w' would silently truncate the one just closed.
+        # Harmless while recording was two deliberate button presses; v1.63's
+        # auto-restart after a profile change does exactly that back-to-back,
+        # so suffix rather than overwrite. Consumers glob session_*.csv and read
+        # the timestamp from the header, not the filename.
+        stem = 'session_{0}'.format(ts.strftime('%Y%m%d_%H%M%S'))
+        path = os.path.join(SESSIONS_DIR, stem + '.csv')
+        seq  = 1
+        while os.path.exists(path):
+            seq += 1
+            path = os.path.join(SESSIONS_DIR, '{0}_{1}.csv'.format(stem, seq))
         f = open(path, 'w')
         self._session_write_header(f, ts, notes)
         self._session_file        = f
@@ -6888,6 +7035,10 @@ class MainWindow(QMainWindow):
         f.write('# PIMD session dump\n')
         f.write('# session_start_iso: {0}\n'.format(ts.isoformat()))
         f.write('# tool: pimd_classviz.py v{0}\n'.format(APP_VERSION))
+        # v1.63: lets the analysis side tell an unattended dump from one the
+        # operator deliberately started (and so how much to trust the notes).
+        f.write('# session_autostart: {0}\n'.format(
+            'true' if self._session_autostarted else 'false'))
         f.write('# firmware_v_response (V<fw>,<board_id>,<num_profiles>,<active_idx>,'
                 '<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>): {0}\n'.format(fw_line))
         f.write('# fw_version: {0}\n'.format(self._parsed_fw_version()))
@@ -6946,10 +7097,14 @@ class MainWindow(QMainWindow):
         # tab's Session controls never get stuck in a "started" state when the
         # underlying recording is closed out from under them.
         self._session_paused = False
+        self._session_autostarted = False
         if self._analysis_session_recording:
             self._analysis_session_recording = False
             self._set_sig_session_active_ui(False)
-            self._update_sig_session_status_label()
+        # Unconditional since v1.63: the idle label now also reports whether
+        # auto-logging is armed or suppressed, which is true regardless of
+        # which tab started the recording that just closed.
+        self._update_sig_session_status_label()
 
     # ------------------------------------------------------------------
     # Ground-truth marks (low-level writer, used by the Analysis tab's Session)
@@ -6964,6 +7119,16 @@ class MainWindow(QMainWindow):
         readyRead event, not re-entered by this call)."""
         ts = datetime.fromtimestamp(time.time()).isoformat()
         self._session_file.write('# mark: {0}, {1}\n'.format(ts, text))
+        self._session_file.flush()
+
+    def _append_session_notes(self, text):
+        """Append operator notes to a session already recording (v1.63), one
+        '# session_notes:' line per line of text -- the same key the header
+        uses, so pimd_features collects header and late notes into one
+        session_notes string (features v8 reads the mid-stream ones). Same
+        write+flush pattern and the same cheapness argument as _append_mark."""
+        for line in text.splitlines():
+            self._session_file.write('# session_notes: {0}\n'.format(line))
         self._session_file.flush()
 
     def _append_mark_target(self, target_id, placement):
@@ -7298,6 +7463,14 @@ class MainWindow(QMainWindow):
 
             self.cb_supply.setCurrentText(s.get('supply', SUPPLY_CHOICES[0]))
 
+            # Defaults on (v1.63): the failure this guards against -- a bench
+            # run that turns out not to have been recorded -- is unrecoverable,
+            # and the cost of the opposite mistake is ~13 MB/hour of gitignored
+            # CSV. setChecked drives _on_session_autolog_toggled, which is safe
+            # here: nothing is streaming yet, so _maybe_autostart_session no-ops.
+            self._session_autolog = bool(s.get('session_autolog', True))
+            self.cb_session_autolog.setChecked(self._session_autolog)
+
             # Last-used target_id + placement ARE persisted (v1.32+) -- the
             # original "don't persist target/distance" foot-gun above was
             # about *free text*: a stale/typo'd string looked plausible
@@ -7493,6 +7666,7 @@ class MainWindow(QMainWindow):
             'std_upper':       self.sp_std_upper.value(),
 
             'supply': self.cb_supply.currentText(),
+            'session_autolog': self.cb_session_autolog.isChecked(),
 
             'sig_target_id':   self.sig_target.currentData(),
             'sig_distance_mm': self.sig_distance_mm.value(),

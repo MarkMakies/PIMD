@@ -15,6 +15,7 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v8 parse_session_file: '# session_notes:' lines interspersed among data rows now parsed
 #   v7 doc-only: supply provenance vocabulary now battery|psu (free text; older corpora may hold 'usb')
 #   v6 structured target-metadata capture regime (registry-backed target_id + placement + provenance)
 #   v5 plateau_amp_mV/splithalf_floor restored to the v1 corpus's L2 convention
@@ -84,7 +85,7 @@ import matplotlib.pyplot as plt
 import pimd_target_check
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TOOL_VERSION = 'pimd_features.py v7'
+TOOL_VERSION = 'pimd_features.py v8'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling
@@ -302,6 +303,14 @@ def parse_session_file(path):
                             mark_targets.append(parsed)
                     elif content.startswith('mark:'):
                         marks.append(_parse_mark_content(content))
+                    elif content.startswith('session_notes:'):
+                        # v8: classviz v1.63 auto-starts a session with the
+                        # stream, so its header notes are generated; the
+                        # operator's own notes are appended later, mid-stream.
+                        # Collected into the same notes_lines the header branch
+                        # fills, so session_notes reads as one block regardless
+                        # of where in the file the lines landed.
+                        notes_lines.append(content.split(':', 1)[1].strip())
                     # else: unrecognised '#' line mid-stream - ignored
                     continue
                 parts = line.split(',')
