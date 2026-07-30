@@ -1,3 +1,61 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-07-30
+
+### DESIGN.md — 1.11 — consolidation pass (§18)
+
+Human-directed, read-only rule suspended per §18. Consolidates the 73 entries above the
+previous marker (241 headings total across the file, all preserved byte-for-byte — only the
+marker moved). Net state determined per file first; **the CHANGELOG's two contradicting
+warm-up entries were resolved, not replayed.**
+
+**The correction that drove the pass.** The 2026-07-29 entry titled *"the warm-up transient is
+two threshold columns, and it is soak time, not pack state"* is overturned by the 2026-07-30
+pack-voltage entry. Its **column-localisation result is carried** (reconfirmed at r = 0.9960);
+its **causal attribution is not**, and neither are its four supporting arguments or its claim
+that the coherence result contradicted §17.10 — that claim was withdrawn before it ever reached
+DESIGN.md, so there was nothing to retract, only something not to import.
+
+**Sections changed.** Header → Doc-rev 1.11, fw v4.27, classviz v1.66, delaycal v1.29,
+features v11, target_check v4, corpus_check v1.8, profile `cal_63_air_bat_v3`. §1 status
+rewritten (lock landed, registry v3, pack state of charge is now an operating variable). §3 —
+SoC supply note scoped, Mode 2 warm-up flagged as not holding for this profile on battery, new
+time-to-usable-data bullet by criterion. §8 — fw v4.27 emit-block counters and the
+`ticks_ms`-not-`ticks_us` reason. §9 — `B` documented at all (it had existed undocumented since
+v4.11) plus its two new fields, flagged as an additive wire-format extension with no parser in
+`src/`. §10 — new operating-profile section for v3, v2 demoted to superseded, and **both items
+the 1.10 pass deferred are cashed in**: the state-of-charge window is now a stated term of the
+profile contract, and the threshold-geometry change makes the §13 portability question live.
+§12 — the state-of-charge claim scoped to its measured interval, ≈ 23.5 V data-quality ceiling
+added beside the 21.0 V regulation floor as a *different kind* of limit, pack capacity and
+idle-drain figures, measured 0.29 V IR drop. §13 — ladder move, plus the general observation
+that a fixed threshold ladder samples a decay whose scale moves with the pack. §14.1
+reattributed (discharge, not soak — thermal drift stays open and is the smaller effect), §14.3
+partially answered on battery, §14.7 **resolved in mechanism** with follow-ups now required to
+state a pack voltage, and two new open problems: §14.10 host-blocks-MCU, §14.11 the
+`(9 µs, 4.9 V)` corner and why a *static* cell exclusion cannot work. §15 — five tool rows
+rewritten, registry v3 promoted with v1 kept as the registry the 2026-07-23 corpus must be read
+against, `utilities/` inventoried with both tools, new `src/data/sessions/` row, and
+`NEXT_SESSION_soak_vs_voltage.md` cited for its pre-registered predictions. §16 — stale
+selftest corpus path corrected, registry and corpus check invocations added. §17 banner scoped;
+§17.10 scoped to its 0.55 V interval with its voltage-domain inference re-supported; new
+§17.11 (v3 lock, 0.3 mV convergence, thermal-convergence criterion), §17.12 (the corner, two
+supply nulls, the retracted floor-doubling reading), §17.13 (the pack-voltage result).
+
+**Dropped:** only §10's "recalibration in progress, nothing locked" block, superseded by the
+lock; its two forward-looking warnings are cashed in rather than lost. No §3 or §17.1–17.9
+content removed. Not carried into DESIGN.md, as changelog-only: the two corpus data repairs,
+the eight `repeat_idx` renumberings, per-version verification detail, and the `[FILL:]` markers
+— except §14.7's, which the pack-voltage result answers.
+
+**Flagged, not fixed (source edits, out of scope for a doc pass).** `pimd_classviz.py`'s header
+title line reads **v1.63** against `APP_VERSION = '1.66'` — the same desync features v9 fixed
+for itself; DESIGN records v1.66 as the net version. And **USAGE.md v1.24/v1.25/v1.26 have no
+entries in this file**, existing only in USAGE.md's own inline changelog, which puts three
+versions of history outside the single source of detailed history. (2026-07-30)
+
+---
+
 ### findings — pack A capacity and drain rates: the clean window is 4.5 h of streaming
 
 *Cycle-derived from the `# pack_v:` lines in the seven 2026-07-30 dumps 08:28 → 20:46 — pack A,
@@ -2797,8 +2855,6 @@ point for any recalibration, with the settings-persistence trap that motivates i
 previous-epoch tools — it is tracked, v1.6, and current. (2026-07-24)
 
 ---
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-24
 
