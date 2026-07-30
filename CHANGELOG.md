@@ -1,3 +1,293 @@
+### findings — pack A capacity and drain rates: the clean window is 4.5 h of streaming
+
+*Cycle-derived from the `# pack_v:` lines in the seven 2026-07-30 dumps 08:28 → 20:46 — pack A,
+one complete discharge, 33 readings of which 21 settled-under-load · analysed with
+`utilities/pack_discharge/packv.py` v3*
+
+**Supporting the entry below, not disputing it.** The `findings — the 3.80/4.40 V transient is
+PACK VOLTAGE, not soak time` entry establishes the mechanism and the 21.5 – 23.3 V operating
+window; nothing here touches either. What it adds is a **denominator**. That entry's numbers are
+intervals — "the top ~2 h of pack capacity", "a 1.5–2 h wait" — and an interval cannot say what
+fraction of a pack it is, or how long the window it recommends actually lasts.
+
+**Independent agreement first, because the extrapolations are only worth as much as it.** Fitting
+a constant-current discharge to the `pack_v` track says pack A took **110 min** to fall 24.55 →
+23.28 V. That entry measured **114 min** by an unrelated route — `soakvolt.py`, provenance-graded
+notes and interpolation. The same fit puts the unusable top of the pack at **1.78 h** against its
+"1.5–2 h". Two methods sharing no code and no metric, agreeing to 3.5%.
+
+**Pack A, full to empty under continuous streaming load: 620 streaming-minutes (10.33 h.)**
+Residual RMS 46 mV; leave-one-out over the 21 settled readings holds the runtime within
+613–624 min, a 1.7% spread. From which:
+
+| | streaming hours | share of the pack |
+|---|---|---|
+| full → 23.3 V — unusable, above the data-quality ceiling | 1.78 h | 17% |
+| **23.3 → 21.5 V — the clean window** | **4.55 h** | **44%** |
+| 21.5 V → empty — below the window | 4.0 h | 39% |
+
+**4.55 h is the session-planning number.** The operating window was specified in volts, which
+says where to run but not how long a session can last inside it. Just under half the pack is
+usable for profiling, and it is the middle half.
+
+**Idle drain is 0.019 V/h against 0.28–0.34 V/h streaming — roughly 15×.** Measured across the
+1.6 h load-off gap between the 15:36 and 17:11 readings (22.25 → 22.22 V). This turns "do not
+start a profiling session on a freshly-charged pack" into something actionable: **a fresh pack
+cannot be idled down into the window.** At 0.019 V/h the top 1.4 V would take three days. It has
+to be *streamed* off, so the 1.78 h is unavoidable bench time rather than a wait that can be
+scheduled around — and it is 17% of the pack spent reaching a usable state.
+
+**Capacity, inferred and labelled as such.** 10.33 h at DESIGN §17.1's measured ~0.5 A average
+gives **≈5.2 Ah**, which is the nominal capacity of a 6S2P pack of the ICR18650-26C cells — so
+pack A is behaving at about its rated capacity despite being built from recovered laptop cells.
+This *infers* construction from behaviour and does not establish it; it bears on argument 1 of the
+entry below (packs A and B differing in internal resistance) without resolving it.
+
+**One caution on the voltage axis of that entry's central table, offered as a flag rather than a
+correction.** Its `07-30 15:01 first` row reads **22.85 V, grade `typed`** — a genuine fresh DMM
+reading, correctly graded, taken 20 s after load came on following a 94-minute rest. But a pack
+that has just come off a rest has not finished settling: the same session reads 22.66 V at
+3.4 min and 22.34 V at 25 min, and steady discharge over that first 3.4 min accounts for only
+0.019 V of the 0.19 V drop. **~0.17 V of it is load-settling**, so that row sits about 0.17 V
+above the settled loaded voltage its correlation is against. Corrected it reads ≈22.67 V, which
+is still inside the 22.5 – 24.0 V transition band, so **the threshold-crossing structure and
+every conclusion drawn from it are unaffected** — the pre-registered 15:01 prediction test likewise.
+It is worth recording only because that is one of two `typed` anchors in the table and the effect
+is systematic in one direction: any reading taken within a few minutes of load-on after a rest
+reads high. `soakvolt.py` already excludes *unloaded* readings and refuses to interpolate across a
+rest; this is the narrower case of a loaded-but-not-yet-settled one. `packv.py` drops anything
+within 5 min of load-on for exactly this reason.
+
+**Limits.** Pack A only, one cycle, and the terminal knee below 21.08 V is extrapolated rather
+than observed. `x = 0` assumes a full pack when the 08:28 session opened — no voltage was logged
+in that dump at all, so the assumption rests on the operator's handwritten 24.55 V note and on
+the 110-vs-114-min agreement. And it bears **not at all** on the +15 V rail under scope during a
+TX pulse, which that entry correctly names as the highest-value measurement outstanding: this is
+a DMM-on-terminals result and cannot see pulse-instant sag.
+
+**For the next §18 consolidation pass**, one amendment only:
+
+| section | amendment |
+|---|---|
+| **§12 Power system** | Add pack-A capacity beside the 21.0 V floor and the new ≈23.5 V ceiling: **620 streaming-min (10.3 h) full to empty at the §17.1 ~0.5 A average, ≈5.2 Ah**, of which the clean 23.3–21.5 V window is **4.55 h (44%)** and the unusable top is **1.78 h (17%)**. Record that **idle drain is ~15× below streaming drain (0.019 vs 0.28–0.34 V/h)**, so the pack cannot be idled into the window. |
+
+(2026-07-30)
+
+---
+
+### repo — `/utilities/`: local analysis tools, and how their history is kept
+
+Analysis tools that are not part of the PIMD toolset live under `/utilities/`, one directory each.
+They are ordinary tools by convention — `TOOL_VERSION`, a terse `# History:` lineage in the
+header, read-only with respect to the repo — and their history is recorded **here, in this file**,
+under a `### utilities/<name>/ — v<N>` heading like any other.
+
+There was briefly a separate untracked `CHANGELOG.local.md` for them. It is **gone**: a second
+change log meant two places to look, two formats to keep in step, and a standing risk that the
+detail behind a tracked finding lived in a file no clone would ever have. `CHANGELOG.md` is the
+single source of detailed history, and these tools are inside it.
+
+The rule that made the split untenable is worth stating, because it is what caught the problem:
+**a utility cited from `CHANGELOG.md` has to be tracked.** The 2026-07-30 pack-voltage finding
+names `soakvolt.py` as the tool behind its central result; had that file stayed excluded from git,
+the project's headline finding would not have been reproducible from a clone. Anything cited gets
+tracked. (2026-07-30)
+
+---
+
+### utilities/soak_vs_voltage/ — v1 — separate pack voltage from soak time
+
+`soakvolt.py` v1 reads every classviz session dump for the campaign and separates the two
+variables that every session before 2026-07-30 had confounded in the same direction. Emits
+JSON; `soakvolt.json` is the 2026-07-30 run over all nine dumps (435k frames).
+
+**Why it exists.** The 2026-07-30 warm-up findings entry attributed the 3.80/4.40 V threshold
+transient to soak time, from four within-session arguments. Within one session soak and pack
+voltage are perfectly confounded (ρ 0.80–0.91 against either, identical magnitude), so no
+within-session correlation could have settled it — a tool that works across sessions and grades
+its own inputs was the only way. **It overturned the conclusion:** see the
+`### findings — the 3.80/4.40 V transient is PACK VOLTAGE, not soak time` entry in
+the `findings` entry above, which is where the result lives; this entry records only the tool.
+
+**What it does that a one-off script would not have.**
+
+- **Window hygiene as a span test, not a masked clock range.** A 50-frame window is one
+  measurement only if those frames arrived a nominal period apart. The test is
+  `WINDOW_SPAN_TOLERANCE × nominal` on the firmware clock, mirroring
+  `pimd_classviz._window_frames`, so it caught the 2026-07-29 host stall (34 windows rejected)
+  without being told about it — and would catch an unknown one. A hardcoded 23:03–23:50 mask
+  would have passed the first test and failed the real job.
+- **Three provenance grades on every pack-voltage figure**, never mixed silently: `typed`
+  (`age_s` ≤ 30 s), `held` (a large `age_s`, or the pre-v1.66 two-field form), `note`
+  (handwritten DMM readings, the only record for the two oldest dumps), degrading to
+  `interp`/`extrap`. The `age_s` correction — true measurement time is `logged − age_s` — is
+  inherited from `pack_discharge/packv.py`, where it was established, rather than re-derived.
+  A header `pack_v` with `age_s=unknown` is **dropped**: it is a settings restore, not a reading.
+- **Loaded readings only.** Loaded and unloaded differ 0.4–0.5 V, so mixing them manufactures a
+  step at every session boundary. Interpolation is never carried across a rest, because a rested
+  pack rebounds (22.56 → 22.85 with no charging) — gaps are held flat and reported as `extrap`.
+- **Startup transient removed by test, not by duration.** The 08:28 dump reads 14–16 mV on all
+  nine columns in its opening minutes — a global stream-start event. Detected as
+  "every column above 5× its own session floor", so it cannot silently eat real warm-up.
+- **Operating point per band**, which is what identifies the mechanism: a supply change moves all
+  seven bands the same way, a thermal change moves light and heavy bands in opposite directions.
+
+Uses `pimd_features` v11's new `SessionData.fw_seconds` — the firmware clock. v11 exists because
+this analysis needed it and `parse_session_file()` had been discarding it; the alternative was
+hand-rolling a reader, which the handover brief explicitly ruled out. (2026-07-30)
+
+---
+
+### utilities/pack_discharge/ — v3 — the fitted offset is not internal resistance
+
+Both files v3. Pure relabelling — the fitted values are bit-identical, verified against a
+recorded baseline (T 619.7870428168494, RMSE 0.04560715568551285, LOO spread 1.7327994684664263
+before and after). What changed is what the number is *called* and what it is claimed to be.
+(2026-07-30)
+
+**The error.** v1 and v2 named the second fitted parameter `sag` and reported it everywhere —
+JSON, README, page prose — as the pack's IR drop under load: 159 mV/cell, ~0.95 V at the pack.
+The page went further and asserted "a full pack reads 0.93 V lower with the coil driving than it
+does at rest", which is a physical claim about the hardware. It is wrong by about 3×. The
+operator had already measured it directly: pack B at **25.04 V no-load / 24.96 MCU-only /
+24.75 V running — 0.29 V**, recorded in the tracked 2026-07-30 findings entry. Caught only by
+reading `CHANGELOG.md` properly while checking whether this session had anything to contribute.
+
+**What the parameter actually is.** A curve-alignment constant. The model applies a nominal
+ICR18650-26C OCV shape it cannot deform, so the offset absorbs whatever mismatch exists between
+that published shape and these cells — and the mismatch is evidently around 0.66 V of the
+0.95 V. Renamed to `offset` in code and `curve_offset_v_per_cell` in the JSON, with both the
+module docstring and the page stating the 0.29 V comparison outright rather than leaving the
+misreading available.
+
+**What this costs the result, and what it doesn't.** The runtime is unaffected and still stands:
+it is cross-checked two ways that do not depend on the curve's absolute placement — leave-one-out
+(1.7% over 21 readings), and independent agreement with the operator's own interval measurement
+(110 min against their 114 min for pack A over 24.55 → 23.28 V). What is now explicitly *not*
+trustworthy is the shape: the voltage axis is an alignment of a nominal curve, not a measured
+one, so **trust the runtime the fit implies, not the curve it draws.** Stated in the README and
+on the page rather than held here.
+
+**Worth generalising.** A two-parameter fit will give a physically-named parameter a confident
+value whether or not that name is right, and nothing in the residual complains — RMSE was 46 mV
+throughout, which looked like a good fit and was, of the wrong thing. The check that caught it
+was an independent direct measurement of the same quantity, not any internal diagnostic. Where a
+fitted parameter carries a physical name, it needs an external number to be held against before
+it is reported as that quantity.
+
+---
+
+### utilities/pack_discharge/ — v2 — refuse to fit across a recharge
+
+`packv.py` v2 detects charge cycles and analyses one at a time; `build_page.py` v2
+renders the resulting caveats as a banner above the numbers. (2026-07-30)
+
+**Found by being caught out.** The pack was swapped at 20:52 — 21.08 V out, 24.94 V
+in — while v1 was still being verified. v1 fitted straight across the step and
+reported a confident **T = 1738 min** and "4.81 h to the 21.0 V floor". Both were
+nonsense: a 3 V rise reads as negative discharge. The only outward sign was the
+residual, which blew from ~50 mV to **1113 mV** — a number v1 computed, put in its
+JSON, and never surfaced. Silent wrongness is the worst failure mode available to a
+tool like this, and v1 had it.
+
+**Cycle detection.** Any rise beyond `--recharge-v` (default 0.8 V) between
+consecutive datable readings opens a new cycle. The threshold has to clear rest
+recovery, which is real and was measured at **+0.29 V** across a 2 h load-off gap
+earlier the same day; a pack swap is an order of magnitude larger, so the gap
+between the two is comfortable. Streaming time is re-zeroed per cycle, which also
+makes the `x = 0` assumption explicit per pack rather than per day.
+
+**Default is the latest cycle**, on the grounds that the live question is almost
+always about the pack currently on the bench. `--cycle 0` (or any index) reaches an
+earlier one; `--cycle all` restores the old across-everything behaviour for
+anyone who wants to see the step.
+
+**Fit-quality warnings**, emitted to stderr and rendered on the page rather than
+left in the JSON: more than one cycle present, fitted span under 0.5 V, fewer than
+5 settled readings, or residual RMS over 200 mV. The fresh pack trips three of the
+four — 3 readings across 0.45 V, all near full — and the page now says so instead
+of printing an authoritative 2.9 h runtime. That is the intended behaviour: the
+tool should be least confident exactly when it has least to go on.
+
+**Cycle 0 re-fitted cleanly** once separated: **T = 620 min (10.33 h)**, sag
+159 mV/cell, residual RMS 46 mV, leave-one-out spread 1.7% over 21 settled
+readings — better constrained than the mid-afternoon figures, because the discharge
+ran far enough down to put real curvature in the data.
+
+**Accidental validation.** At 20:20 the model put the 21.0 V crossing at roughly
+20:47. The pack came off at 20:52 reading 21.08 V. Nobody planned that as a test,
+and one coincidence is not a validation series, but the prediction was right to
+within a few minutes on the one occasion it could be checked.
+
+---
+
+### utilities/pack_discharge/ — v1 — pack discharge rate from session dumps
+
+Derives the 6S pack's discharge rate, state of charge, and remaining streaming
+runway from the `# pack_v:` comment lines a classviz session dump already carries.
+Two files: `packv.py` v1 parses and fits, emitting JSON; `build_page.py` v1
+renders that JSON to a self-contained HTML page. Written 2026-07-30 against that
+day's seven sessions (30 readings, 18 usable).
+
+**Why it exists.** Pack voltage is not telemetry — there is no voltage field in the
+serial protocol (DESIGN §9) and no sensing hardware (DESIGN §12, and the v1.66
+CHANGELOG entry establishes there is no divider and no thermistor on the 6.04
+schematic). The only record of pack state is what the operator typed and pressed
+`Log V` on. That record turned out to be rich enough to answer "how long until the
+21.0 V working floor", which is an operational question that came up mid-session
+and had no tool.
+
+**What the fit does.** The classviz profile loop draws a fixed duty, so current is
+constant, so charge drains linearly in *streaming* time — state of charge is a
+straight line by construction, and that is the x axis. Two free parameters are
+fitted to the readings themselves rather than taken from a datasheet: `T`, the
+streaming minutes from full to the empty-cell voltage, and `sag`, a constant IR
+drop per cell. On 2026-07-30 that gave **T ≈ 614 min (10.2 h)** and **156 mV/cell**
+of sag, residual RMS ≈ 50 mV, over 18 settled readings spanning 23.04 → 21.23 V.
+
+**Three corrections the raw log requires**, each of which changes the answer rather
+than merely tightening it:
+
+- `age_s` must be applied. A dump's *header* `# pack_v:` line is the spinbox value
+  restored at session open, not a fresh reading — the 17:10 session opened with
+  `22.25, age_s=5659`, measured 95 min before that session existed. Applying it
+  recovers a genuine reading and collapses phantom duplicates. Header lines with no
+  `age_s` (pre-v1.66 two-field form, or `age_s=unknown`) cannot be dated and are
+  dropped. This is the v1.66/features-v10 `age_s` work being cashed in.
+- The axis must be accumulated streaming minutes, not wall clock. Idle drain measured
+  0.019 V/h against 0.276 V/h streaming, a ~14× ratio; wall clock would flatten the
+  slope through every gap between sessions. Per-session streaming time comes from
+  each dump's first→last data-row span, because `# soak:` lines exist only in recent
+  dumps and one reported `streamed_s=0`.
+- Readings within 5 min of load-on are rested voltage, not settled-under-load, and
+  sit high — 15:01:45 read 22.85 V, *above* 12:38's 22.56 V, after a 2 h rest.
+  Excluded from the fit, drawn hollow.
+
+**The methodological trap worth recording.** The first version of this claimed
+split-half cross-validation as evidence: fitting the newest session alone gave
+618.6 min against 608.2 min from the earlier ones, "agreeing to 1.7%". That was
+**coincidence, not robustness**, and it broke as soon as more readings arrived —
+the same split then reported a 52% spread. Cause: the newest session's readings
+span under 1 V, all of it plateau, and across so little voltage `T` and `sag` trade
+off freely, so that subset returns T ≈ 1030 min with a compensating +307 mV/cell
+sag. It has no leverage on `T` at all. Splitting by session correlates with voltage
+range, so it was never a valid partition. Replaced with **leave-one-out** (refit
+dropping each reading in turn), which held T within 614–627 min, a 2.1% spread. The
+subset fits are still reported, now with each subset's voltage span alongside, as a
+conditioning diagnostic rather than as validation. Practical consequence, and the
+most useful thing this exercise produced: **constraining the runtime needs
+curvature, not more points on the flat** — readings taken early in a charge cycle
+are worth far more than readings near the floor.
+
+**Standing limitation.** `x = 0` assumes the pack was full when the day's first
+session began. Nothing in the data confirms it — on 2026-07-30 no voltage was
+logged before 11:29, roughly 3 h into the day's streaming. If the pack started down,
+`T` is not full-pack capacity but a scaled equivalent and every projection shifts
+with it. The terminal knee is likewise extrapolated, not observed. Neither is
+fixable by better fitting; both are fixed by taking a reading at pack-swap time.
+
+---
+
 ### findings — the 3.80/4.40 V transient is PACK VOLTAGE, not soak time. The operator was right.
 
 *Nine session dumps, 2026-07-29 19:17 → 2026-07-30 21:14, **332 957 frames**, packs A and B ·

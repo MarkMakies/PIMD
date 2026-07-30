@@ -64,3 +64,8 @@ References/profile8b-*
 # findings reach the repo through CHANGELOG.md, not as attachments.
 References/V3/
 References/Targets v1 Analysis/
+
+# utilities/: analysis tools are tracked, their generated output is not
+utilities/**/*.json
+utilities/pack_discharge/pack-discharge.html
+utilities/**/__pycache__/
