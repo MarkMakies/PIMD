@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v10
+# PIMD Feature Extractor (pimd_features.py) v11
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -15,6 +15,7 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v11 firmware clock exposed as fw_seconds; FIX frame rate measured on it, not arrival time
 #   v10 pack_v gains age_s (old 2-field form still read); '# soak:' lines parsed
 #   v9 pack_v track + stall lines parsed; pack_v corpus column (optional on read)
 #   v8 parse_session_file: '# session_notes:' lines interspersed among data rows now parsed
@@ -113,7 +114,7 @@ import matplotlib.pyplot as plt
 import pimd_target_check
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TOOL_VERSION = 'pimd_features.py v10'
+TOOL_VERSION = 'pimd_features.py v11'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling
@@ -216,7 +217,21 @@ class SessionData:
                                 # Frames either side of one are not one measurement:
                                 # exclude these windows before reducing.
     t0: datetime              # first frame's pc_wallclock timestamp (epoch for t_seconds / mark alignment)
-    t_seconds: np.ndarray      # (n,)
+    t_seconds: np.ndarray      # (n,) PC ARRIVAL time. Correct for aligning marks and pack_v
+                               # readings (both are stamped by the same clock) and for nothing
+                               # else -- USB delivery is burst-batched, so it does not measure a
+                               # frame PERIOD. See fw_seconds.
+    fw_seconds: np.ndarray     # (n,) v11: the MCU's own clock, from data column 1
+                               # (firmware_time_ms), zeroed at the first frame. Use this for
+                               # anything time-based: rates, window spans, stall detection.
+                               #
+                               # The parser always read column 1 and, before v11, discarded it --
+                               # so every offline analysis either used arrival time without
+                               # noticing or hand-rolled its own reader, and both happened.
+                               # Over session_20260729_191643.csv the arrival clock's MEDIAN
+                               # frame interval is 0.0035 s (57 % under 10 ms) against a uniform
+                               # 0.1440 s on this one. The two share a mean, which is the trap:
+                               # a mean looks right while the median is 40x wrong.
     frames_mV: np.ndarray       # (n, n_channels)
     flagged: np.ndarray           # (n,) bool
 
@@ -508,6 +523,11 @@ def parse_session_file(path):
     pc_ts = [datetime.fromisoformat(s) for s in pc_ts_raw]
     t0 = pc_ts[0]
     t_seconds = np.array([(t - t0).total_seconds() for t in pc_ts], dtype=np.float64)
+    # v11: the firmware clock, zeroed at the first frame so it shares an origin with t_seconds
+    # and the two are directly comparable. Kept as elapsed seconds rather than raw ms because
+    # every consumer wants seconds, and a caller doing its own /1000 is a caller that can forget.
+    fw_arr = np.array(fw_ms, dtype=np.float64) / 1000.0
+    fw_seconds = fw_arr - fw_arr[0]
     frames_mV = np.array(rows, dtype=np.float64) / 1000.0
     flagged_arr = np.array(flagged, dtype=bool)
 
@@ -520,7 +540,8 @@ def parse_session_file(path):
         fw_version=fw_version, supply=supply,
         colmap=colmap, session_notes='\n'.join(notes_lines), marks=marks,
         mark_targets=mark_targets, pack_v=pack_v, stalls=stalls, soak=soak,
-        t0=t0, t_seconds=t_seconds, frames_mV=frames_mV, flagged=flagged_arr,
+        t0=t0, t_seconds=t_seconds, fw_seconds=fw_seconds, frames_mV=frames_mV,
+        flagged=flagged_arr,
     )
 
 
@@ -539,6 +560,7 @@ def drop_flagged(sess):
     if mask.all():
         return sess
     sess.t_seconds = sess.t_seconds[mask]
+    sess.fw_seconds = sess.fw_seconds[mask]   # v11: every (n,) array here or they desynchronise
     sess.frames_mV = sess.frames_mV[mask]
     sess.flagged = sess.flagged[mask]
     return sess
@@ -566,6 +588,19 @@ def pack_v_at(sess, t_s):
 
 
 def measure_frame_rate_hz(t_seconds):
+    """Frames per second from the median inter-frame interval.
+
+    **Pass SessionData.fw_seconds, never t_seconds** (v11 fix). The median is
+    the right estimator here -- it survives the stalls a mean is destroyed by --
+    but only on a clock that actually ticks once per frame. On PC arrival times
+    it returns ~195 Hz against a true 6.9 Hz, because USB delivery is
+    burst-batched: 57 % of arrivals on the 2026-07-29 dump are under 10 ms
+    apart. Callers convert seconds -> frames with this, so that error sizes
+    every segmentation window ~28x too small.
+
+    Median, not mean, and that is why the bug hid: both clocks share the same
+    mean, so a mean-based rate looked correct for as long as nobody checked the
+    median. Same reasoning as pimd_classviz's _nominal_frame_s()."""
     dt = np.median(np.diff(t_seconds))
     return 1.0 / dt if dt > 0 else NOMINAL_FRAME_RATE_HZ
 
@@ -1055,7 +1090,7 @@ def process_session(path, args, targets):
     if len(sess.t_seconds) < 2:
         skip(path, 'fewer than 2 usable frames after dropping flagged rows')
         return [], [], group
-    frame_rate_hz = measure_frame_rate_hz(sess.t_seconds)
+    frame_rate_hz = measure_frame_rate_hz(sess.fw_seconds)   # v11: firmware clock, not arrival
     if abs(frame_rate_hz - NOMINAL_FRAME_RATE_HZ) > 0.15 * NOMINAL_FRAME_RATE_HZ:
         warn(path, 'measured frame rate {0:.2f} Hz deviates >15% from nominal {1:.2f} Hz'.format(
             frame_rate_hz, NOMINAL_FRAME_RATE_HZ))

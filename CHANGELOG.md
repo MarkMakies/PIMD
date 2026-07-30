@@ -1,3 +1,276 @@
+### findings — the 3.80/4.40 V transient is PACK VOLTAGE, not soak time. The operator was right.
+
+*Nine session dumps, 2026-07-29 19:17 → 2026-07-30 21:14, **332 957 frames**, packs A and B ·
+`cal_63_air_bat_v3` / sha `4a2352d2` · fw 4.26 · 6S battery · free air ·
+analysed with `pimd_features` v11 (firmware clock) and `utilities/soak_vs_voltage/soakvolt.py` v1*
+
+**Metric validated against the entry it overturns before anything else was concluded.** The
+published 2026-07-29 column table reproduces at **r = 0.9960 across all 54 cells** — 3.80 V at
+19:29 reads 1441 µV here against 1449 published, 4.40 V 514 against 522 — with a systematic
++8.9 % median bias on the already-quiet columns, attributable to window placement. Same method,
+same numbers: **the disagreement in this entry is about causation, not measurement.**
+
+`session_20260730_205236.csv` was **still being written** while this ran (it grew 10k → 25k frames
+during the analysis). Its "first 5 min" slice is stable; its last slice is whatever had landed by
+21:14. Treated as a partial session throughout.
+
+**This closes out classviz v1.66's "Not yet run on the bench."** That entry's `# pack_v: … age_s=`
+and `# soak:` lines are the instrumentation this result rests on, and they are now **bench-verified
+in the field over five sessions**: 26 `pack_v` readings across three provenance grades and 217
+`soak` lines, and `streamed_s` proved to be the quantity that turned an accidental pack swap into
+a controlled experiment. Both line types read back exactly as specified. One behaviour the entry
+did not state, found here and now recorded: **`streamed_s` banks within a classviz process, not
+across restarts** — see the nulls below.
+
+**This overturns the central claim of the 2026-07-30 entry below**
+(*"the warm-up transient is two threshold columns, and it is soak time, not pack state"*). Its
+column-localisation result stands and is reconfirmed. Its **causal attribution is wrong.** A
+reader must not have to infer that: the title claim of that entry is false, and §4 of it —
+the four arguments for soak — is answered argument by argument further down.
+
+**Pre-registered predictions** were written before any data was touched
+(`References/V3/NEXT_SESSION_soak_vs_voltage.md` §1), because the operator did not accept the
+soak conclusion and re-arguing it was not going to settle it. For the 15:01 cold-start-on-a-flat-
+pack session: soak predicted the 3.80 V column starts **bad, 1700–2100 µV**; voltage predicted it
+starts **clean, 200–400 µV**. It read **742 µV** — 2.3× better than soak predicted, 1.9× worse
+than voltage predicted. Reported as the mixture it is: **soak is falsified as the controlling
+variable, voltage is substantially right, and soak survives as a real secondary effect.**
+
+**The measurement that settles it, with soak held constant.** The new `# soak:` counters show
+`streamed_s` running continuously from the 17:10 session into the 20:52 one (12652 → 12963 s,
+`idle_before_s=366`). So the rig is at the **same thermal state, eleven minutes apart, 3.5 hours
+into a continuous run**, and the *only* thing that changed is that the pack was swapped:
+
+| | 20:41:27 | 20:52:37 | |
+|---|---|---|---|
+| effective soak | 12 652 s | 12 963 s | +311 s — unchanged for this purpose |
+| pack (loaded) | **21.08 V** | **24.90 V** | pack A out, fresh pack B in |
+| **3.80 V column** | **189 µV** | **2090 µV** | **11.1× worse** |
+| 4.40 V column | 189 µV | 940 µV | 5.0× worse |
+| grid mean | 3404.0 mV | 3565.7 mV | +161.7 mV |
+
+A rig 3.5 h into a continuous run reading **worse than any cold start in the campaign** is not
+something soak time can produce. The soak hypothesis predicts ~185 µV at that point; it is out
+by an order of magnitude. No model is needed to read this pair.
+
+**The full set, all nine dumps.** Detrended σ over 50-frame windows, averaged down each threshold
+column, µV; first and last 5 min of each session; pack voltage loaded, provenance graded:
+
+| session | pack V | grade | eff. soak | **3.80** | 4.40 | 4.20 | grid mV |
+|---|---|---|---|---|---|---|---|
+| 07-29 19:17 first | 24.33 | note | — | **1656** | 898 | 144 | 3556.8 |
+| 07-29 00:37 last | 22.28 | interp | — | **197** | 192 | 190 | 3465.8 |
+| 07-30 08:28 first | 24.55 | note | — | **1685** | 1026 | 311 | 3591.9 |
+| 07-30 10:43 last | 23.27 | interp | — | **316** | 209 | 205 | 3492.0 |
+| 07-30 11:28 first | 23.22 | held | — | **862** | 406 | 148 | 3512.2 |
+| 07-30 15:01 first | 22.85 | **typed** | 0 (94 min idle) | **742** | 397 | 235 | 3496.6 |
+| 07-30 15:36 last | 22.30 | interp | ~2 100 | **255** | 206 | 213 | 3470.2 |
+| 07-30 17:10 first | 22.22 | interp | 0 (94 min idle) | **502** | 317 | 186 | 3475.8 |
+| 07-30 20:41 last | 21.08 | extrap | 12 652 | **189** | 189 | **457** | 3404.0 |
+| 07-30 20:52 first | 24.90 | **typed** | 12 963 | **2090** | 940 | 158 | 3565.7 |
+| 07-30 21:14 last | 24.08 | extrap | 16 297 | **1031** | 245 | 174 | 3521.1 |
+
+Ordered by voltage instead of by time, the structure is a **threshold crossing, not a linear
+trend**: above 24.0 V the 3.80 V column is *always* bad (1031–2090 µV) whatever the soak; below
+22.5 V it is *always* acceptable (189–502 µV); 22.5–24.0 V is the transition, and **that is where
+soak is visible as the second variable** — at matched voltage, 23.27 V soaked 135 min reads
+**316 µV** against 23.22 V freshly started at **862 µV**, and 22.28 V soaked 5 h reads **197 µV**
+against 22.22 V after a 94-min idle at **502 µV**. So soak buys ~2.5–3× inside the transition
+band; voltage spans ~11× across its range. **Both are real. Voltage dominates.**
+
+**Mechanism: pack voltage reaches the operating point, and the noise zone rides it.**
+Grid mean against pack voltage over all 17 slices, both packs: **43.3 mV/V, r = 0.962**; pack A
+alone (which controls for pack-to-pack internal resistance): **50.9 mV/V, r = 0.972**.
+
+The band structure is what identifies the mechanism, and the discriminator is **not** the
+correlation with pulse width — both candidate mechanisms have one. It is **whether the shift
+changes sign across bands**:
+
+| | 9 | 13.44 | 20 | 30 | 45 | 67.2 | 100 | r vs log pw | sign |
+|---|---|---|---|---|---|---|---|---|---|
+| **pack 21.08 → 24.90 V** (mV) | +153 | +152 | +155 | +158 | +162 | +164 | +189 | +0.845 | **one sign, all bands** |
+| **07-29 post-stall step** (mV) | −8.3 | −4.1 | +0.2 | +4.8 | +10.1 | +15.4 | +23.8 | +0.993 | **changes sign** |
+
+A supply change scales the whole decay, so every band moves the same way (+152…+189 mV, σ 7.3 %
+of the mean). A thermal change re-times the drive, so light and heavy bands move in *opposite*
+directions — the §14.1/§17.10 fingerprint, and exactly what the post-stall step does. (Sign
+convention: those sections quote r = −0.95 in *delay* ns; measured here as *voltage at a fixed
+delay* the sign inverts, so +0.99 here is the same fingerprint, not a contradiction.)
+
+So **DESIGN §12's "state of charge does not reach the operating point within the regulated window,
+measured down to 23.05 V" is wrong outside the range it was measured over.** §17.10 established
+it across 23.60 → 23.05 V — 0.55 V, where this slope predicts only ~25 mV, comfortably buried
+under the thermal drift that measurement was actually reading. Over the 21.0 → 25.0 V now
+available it is a 160 mV effect and unmissable. §17.10 is not wrong about its own interval; it
+does not generalise, and the profile notes' inference that the 4.40/3.80 elevation was
+"supply-borne" turns out to have been **right all along**.
+
+This also **resolves §14.7 rather than deepening it.** That section records, unresolved, that the
+zone "tracks the operating point, not a fixed voltage", and that noisy–clean–noisy across
+4.40/4.20/3.80 defeats any single contiguous zone. Both follow if the noisy region sits at a fixed
+place on the **decay waveform** while pack voltage scales the decay: which threshold columns
+intersect it then moves with the pack. Direct evidence — at 21.08 V the trouble has *left*
+3.80/4.40 (189/189 µV) and appears at **4.20 V (457 µV)** and 4.75 V (295 µV), which is the
+operator's own bench observation that "noise just changes area". The per-band pattern is
+zone-like rather than uniform: on the fresh pack the 3.80 V degradation peaks in the middle bands
+(20–45 µs, 19×) and is weakest at 9 µs (2.7×) and 100 µs (8.0×), while the 4.40 V column degrades
+monotonically with pulse width (0.9× at 9 µs → 8.0× at 67.2 µs). Each band has a different decay
+shape, so the zone lands on a different threshold in each.
+
+**Answering the four arguments of the entry below, in its own terms.**
+
+1. *"Matched on both variables at once"* (24.05 V and ~28 min in both sessions; pack A 1834 µV vs
+   pack B 1036 µV, 1.8× apart) — **not explained by this analysis, and not claimed to be.** The
+   likely reason is that DMM terminal voltage is not the pulse-instant rail: the two packs differ
+   in internal resistance, and the operator measured pack B at 25.04 no-load / 24.96 MCU-only /
+   24.75 running. Nothing in the logs can separate a pack's IR from its terminal voltage. This is
+   precisely DESIGN §12's unmeasured quantity, and it stays open.
+2. *"One voltage trajectory, opposite outcomes"* (24.37 → 23.56 V moved `(100 µs, 3.8 V)`
+   306 → 2284 µV while `(13.44 µs, 3.8 V)` went 1737 → 264 µV) — **this is evidence for a moving
+   zone, not against a voltage mechanism.** A uniform level shift cannot move two cells in
+   opposite directions; a zone sweeping across the threshold ladder does exactly that, one cell
+   entering as another leaves. The entry read a zone signature as a refutation of the voltage
+   domain.
+3. *"An unintended cooling experiment"* (the 47-min host stall) — **survives, and is genuinely
+   thermal.** Reproduced here: frame delivery 413.8 → 34.5 → 413.7 frames/min across
+   22:45 / 23:03–23:50 / 23:52, and the operating-point step **changes sign across bands**
+   (−8.3 mV at 9 µs to +23.8 at 100 µs, r = +0.993), which supply cannot do. Magnitudes differ
+   from the +10…+78 mV quoted there — a window-choice difference, not a disagreement about
+   structure. A stall also unloads the pack and lets it rebound, so the two causes are confounded
+   in that window; the sign change is what discriminates, and it points thermal. **The thermal
+   effect is real. It is the smaller of the two.**
+4. *"Soaked, with the pack still draining"* (22.95 → 22.26 V, 3.80 V held at 210 µV, ρ = −0.02) —
+   **consistent, and it is the key to why a careful analysis went wrong.** Below ~22.5 V the zone
+   has already left the 3.80 V column, so there is no sensitivity left to detect. The effect is
+   **non-monotonic in pack voltage**, and all four arguments above were drawn from 22.3–24.4 V —
+   the flat part. Within-session correlation could not have found it, and neither could more of
+   the same data.
+
+**The "≈ 3 hour warm-up" is largely the pack discharging into the clean window.** Pack A fell
+24.55 → 23.28 V in **114 min** and pack B 24.33 → 23.19 V in **135 min** — the same ~2 h the
+entry below attributed to thermal soak, and the reason soak and voltage looked interchangeable.
+The clearing order (4.40 V before 3.80 V; 100 µs last) needs no separate thermal explanation: it
+is the zone sweeping down the ladder as the pack droops. At 21.08 V the 100 µs band still carries
+the largest residual in the grid (232 µV at 3.80 V, 268 at 4.40 V), so it remains the long pole.
+
+**Operating window — the actionable result. Run the pack at 21.5 – 23.3 V** (3.58–3.88 V/cell).
+
+- **Ceiling ≈ 23.5 V is new** and is the constraint that was missing. Above 24.0 V the two
+  highest-signal threshold columns are unusable regardless of how long the rig has run.
+- **Floor ≈ 21.5 V.** Below it the trouble migrates to 4.20 V, 4.75 V and the 9 µs band — the
+  operator tracked this live from 21.46 → 21.03 V. DESIGN §12's 21.0 V working floor needs no
+  change; it was never the binding limit for data quality.
+- **Do not start a profiling session on a freshly-charged pack.** That buys a 1.5–2 h wait which
+  is discharge, not warm-up. The 15:01 and 17:10 sessions opened at 742 and 502 µV *because* the
+  pack was already down. Cost of the window is the top ~2 h of pack capacity.
+- **A delay recalibration does not fix this** — the operator's own reading, and it is correct. A
+  cal at 24.5 V re-anchors the delays so the zone falls between thresholds, but the zone moves
+  with the pack, so the fix expires as the pack drains. Noted for the record:
+  `cal_63_air_bat_v3` was locked at 23.5 → 23.35 V, i.e. on the **upper edge** of the clean
+  window; ~22.5 V would be more central if it is ever re-locked. **No profile change follows from
+  this entry** — the ladder and `4a2352d2` stand.
+- **Dynamic cell exclusion, deferred by decision, inherits one hard requirement:** a *static*
+  threshold-column exclusion cannot work, because which cells are bad is a function of pack
+  state. And the affected columns cannot simply be dropped — 3.80 and 2.40 V carry the *most*
+  target signal in the grid (column mean |Δ| 4.23 and 4.88 mV against 1.83 at 4.9 V).
+
+**Nulls and negative results, recorded so they are not re-derived.**
+
+- **The corpus cross-check is a null. It cannot separate the two variables**, and that is a
+  property of the corpus, not of the method. 166 captures, ρ(`splithalf_floor`, pack voltage)
+  = **−0.182** over all placements — weak, and it mixes placements, so it is not a real test. The
+  best-sampled placement (`Cu_pipe_01` @120 mm y) gives floor 4.622 → 1.842 → 1.564 → 1.956 as
+  voltage falls 23.52 → 23.28 → 23.27 → 22.65 V, but every one of those captures sits inside a
+  single morning session where voltage and soak were still marching together. Weakly suggestive
+  that the one "noisy" capture is the one above the 23.5 V ceiling; n = 1 either side, so it is
+  not evidence. The 2026-07-28 captures **cannot be assigned a pack voltage at all** — they
+  predate every reading in the record and the model flat-extrapolates them, which is wrong and is
+  labelled `extrap` rather than silently used.
+- `pack_v` is populated on only 10 of 166 corpus captures, all `22.67`, one typed value held
+  across a whole stretch.
+- **`streamed_s` is banked per classviz process, not across restarts** — a caveat the handover
+  does not state. It read 0 at 17:10 having already run 15:01→15:36 under a previous launch. That
+  is *why* 17:10 and 20:52 form one continuous soak and hence a controlled experiment, so it is
+  load-bearing rather than a footnote.
+- The stall guard is a firmware-clock span test, not a masked clock range: it rejected **34
+  windows** in the 07-29 dump on its own, and did not reproduce the phantom 23:28 "noise relapse"
+  the first pass through that data produced.
+- The 08:28 dump reads **14–16 mV on all nine columns** in its opening minutes — a global
+  stream-start event, not a column effect. Excluded by an all-columns-elevated test rather than a
+  hardcoded duration; averaging it in would invent a warm-up belonging to something else.
+
+**RECOMMENDED FOR THE NEXT DESIGN.md §18 CONSOLIDATION PASS.** These are definitive bench
+measurements over a 21.0 → 25.0 V span, and they contradict currently-documented ground truth.
+`DESIGN.md` is not edited here (it is regenerated from this file by a human-run pass), so the
+amendments are listed explicitly so the pass is mechanical:
+
+| section | amendment |
+|---|---|
+| **§12 Power system** | *"State of charge does not reach the operating point … measured down to 23.05 V"* — **correct only over 23.60–23.05 V, false over 21–25 V**: 43–51 mV/V, one sign across all seven bands. Add the **≈ 23.5 V data-quality ceiling** beside the existing 21.0 V floor, and note the two are different kinds of limit. |
+| **§17.10** | Scope the supply-regulation result to its measured 0.55 V interval. Its inference that a threshold-tracking fault localises to the voltage domain is **re-supported**, and this entry withdraws the previous entry's claim that the coherence result contradicted it — independent per-cell wander is compatible with a shared operating-point shift that merely *positions* each cell on the decay. |
+| **§14.7** | *"The zone tracks the operating point, not a fixed voltage"* — **confirmed, no longer unresolved.** The noisy–clean–noisy puzzle is explained by a zone fixed on the decay waveform while the operating point scales with the pack. Both listed follow-ups (fine threshold sweep, front-end scope) should now be specified **at a stated pack voltage**, or they will not reproduce. |
+| **§14.1 / §3** | The "≈ 3 h warm-up" is largely **pack discharge into the clean window**, not thermal soak. §3's "Mode 2 warm-up ≈ 5 min" remains wrong for this profile, but for a different reason than the entry below gave. Thermal drift remains a genuine open problem — it is just not what the 3.80/4.40 V columns were showing. |
+| **§10 / profile notes** | Record that `cal_63_air_bat_v3` was locked at 23.5 → 23.35 V, on the upper edge of the clean window. Its notes' "supply-borne" attribution for the 4.40/3.80 elevation is **vindicated**. |
+| **§15** | `pimd_features` v11 — firmware clock exposed; `measure_frame_rate_hz()` fixed. |
+
+**The next physical step, and it is now the highest-value measurement on the project:** the
+**+15 V rail under scope during a TX pulse, fresh pack vs near-flat** (DESIGN §12, never taken).
+This analysis infers a supply mechanism from its band signature; that capture would observe it
+directly, and it is the only way to settle argument 1 above. There is no voltage-sense and no
+temperature-sense hardware on the board (6.04 schematic, GP26–29 unconnected), so **no amount of
+logging substitutes for it** — the entire separation achieved here rests on band *geometry*,
+because the two channels that would have shown it outright do not exist. Second priority: repeat
+the §17.7 fine threshold sweep at two stated pack voltages (say 24.5 and 22.0 V), which would map
+the zone's position on the decay directly and is the measurement that would turn this inference
+into a model. (2026-07-30)
+
+---
+
+### src/pimd_features.py — v11 — firmware clock exposed; FIX frame rate measured on arrival time
+
+Both changes were forced by the soak-vs-voltage analysis above, which could not be done correctly
+without them.
+
+**`SessionData.fw_seconds` (new).** `parse_session_file()` had always read column 1
+(`firmware_time_ms`) and then **discarded it** — only `t_seconds`, from PC arrival timestamps,
+reached the caller. So the one clock that ticks once per frame was parsed and thrown away, and any
+offline analysis either used arrival time without noticing or hand-rolled its own reader. Both
+have now happened in this project. Exposed as elapsed seconds zeroed at the first frame, so it
+shares an origin with `t_seconds` and the two are directly comparable. `drop_flagged()` masks it
+alongside the other `(n,)` arrays or they desynchronise.
+
+`t_seconds` is **not** deprecated and its docstring now says what it is for: marks, `pack_v`
+readings and `captured_at` are all stamped by the same PC clock, so aligning them needs arrival
+time and nothing else. Every remaining use of it in the module was checked against that rule.
+
+**FIX: `measure_frame_rate_hz()` was being fed the arrival clock.** `process_session()` passed
+`sess.t_seconds`. USB delivery is burst-batched, so on these dumps the median arrival interval is
+**0.0035 s (57 % under 10 ms)** against a uniform **0.1440 s** on the firmware clock — the
+measured rate came out **73–290 Hz depending on the session, against a true 6.94 Hz**. Its
+consumers `segment_from_marks()` and `detect_changepoints()` convert seconds → frames with it, so
+every segmentation window on a session-dump build was sized wrong by up to 40×, and
+`min_seg_frames` with it — which for the changepoint path means no segment ever qualifies.
+
+**Why it hid for so long, worth recording:** the two clocks share the same *mean*. Only the median
+is wrong, and `measure_frame_rate_hz` uses the median deliberately (it survives the stalls a mean
+is destroyed by — same reasoning as `pimd_classviz._nominal_frame_s`). A mean-based rate would
+have looked correct indefinitely. The existing >15 % deviation-from-nominal warning **was** firing
+on every session dump and was the visible symptom; it is now silent, which is the confirmation.
+
+**Blast radius: none on data.** Checked rather than assumed — all **10 458 rows / 166 captures**
+of `gui_signatures_targets_v3_20260728_142316.csv` come from `gui_*` sessions written directly by
+classviz (the primary corpus source since v1.32). **No corpus row on disk was ever built through
+`process_session()`**, which is why a ~28× window-sizing error could sit in a shipped tool
+unnoticed, and why no rebuild is required. No corpus-schema change; `CORPUS_HEADER_FIELDS`,
+`pimd_corpus_check` and both corpora are untouched.
+
+Verified: `fw_seconds` gives 6.94 Hz and a 0.1440 s median period on every one of the nine dumps,
+with firmware span matching wall span to 0.1 min (no clock drift); `drop_flagged()` keeps all
+three `(n,)` arrays equal length; the CLI runs end-to-end on a session dump with the frame-rate
+warning now silent. (2026-07-30)
+
+---
+
 ### src/pimd_classviz.py — v1.66 — session dump: pack_v carries age_s; new '# soak:' history lines
 
 Both additions are **comments**, not columns: the operator's call, and the right one — a
