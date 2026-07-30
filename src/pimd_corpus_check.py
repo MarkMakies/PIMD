@@ -2,7 +2,7 @@
 """
 pimd_corpus_check.py — corpus-level acceptance checks for a PIMD signature corpus.
 
-Version: 1.7
+Version: 1.8
 
 Reads the v1.32+ target-registry corpus schema (the CORPUS_HEADER schema that
 pimd_classviz.py's Training capture and pimd_features.py's corpus builder both
@@ -22,6 +22,7 @@ has no distance at all (blank distance_mm column): it appears in the split-half
 SNR check labelled '@air' and is excluded from every distance-keyed check.
 
 # History (full detail in CHANGELOG.md):
+#   v1.8 pack_v is an OPTIONAL column (features v9) -- pre-v9 corpora still load
 #   v1.7 placement key normalises the fields classviz v1.60 froze (face_normal/offsets)
 #   v1.6 FIX air captures (blank distance_mm) aborted the whole run
 #   v1.5 migrate to the v1.32+ target_id/distance_mm schema; retire canary check; repeats via repeat_idx
@@ -96,7 +97,13 @@ CHECK_ORDER = ["shape-invariance", "splithalf-snr", "repeat-consistency",
                "distance-falloff", "cross-campaign"]
 
 CORPUS_FIELDS = pimd_features.CORPUS_HEADER_FIELDS
-REQUIRED_FIELDS = set(CORPUS_FIELDS)
+# Columns that may be absent from an otherwise-valid v1.32+ corpus (v1.8).
+# `pack_v` arrived with features v9 / classviz v1.64, after both corpora on disk
+# were written; requiring it would have made them unreadable the moment it was
+# added, for a column that is blank whenever nobody measured a voltage anyway.
+# Additive schema growth belongs here rather than in a migration.
+OPTIONAL_FIELDS = {'pack_v'}
+REQUIRED_FIELDS = set(CORPUS_FIELDS) - OPTIONAL_FIELDS
 
 
 # -----------------------------------------------------------------------------
@@ -189,6 +196,11 @@ def load_corpus(path):
             amp=float(field('plateau_amp_mV')),
             splithalf=float(field('splithalf_floor')),
             quality=field('quality'),
+            # v1.8: optional by construction -- absent column OR blank cell both
+            # read as None, so pre-v9 corpora and unmeasured captures behave the
+            # same. No check consumes it yet; it is carried so one can.
+            pack_v=(float(field('pack_v'))
+                    if 'pack_v' in idx and field('pack_v').strip() else None),
         ))
 
     n_cells = {len(s['shape']) for s in sigs}

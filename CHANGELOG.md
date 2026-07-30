@@ -1,3 +1,515 @@
+### src/pimd_classviz.py — v1.66 — session dump: pack_v carries age_s; new '# soak:' history lines
+
+Both additions are **comments**, not columns: the operator's call, and the right one — a
+timestamped comment can be interpolated and re-interpreted afterwards, where a per-frame column
+would bloat every row with a value that changes a few times an hour.
+
+Motivated by the warm-up conclusion **not** being accepted. The 2026-07-29/30 finding rests on
+soak time rather than pack state, and the record as it stood could not be used to re-test that
+independently: pack voltage existed only as sparse manual entries, and run history not at all.
+
+Two facts that bound what is possible here, established before writing any code:
+
+- **There is no voltage-sense and no temperature-sense hardware.** The 6.04 schematic has no
+  divider, no thermistor, no NTC; GP26–29 (the RP2040's ADC pins) appear only as symbol pins.
+  Pack voltage therefore cannot be sampled and stays operator-entered, and the one channel that
+  would separate thermal from supply outright — temperature — does not exist to be logged.
+- **Pack terminal voltage is not the decisive supply quantity anyway.** DESIGN §12 records that
+  the +15 V rail under scope *during a TX pulse*, fresh pack vs near-flat, "has never been taken,
+  and it is what would establish the real floor". A DMM cannot show pulse-instant sag. Nothing
+  here substitutes for that measurement, and it should not be read as doing so.
+
+**`# pack_v:` gains `age_s`.** `# pack_v: <iso>, 22.67, age_s=180`. Age is seconds since the
+value was last **typed**, not since it was last logged — that is what says whether the number is
+a fresh meter reading. Trigger is unchanged: `Log V` only, no automatic emission.
+
+The trap worth recording: `_load_settings` restores the last session's voltage via `setValue()`,
+which fires `valueChanged` exactly as an edit does. Left alone, every launch would have stamped a
+confident `age_s=0` on a value nobody had looked at — and the field genuinely does come up
+pre-filled (22.56 at the time of writing). So the restore clears the edit timestamp and such a
+value reports `age_s=unknown`. The field is never omitted: an absent age would read as fresh,
+which is the failure this exists to prevent.
+
+**New `# soak:` lines.**
+`# soak: <iso>, streamed_s=4210, stalled_s=12, idle_before_s=912, event=periodic`, written at
+stream start, stream stop, every 60 s while streaming, and once in each dump's header (so a dump
+opened mid-run by a profile change is still self-describing). ~300 lines over five hours against
+114k data rows. `event=` is not in the original sketch and was added on the way: knowing whether
+a line is the last one of a run matters when reading the file back.
+
+- `streamed_s` — cumulative seconds the stream **actually ran**, banked across stop/start rather
+  than taken as `now − session_start`. This is the quantity thermal state depends on; wall-clock
+  elapsed is not, because a stopped stream cools the rig and nothing recorded that.
+- `stalled_s` — cumulative seconds lost to firmware-time gaps, from the v1.64 detector (which
+  now sums as well as keeping count and worst). Carried alongside rather than pre-subtracted so
+  the arithmetic stays visible: **effective soak = `streamed_s − stalled_s`**. It matters at
+  full scale — during the 2026-07-29 stall the stream was nominally running while the rig was
+  cooling, so wall time streaming overstates soak by ~45 min on that session alone.
+- `idle_before_s` — seconds since the previous **observed** stream stop, persisted via
+  `last_stream_stop_iso` in settings so it survives an app restart.
+
+**What `idle_before_s` is not**, written into the code and not just here: it is
+classviz-observed idle, not guaranteed rig idle. If the app was closed, the board unplugged, or
+the rig left powered with the stream merely stopped, it describes what this tool saw. Settings
+are written on close, so a kill loses it and it reads `unknown`. A strong hint, not a
+measurement — and it must not be read as one, because the entire point of logging it is to stop
+inferring thermal state from a proxy without saying so.
+
+Both line types reuse the `_append_mark` write+flush pattern; the 60 s tick rides the existing
+1 Hz `_rate_timer` rather than adding a timer, as v1.64 did for the pack-voltage age label.
+`_append_soak` additionally checks the handle is not closed — it is called from `start_stop`'s
+two branches, where the dump is opened and closed a line or two away, making it the one append
+site where an inconsistent state is a plausible ordering slip rather than an impossible one.
+
+Verified offscreen, 34 checks, and the two that first failed were both worth having: the
+harness had never exercised the real `start_stop` path (only `_session_start` directly), and one
+assertion was defeated by `%.0f` rounding. Now covered: `age_s=unknown` / `=0` / `=300` for the
+three provenance cases; the write→parse round trip for both line types through the real window;
+`stalled_s` picking up an injected 12 s gap; `idle_before_s` reading back as the ~600 s gap on a
+genuine `start_stop()` start; and `streamed_s` **not** advancing while stopped, which is the
+whole point of it. Regression: all five pre-existing harnesses re-run clean. **Not yet run on
+the bench.** (2026-07-30)
+
+---
+
+### src/pimd_features.py — v10 — pack_v gains age_s (old form still read); '# soak:' parsed
+
+**Required, not optional.** v9's `_parse_pack_v_content` did `rest.partition(',')` and then
+`float()` on everything after the first comma, so a three-field `22.67, age_s=180` would have
+raised and the line would have been **silently dropped**. Growing the written format without
+growing the parser would have made the new lines invisible — which is the failure mode this
+project has been bitten by twice this week already.
+
+`_parse_pack_v_content` now splits on commas and reads any trailing `k=v` pairs through a new
+`_parse_kv_tail`. **The bare two-field form is still accepted, and that is load-bearing:** every
+dump captured before today uses it, including `session_20260729_191643.csv` and
+`session_20260730_082729.csv` — the pair the warm-up findings rest on. A malformed *age* yields
+`age_s=None` rather than dropping an otherwise good voltage; a malformed timestamp or voltage
+still drops the line, since a track with a bogus entry is worse than a shorter one.
+
+`SessionData.pack_v` widens from `(datetime, volts)` to `(datetime, volts, age_s)`, with
+`age_s=None` for the old form and for `unknown`. `pack_v_at()` — the only consumer in `src/`,
+checked — follows. It deliberately does **not** weight or filter by age: silently discarding a
+stale reading would hide it from whoever is deciding whether to trust it. The widening broke two
+offscreen harnesses on tuple unpacking, which is the change being visible rather than a problem.
+
+New `_parse_soak_content` and `SessionData.soak` as
+`(datetime, streamed_s, stalled_s, idle_before_s, event)`. A line without `streamed_s` is
+dropped — that is the field the line exists to carry. `idle_before_s=unknown` reads as `None`.
+
+The module docstring now lists **every** `#` comment form the parser understands, with what each
+means and what `idle_before_s` cannot tell you; the `pack_v` corpus-column entry notes that the
+column carries no staleness information while the session track does.
+
+**No corpus-schema change** — `CORPUS_HEADER_FIELDS`, `pimd_corpus_check` and both corpora on
+disk are untouched, per the decision to leave the column stamping the field's current value.
+(2026-07-30)
+
+---
+
+### findings — v3 corpus repaired twice: Ag_jewellery distance, and a ragged schema I caused
+
+Data repair, recorded because it edits captured data (same footing as the 2026-07-28
+repeat_idx renumbering). `src/data/corpora/` is gitignored, so git could not have restored
+either file — a timestamped `.bak-` copy was taken before each write, and each write proved
+itself against that copy rather than being trusted.
+
+**1. `Ag_jewellery_01` was captured at 60 mm, recorded as 240 mm.** Bench report. All four
+captures of that target — the last four in the file — carried `distance_mm=240`:
+
+| capture | time | axis | repeat | amp mV |
+|---|---|---|---|---|
+| `..._113042_c95` | 12:33:05 | y | r1 | 19.36 |
+| `..._113042_c96` | 12:34:06 | y | r2 | 14.76 |
+| `..._113042_c97` | 12:35:13 | y | r3 | 20.17 |
+| `..._113042_c98` | 12:36:09 | z | r1 | 4.47 |
+
+Checked before writing, not assumed: exactly four such captures exist, all at 240, and they
+are the last four in the file. **No `repeat_idx` renumbering was needed** — verified through
+`pimd_corpus_check.placement_key()`, the moved placements `(Ag_jewellery_01, 60, y|z, …)` had
+no existing captures, and the four stay distinct from each other. Result: 252 cells
+(4 × 63), and only the `distance_mm` column differing from the backup.
+
+**Amplitude cross-check, and it only half-supports the report — recorded that way.** Against
+every other target in this corpus: `@60 mm` median amp 42.7 (n=26), `@120` 21.2, `@180` 9.9,
+`@240` 5.0 (n=8). The three y captures at 14.8–20.2 mV sit far above the @240 distribution and
+inside the @60 range, so for those the data agrees with the report. **`c98` at 4.47 mV sits
+right on the @240 median** — it is the z orientation, presenting a much smaller loop, and it
+flagged `noisy`, so the amplitude says nothing either way about that one. It was moved with the
+other three on the strength of the bench report, which is the right authority for a placement
+fact; noting it because a later reader comparing amplitudes would otherwise wonder.
+
+**2. A ragged corpus, caused by classviz v1.64 — 10 captures.** More serious, and self-
+inflicted. v1.64 was applied to the working checkout at ~11:28; classviz was restarted at
+11:30:42 and captures `c89`–`c98` were saved with it. features v9 had added `pack_v` to
+`CORPUS_HEADER_FIELDS`, and the corpus append path writes one value per *tool* field while
+emitting a header row only for a new file — so 630 rows (10 × 63) were written **26 fields
+wide under a 25-column header**. Fixed in classviz v1.65 below.
+
+The orphaned 26th field held **22.67** on all 630 rows — a pack voltage the operator had
+actually entered — so truncating would have discarded a real measurement. The file was instead
+**migrated to the 26-column v9 schema**: `pack_v` appended to the header, the 5544 older rows
+padded blank, the 630 keeping their value. Verified: header is now exactly
+`CORPUS_HEADER_FIELDS`, all 6174 rows uniformly 26 wide, **not one cell in the original 25
+columns changed**, and `pimd_corpus_check` reads 98 captures with `pack_v` on 10 and blank on
+88 — which is what an optional column is for.
+
+Two things this exposed, neither yet acted on:
+
+- **`pack_v` in a corpus row is the field's current value, not a fresh reading.** All 10
+  captures spanning 11:30–12:36 carry the same 22.67 V, because that is what the box said
+  throughout. Over 66 minutes the pack genuinely moved (23.33 V at 10:19 the same morning).
+  The 20-minute nag exists for this, but the column is only ever as good as the last time
+  someone typed in it — unlike a session dump, where `pack_v_at()` interpolates a track.
+  [FILL: should a stale pack_v (say >20 min old) be written blank rather than confidently
+  wrong? A wrong voltage is worse than a missing one for the supply-vs-thermal question this
+  column was added to answer.]
+- **My verification of repair 1 did not notice the file was already ragged.** It compared
+  backup against result row-by-row and asserted equal widths *between* them, which held —
+  both were ragged. Comparing a file against its own backup cannot detect damage that predates
+  the backup. Checking absolute row width against the header would have caught it, and that is
+  now what the append harness does. (2026-07-30)
+
+---
+
+### src/pimd_classviz.py — v1.65 — FIX corpus append wrote the tool's columns, not the file's
+
+Both signature-append paths built each CSV row as one value per
+`pimd_features.CORPUS_HEADER_FIELDS` entry, and write a header row only when the file is new.
+That was correct for as long as the field list never grew. features v9 added `pack_v`, and the
+next Save into any corpus captured before it produced rows one value wider than the header
+declares — silently, no error, a ragged CSV. It happened for real within two hours: 10 captures
+in the live v3 corpus (see the findings entry above, which also records the data repair).
+
+New `_corpus_fields_for_path()` reads the target file's own header and returns those columns;
+both append sites now write `[row.get(k, '') for k in fields]` against it. A new file still
+gets the full current header. Values are looked up with `.get`, so a header naming a column the
+row has no value for (a joined or hand-edited corpus) writes blank instead of raising.
+
+Writing the file's own columns is the right resolution rather than migrating the file on append
+or refusing to append at all: `pack_v` is **optional by construction**
+(`pimd_corpus_check.OPTIONAL_FIELDS`), so a corpus that has no such column simply does not
+record it — the same outcome as a capture taken with no voltage entered. It also means this
+class of bug cannot come back the next time a column is added.
+
+Verified offscreen, 13 checks, using the real corpora as fixtures rather than synthetic ones:
+appending a v1.65 capture to the clean 25-column v1 corpus leaves **every** row 25 wide
+(4159 → 4222, the 63 new rows among them) and the file still loads; a new file gets all 26
+columns and the voltage reads back; the pre-fix behaviour is reproduced on a copy to confirm
+the failure mode was real (mixed 25/26); and the migrated v3 corpus now accepts all 26. The
+harness asserts absolute row width against the header, which is the check whose absence let the
+original damage through. (2026-07-30)
+
+---
+
+### findings — the warm-up transient is two threshold columns, and it is soak time, not pack state
+
+*2026-07-29 19:17 → 00:37 (pack B, 114 246 frames) and 2026-07-30 08:28 → 10:25 (pack A,
+cold start, 48 386 frames) · `cal_63_air_bat_v3` / sha `4a2352d2` · fw 4.26 · 6S battery ·
+air, no profiling, both sessions captured whole by classviz v1.63's auto-logging*
+
+The first analysis of these two dumps that was possible at all: v1.63 landed the day before
+and auto-started both sessions, including the warm-up windows nobody would have pressed
+Record for. 151k frames of continuous free-air stream, at a measured **6.9 Hz** sweep rate
+(not the ~3.3 Hz the tooling comments had assumed — see the classviz v1.64 entry).
+
+**The transient lives in the 3.80 V and 4.40 V threshold columns. The other seven are flat
+from the first window to the last.** Detrended per-cell noise, µV, averaged down each
+threshold column, full-rate frames only:
+
+| clock | 4.90 | 4.80 | 4.75 | 4.40 | 4.20 | **3.80** | 2.40 | 1.50 | 0.50 | settle |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 19:29 | 188 | 176 | 156 | **522** | 175 | **1449** | 160 | 111 | 50 | 0.529 |
+| 20:09 | 197 | 176 | 156 | 220 | 172 | **722** | 158 | 111 | 51 | 0.333 |
+| 20:49 | 205 | 178 | 161 | 179 | 174 | **362** | 158 | 111 | 52 | 0.255 |
+| 21:29 | 203 | 175 | 157 | 174 | 174 | 231 | 153 | 108 | 50 | 0.234 |
+| 22:09 | 204 | 178 | 158 | 178 | 176 | 194 | 156 | 109 | 50 | 0.234 |
+| 22:48 | 201 | 180 | 162 | 178 | 174 | 188 | 153 | 108 | 48 | 0.227 |
+
+4.40 V clears in ~70 min, 3.80 V in ~2h50m, and both land on the same ~185 µV floor as their
+neighbours. **3.80 V is not a bad column** — it is where the warm-up shows up. During warm-up
+those 14 cells of 63 contribute **68–75 %** of the whole `settle` figure; excluding them the
+grid reads **0.141 mV cold, from minute one, unchanged for five hours**. So the rig is settled
+on 49 of 63 cells within minutes and the wait is about two threshold columns.
+
+**It is soak time, not pack voltage.** Four independent lines, because within one session
+voltage and elapsed time are perfectly confounded (ρ = 0.80–0.91 against each, identical
+magnitude — no within-session correlation can separate them):
+
+1. **Matched on both variables at once.** At **24.05 V and ~28 min elapsed in both sessions**,
+   pack A read **1834 µV** and pack B **1036 µV** — same voltage, same elapsed time, 1.8×
+   apart. The only difference is that Tuesday's rig started partly warm. The same comparison
+   holds at 23.85 V (1397 vs 672) and 23.69 V (1041 vs 473).
+2. **One voltage trajectory, opposite outcomes.** As the pack fell 24.37 → 23.56 V, the
+   `(100 µs, 3.8 V)` cell went **306 → 2284 µV (7.5× worse)** while `(13.44 µs, 3.8 V)` went
+   **1737 → 264 µV (6.6× better)**. A voltage-domain mechanism cannot move two cells in
+   opposite directions over the same volt; the split is by pulse energy, i.e. thermal load.
+3. **An unintended cooling experiment.** The 47-minute host stall below did not merely lose
+   frames — it *cooled the rig* (see that entry). Fully soaked and clean at 188 µV before it,
+   the 3.80 V column returned to **290 µV** after, then decayed to 182 µV over the following
+   30 min. Pack voltage was ~22.6 V throughout and falling — lower than anything measured on
+   Wednesday, when the same column read 700–2000 µV.
+4. **Soaked, with the pack still draining.** Across 22:15 → 00:37 (22.95 → 22.26 V) the 3.80 V
+   column median held at 210 µV and the other seven gave ρ vs pack voltage = **−0.02**.
+
+**This corrects §17.10.** The 4.40/3.80 elevation was recorded there as supply-borne, and
+`cal_63_air_bat_v3`'s own profile notes bake that in ("that trial's 4.40/3.80 elevation was
+supply-borne"). It is the warm-up transient. The v3 decision to keep both thresholds at their
+original values was right for the wrong reason: they "came back clean under battery" because
+the rig was soaked by the time they were looked at. **No profile change follows from this** —
+the ladder and `4a2352d2` stand.
+
+**Warm-up time, by criterion, because there is no single number.** An earlier pass through
+this data said "~3 hours" flatly; that was the time for one column to approach its asymptote,
+extrapolated, and it is not the time to usable data:
+
+| criterion | from cold |
+|---|---|
+| 49 of 63 cells at the floor | minutes |
+| a capture the quality gate accepts | ~2 h — `c85` at 85 min soak: floor 4.622, "noisy"; `c86` at 114 min: floor 1.842, "ok", inside the 2026-07-28 soaked spread (0.876–3.98) for the same placement |
+| 4.40 V column at the floor | ~70 min |
+| 3.80 V column at the floor | ~2h50m observed from a partly-warm start; ~3 h extrapolated from cold (single-exponential fit, floor pinned, R² 0.86; a two-exponential fit — an 8.5 min rise then a 52 min decay — gives R² 0.998 and ~3 h) |
+| 100 µs band at the floor | **not reached in 90 min** — still ~2045 µV against a 190 µV floor. The long pole, and where long-τ discrimination lives (§14.6) |
+
+DESIGN §3's "Mode 2 warm-up ≈ 5 min" does not hold for this profile on battery.
+
+**The affected columns are the high-signal ones, so this cannot be waited out by ignoring
+them.** Column mean |Δ| for `c86` (Cu_pipe_01 @120 mm): 4.9 V **1.83 mV**, 4.2 V 3.98,
+**3.80 V 4.23**, **2.40 V 4.88**, 0.5 V 1.86. The 3.80 and 2.40 columns carry the *most*
+target signal in the grid.
+
+Distinct from the 2026-07-28 `(9 µs, 4.9 V)` corner, which is a **soaked** phenomenon with the
+opposite temperature dependence: the 4.9 V column runs *cleanest cold* (88 µV at 7 min → 230 µV
+at 87 min). Warming trades one for the other. No contradiction between the two entries; they
+are different cells at different thermal states.
+
+**Mechanism narrowed, not solved.** What the data rules out:
+
+- **Not common-mode.** Magnitude-squared coherence between the seven 3.80 V cells is **0.023**
+  against an estimator noise floor of ~0.05 — indistinguishable from zero, and the same for
+  3.80 vs 4.20 within one band. Every cell wanders independently. This **contradicts §17.10's
+  inference** that a threshold-tracking fault localises to the voltage domain (front end /
+  1N4732 / preamp): a shared analogue mechanism would move all seven bands together.
+- **Not a contiguous zone.** 4.20 V reads clean *between* two elevated columns at every time
+  point in both sessions. §14.7's noisy–clean–noisy is confirmed and now has a full time course.
+- **Local decay slope contributes but does not explain it.** ρ(excess, slope) = +0.63 across
+  63 cells, but the 3.80 V slope (1585 µV/ns, from the profile's own delay/threshold table) is
+  only 12 % above 4.20 V (1415) against 8× the noise.
+- **It is a slow wander, not sample jitter.** ~50 % of the excess power sits at 0.02–0.1 Hz
+  (10–50 s periods) and the spectral *shape* is unchanged cold vs soaked — only the amplitude
+  moves (5706 → 1515 → 313 µV rms).
+
+Incidental and worth keeping: expressing the *soaked* floor as slope × time gives a near-uniform
+**70–130 ps** equivalent timing jitter across most of the grid, which is a tidy description of
+the floor. The exceptions are the top thresholds and the 9 µs and 100 µs bands at 260–400 ps —
+consistent with the `(9 µs, 4.9 V)` corner being a separate mechanism.
+
+[FILL: does the noise follow the DELAY or the THRESHOLD? A fine delay sweep at the 3.80/4.40
+cells separates those, and nothing in the logs can. Failing that, a scope on the decay between
+4.2 and 3.8 V.]
+
+**Nulls, recorded so they are not re-derived.** `c85` → `c86` amplitude 20.9 → 27.1 mV at one
+placement is **not** claimed as a soak effect: the 2026-07-28 repeats at that placement read
+24.0 and 22.5, so today's two straddle them and hand-placement variance covers it. And the
+r1-vs-r2 settling question was already tested and rejected on 2026-07-28.
+
+**Protocol debt this exposed.** Pack voltage existed only as handwriting on paper and had to be
+interpolated onto the frame timeline by hand — the 2026-07-29 session has a **1h51m gap**
+between the 22:00 and 23:51 readings, which is where that interpolation is least defensible.
+Fixed in classviz v1.64 / features v9 (a logged `# pack_v:` track and a `pack_v` corpus column),
+so the next run of this comparison is measured rather than reconstructed.
+
+---
+
+### findings — the MCU can be blocked by the host, and was, for 47 minutes
+
+*2026-07-29 23:03–23:50, found in the pack B dump above*
+
+The Mode 2 emit is a blocking `print()` to USB CDC (`mcu/pimd_mcu.py`). When the host stopped
+draining the pipe, the MCU stalled inside it: frame delivery collapsed from **414 to ~35 per
+minute** for 47 minutes (222 gaps of 2–15 s; all of the session's dead time is in this one
+window, 2700 s of it), with the within-burst interval still a healthy 0.144 s.
+
+**It is not just lost data — the rig cooled.** The firmware's own v4.24 note records that the
+PWM free-runs at cell[0]'s config during the print, so a long stall parks the detector on one
+band's duty instead of sweeping seven. The operating point stepped **+10 mV (9 µs band) to
++78 mV (100 µs band)** at 23:03 and walked back at −77 µV/s over ~7 min when the stream
+resumed. That step correlates with the independently-measured cold-minus-warm direction across
+all seven bands at **r = +0.99**, magnitudes in the same pulse-width order. Frames dropped
+PC-side cannot do that; only the MCU actually pausing its sweep can.
+
+Likely trigger, not established: the PC suspending or starving the Qt event loop. The recovery
+coincides to the minute with the operator returning to take a voltage reading at 23:51.
+
+Two consequences, both now addressed. It went **unnoticed live** — the Rate readout does show
+0 Hz immediately, but it clears itself the moment the stream recovers and there was nobody
+watching at 23:03 (classviz v1.64 latches it and writes a `# stall:` line). And it went
+**unnoticed in analysis** for a while, because a 50-frame window spanning 100 s reads
+accumulated drift as noise: the first pass through this data reported a "noise relapse" at
+23:28 that does not exist (the same v1.64 entry; the artifact was 0.574 mV where the floor was
+0.188 mV).
+
+fw v4.27 counts these MCU-side rather than preventing them. **Deliberately not fixed:** making
+the emit non-blocking. Dropping a record beats stalling the sweep, and no invariant objects,
+but it needs bench proof that MicroPython's rp2 port reports stdout writability at all, and it
+sits in the acquisition hot path — the v4.13/v4.20/v4.24/v4.26 sequence is a fair warning about
+edits there. Measure first; the counters say whether it ever recurs. (2026-07-30)
+
+---
+
+### mcu/pimd_mcu.py — v4.27 — diagnostic: emit-block counters via 'B'
+
+Detection only for the host-stall defect above; the emit path, its position in the sweep loop
+and every bit of PWM/CC sequencing around it are untouched.
+
+`acquire_mode2`'s emit `print()` is bracketed with `ticks_ms()`, and calls exceeding
+`EMIT_BLOCK_WARN_MS` (50 ms — a normal emit is a few ms) increment `emit_block_count` and
+update `emit_block_ms_max`.
+
+**`ticks_ms`, not `ticks_us`, and that is the whole subtlety.** `ticks_us` wraps every ~17.9
+min and `ticks_diff` is only valid over half a wrap (~8.9 min), so the 47-minute stall this
+exists to catch would have decoded to garbage — plausible-looking garbage, since `ticks_diff`
+returns a signed value in range. `ticks_ms` wraps at ~12.4 days. 1 ms resolution against a
+50 ms threshold loses nothing.
+
+The `B` response gains two trailing fields:
+`B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>`, reset-on-read like
+the two before them. This is a change to a documented wire format (§9/§11), so: `grep` finds
+**no parser for `B` anywhere in `src/`** — it is read by a human over the §16 serial terminal —
+and the extension is additive, so no consumer breaks. Flagged rather than treated as free. The
+header's command list now documents `B` at all, which it previously did not despite the command
+existing since v4.11. (2026-07-30)
+
+---
+
+### src/pimd_classviz.py — v1.64 — window span guard, stall detection, pack voltage, chart pause
+
+Four changes, all downstream of the two findings entries above.
+
+**1. The `settle` metric could read drift as noise, and did.** `_current_settle_mv` and its
+three siblings averaged over a window of *N frames*, which is only a window of *time* while
+frames keep arriving. During the 23:03 stall a 50-frame window spanned ~100 s and σ inflated
+~6×, which is the phantom "relapse" recorded above.
+
+Every one of the four window reductions now goes through one new `_window_frames(n_win)`, which
+returns `None` when the window spans more than `WINDOW_SPAN_TOLERANCE` (3×) its expected
+duration. All four already had a documented `None` path for `< 2 frames`, and the gating call
+sites already handled it (`settled = settle_mv is not None and …`), so a stall now **fails safe
+to "not settled"** rather than to a plausible number. `_current_air_wander_mv` was previously
+written out longhand on the argument that duplicated lines were cheaper than touching the
+gating hot path; it is routed through the helper too, because a guard that holds on three of
+four metrics still lets a stall through the fourth — and spanning *two* windows makes it the
+most exposed of them.
+
+**The reduction itself is unchanged** — same frames, same σ, no detrending — so the 0.4 mV gate
+and every `splithalf_floor`/`quality` value already captured stay comparable. Verified rather
+than asserted: replayed over all 114 246 frames of the 2026-07-29 dump in 2284 windows, **no
+reduced value differs from the pre-v1.64 result at all**, and the guard refuses **35 windows,
+every one of them between 23:03 and 23:51** — the known stall, and nothing else in 5h20m.
+
+**The span is measured on the firmware clock, and this is the part that nearly went wrong.**
+The obvious implementation — take the span from `_rolling_buf`'s own timestamps — does not
+work, because those are **PC arrival** times and arrival is burst-batched: `read_from_serial()`
+drains several lines per `readyRead` and stamps them microseconds apart. Over the whole
+2026-07-29 dump, arrival intervals have median **0.0035 s** with **57 %** under 10 ms, against
+a firmware clock that is uniform at median **0.1440 s** with none under 10 ms. Both share the
+same mean (0.1683 s — same elapsed, same count), which is the trap: the mean looks right while
+the median is 40× too small, and the median is the estimator that survives a stall. A first
+cut used arrival time and refused healthy windows at a ratio of 42:1; the harness caught it.
+So a new `_fw_ms_buf` deque carries the firmware frame clock index-aligned with `_rolling_buf`
+(parallel deque rather than widening a tuple many consumers unpack), cleared with it, and
+`_nominal_frame_s()` takes the median firmware interval over the last 500 frames — robust
+because even through the stall the MCU emitted bursts of consecutive frames one nominal period
+apart. Below `WINDOW_NOMINAL_MIN_N` frames no nominal is established and the guard stays off,
+so stream start cannot read as stalled.
+
+Also: the readout shows the window's real duration (`0.597 [6.9 s]`) or, blocked, why it is
+blank (`STALLED 93 s`); `_set_gauge` uses `text or '—'` in its no-value branch so a caller that
+knows the reason can say it (every pre-v1.64 caller passes `''` there, so rendering is
+unchanged); and the Training status label distinguishes `σ — STREAM STALLED` from
+`σ — (filling)`. The stale comments claiming 50 frames ≈ 15 s at ~3.3 Hz are corrected to the
+measured 6.9 Hz / 7.2 s — nothing derived timing from them, but they are what made a
+frame-count window look time-bounded.
+
+**2. Stall detection on ingest.** `_note_frame_gap()` compares each frame's `firmware_time_ms`
+against the previous one and, past `FRAME_GAP_WARN_S` (2 s ≈ 14 nominal frames; healthy p99 is
+0.180 s), writes a timestamped `# stall:` line into the open dump and latches a red
+`⛔ N stalls, worst Ns` on the Rate readout. Firmware time is the right clock: a gap in the
+MCU's own clock is evidence the MCU stopped emitting. Latched because the instantaneous Rate
+readout is exactly what failed to raise the alarm. A backwards firmware clock (board reset) is
+ignored rather than counted. The latch resets on stream start, scoped to one run like v1.63's
+auto-log suppression. On the real dump it finds 222 gaps, worst 14.8 s.
+
+**3. Pack voltage.** A `Pack V:` spinbox and a `Log V` button on the Analysis session row.
+0.00 shows as `—` and means *not measured*, written as blank rather than as a reading of a flat
+pack. The button appends `# pack_v: <iso>, <volts>` mid-stream (same write+flush as
+`_append_mark`); the value also goes into the session header and into every signature capture's
+new `pack_v` column. A **20-minute** status-bar nag with the reading's age, sized against the
+1h51m gap that made the 2026-07-29 interpolation weakest — status bar only, never a dialog,
+since v1.63 established a modal would stall the stream behind a prompt. Persisted in settings
+as a convenience (last session's closing voltage is the best guess for the next one's opening).
+
+**4. Per-chart draw pause** — operator request, and on-point for the stall. The Pulse Width
+Mean, Per Pulse Width Cell Profiles (8-grid) and Sample Delay Band Profiles (9-grid) groups
+each get a `Pause` checkbox. Between them those three push 1 + n_bands + n_cells `setData`
+calls per tick (17 at 63 cells) plus two scale re-syncs, and that drawing competes with
+draining the serial port on the same single-threaded event loop — which is the race that ends
+in the MCU blocking. With all three paused the shared `_compute_analysis_matrix()` is skipped
+too, which is the largest single saving. Paused means *don't draw*, never *don't record*: the
+frame path, `_rolling_buf`, the session dump and every gate are untouched, and resuming picks
+up from live data with no backfill. Not persisted — a chart that comes back frozen after a
+restart reads as a bug, and the reason to pause is a condition of the run, not a preference.
+
+Verified offscreen: 22 checks against the real 2026-07-29 dump (the regression above, the
+arrival-vs-firmware clock contrast, refusal reasons, both readout forms, the gap detector) plus
+a launch smoke test and a session write → `pimd_features` parse round trip confirming the
+written line formats match the parser. All under `-W error::DeprecationWarning`. **Not yet run
+on the bench** — the induced-stall check (suspend the reader, confirm the gauge blanks with a
+reason, a `# stall:` line lands, and `B` reports a non-zero block count) needs hardware.
+(2026-07-30)
+
+---
+
+### src/pimd_features.py — v9 — pack_v track + stall lines parsed; pack_v corpus column
+
+`parse_session_file` learns two `#` keys, in the header *and* mid-stream: `pack_v:` and
+`stall:`. `SessionData` gains `pack_v` — an ordered `list[(datetime, volts)]`, header reading
+first — and `stalls`, a `list[(datetime, gap_s)]`. A **track, not a scalar**, because a 6S pack
+falls volts over a multi-hour run (2.5 V on 2026-07-29) and one figure cannot describe it. New
+`pack_v_at(sess, t_s)` interpolates linearly between readings and holds flat outside them;
+the corpus build calls it per capture, so `pack_v` is the voltage at *that* capture rather than
+one value stamped across a whole session. Malformed lines and the header's `(not measured)`
+form are dropped rather than guessed at — a track with a bogus entry is worse than a short one,
+because the entries are what get interpolated between.
+
+`pack_v` is appended to `CORPUS_HEADER_FIELDS` and `WIDE_TAIL_FIELDS`, and `build_rows` /
+`build_wide_row` take it as a keyword with a `None` default, so every existing caller is
+unaffected and an unmeasured capture writes blank. **Optional on read** — see the corpus_check
+entry; that is the part that keeps the two corpora on disk readable.
+
+Also resynced the header title line, which read v7 while `TOOL_VERSION` read v8. (2026-07-30)
+
+---
+
+### src/pimd_corpus_check.py — v1.8 — pack_v is an OPTIONAL column
+
+`REQUIRED_FIELDS` was `set(CORPUS_FIELDS)`, so adding **any** column to
+`pimd_features.CORPUS_HEADER_FIELDS` would have made every corpus written before it fail with
+`missing required columns ['pack_v']` — both files on disk, immediately, for a column that is
+blank whenever nobody measured a voltage. New `OPTIONAL_FIELDS = {'pack_v'}` is subtracted from
+the requirement, and `load_corpus` reads the value as `None` when the column is absent *or* the
+cell is blank, so pre-v9 corpora and unmeasured captures behave identically. Additive schema
+growth belongs here rather than in a migration. No check consumes `pack_v` yet; it is carried
+so one can.
+
+Verified by running old and new against byte-identical snapshots of both corpora: v3 gives
+`211 checks: 89 PASS, 0 AMBER, 121 FAIL, 1 SKIP` and v1 gives `143 checks: 62 PASS, 0 AMBER,
+79 FAIL, 2 SKIP` — the same under v1.7/v8 and v1.8/v9. (The FAIL counts are the noise-floor
+problem already recorded for these corpora, not a metadata one.) A corpus written *with*
+`pack_v` also loads and reads back as floats. (2026-07-30)
+
+---
+
 ### findings — the noise is a (9 µs, 4.9 V) corner, not a raised floor; not the battery
 
 *2026-07-28 · `cal_63_air_bat_v3` / sha `4a2352d2` · fw 4.26 · 6S battery · 50 captures over

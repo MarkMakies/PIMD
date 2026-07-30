@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.23
+# PIMD — Usage Guide (USAGE.md) v1.26
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,17 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.26 2026-07-30 classviz v1.65 → v1.66, features v9 → v10. §5's Pack V sub-bullet:
+                the logged line now carries age_s. New §5 sub-bullet for the
+                '# soak:' run/idle lines and what idle_before_s does NOT mean.
+v1.25 2026-07-30 classviz v1.64 → v1.65. §5's Pack V sub-bullet: appending to a corpus
+                captured before features v9 keeps that file's own columns, so pack_v is
+                simply not recorded there — start a new file if you want it per capture.
+v1.24 2026-07-30 classviz v1.61 → v1.64, features v8 → v9, corpus_check v1.7 → v1.8,
+                fw v4.26 → v4.27. §5's Session-dump bullet rewritten: auto-logging
+                (v1.63, previously undocumented here), the pack-voltage track, stall
+                lines, and the window span guard. §5 gains a chart-pause note. §2 and
+                §6 version numbers follow.
 v1.23 2026-07-28 classviz v1.60 → v1.61. §5's Analysis bullet: signature rows now
                 carry long axis and repeat, and the row colour is per target
                 (one hue per target_id, shaded per capture). §1 diagram.
@@ -148,7 +159,7 @@ complete sweep.
 
 ---
 
-## 2. pimd_mcu — RP2040 firmware (v4.26)
+## 2. pimd_mcu — RP2040 firmware (v4.27)
 
 **Intent.** The MCU is deliberately a *simple primitive* (DESIGN §11): it drives the
 coil, times the ADC sample point with ns precision, averages, and streams labelled
@@ -271,7 +282,7 @@ the current locked profile, edit what you mean to change, then sweep.
 
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.50)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.66)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -492,6 +503,53 @@ validated against the target registry.
 - **Session-dump recorder:** self-describing per-session CSV to
   `src/data/sessions/` — embedded profile JSON, per-column map, `# mark:` /
   `# mark_target:` lines — the input format for `pimd_features.py`.
+    - **A dump opens by itself when the stream starts (v1.63)** — `Auto-log`, on by
+      default. Forgetting to press Record is silent and the raw stream cannot be
+      reconstructed afterwards; the cost of the opposite mistake is ~13 MB/hour of
+      gitignored CSV. This is why the 2026-07-29/30 warm-up sessions could be analysed
+      at all. An explicit **Stop** stays stopped until the stream is next started.
+    - **Pack V + Log V (v1.64).** Enter the measured pack voltage; `Log V` timestamps
+      it into the dump as a `# pack_v:` line, and the current value is stamped into
+      every signature capture's `pack_v` column. Log it **every ~20 min** — the status
+      bar nags with the reading's age. Analysis interpolates between entries, so what
+      you are building is a voltage *track*: one reading cannot describe a run over
+      which a 6S pack falls ~2.5 V. 0.00 reads `—` and means not measured. Note the
+      corpus column takes the field's **current value**, not a fresh reading — so
+      re-enter it as you go, or captures hours apart all carry the same voltage.
+      Appending to a corpus captured before v9 keeps that file's own columns, so
+      `pack_v` is not recorded there at all (v1.65); start a new signature file if you
+      want it per capture. The logged comment line carries **`age_s`** (v1.66) —
+      seconds since you last *typed* the value, so the dump distinguishes a fresh
+      meter reading from one carried over. A value restored from the last session
+      reads `age_s=unknown`, never a confident zero.
+    - **`# soak:` lines (v1.66)** record the rig's own run history:
+      `streamed_s` (seconds the stream has actually run, banked across stop/start —
+      *not* wall-clock elapsed), `stalled_s` (seconds lost to firmware-time gaps, so
+      **effective soak = streamed_s − stalled_s**), and `idle_before_s`. Written at
+      stream start and stop, every 60 s while streaming, and once per dump header.
+      This is the variable to regress against when testing whether an effect tracks
+      soak or supply — and unlike pack voltage it is measured, not typed.
+      **`idle_before_s` is classviz-*observed* idle, not rig idle.** If the app was
+      closed, the board unplugged, or the rig left powered with the stream merely
+      stopped, it describes what the tool saw. It reads `unknown` after a crash
+      (settings save on close). Treat it as a hint, not a measurement.
+    - **`# stall:` lines (v1.64).** Written automatically when the firmware clock shows
+      a gap ≥ 2 s, i.e. the MCU stopped emitting — which on 2026-07-29 also meant the
+      rig cooled (the PWM free-runs on one band while the emit is blocked). The Rate
+      readout latches `⛔ N stalls` for the run. If you see it, the stream is losing
+      frames *and* the thermal state moved; frames either side of a stall are not one
+      measurement.
+    - **Settle reads `—` during a stall, by design (v1.64).** The metric averages σ
+      over N *frames*, which is only a window of time while frames arrive; a stalled
+      window reads drift as noise. The readout now shows the window's real duration
+      (`0.597 [6.9 s]`) or `STALLED 93 s`. The value itself is unchanged when the
+      stream is healthy, so the 0.4 mV gate and older captures stay comparable.
+    - **Pause (v1.64)** on the Pulse Width Mean, Cell Profiles (8-grid) and Band
+      Profiles (9-grid) groups stops those charts redrawing, freeing event-loop time
+      for draining the serial port — worth doing on a long unattended run, since
+      losing that race is what leads to the MCU blocking. Recording, gating and the
+      dump are unaffected; pausing all three also skips the shared matrix behind
+      them. Not persisted.
 
 **Notes.** Always `E` before switching profiles (Load & Run does this itself).
 W-frames with a stale profile index are silently dropped, so a **persistently** blank
@@ -505,7 +563,7 @@ be treated as suspect.)* Settings persist in `src/data/classviz_settings.json`
 
 ---
 
-## 6. Corpus pipeline — pimd_features (v7) + pimd_target_check (v3)
+## 6. Corpus pipeline — pimd_features (v10) + pimd_target_check (v3)
 
 **Intent.** Offline CLI stage that turns classviz output into the ML training
 corpus, enforcing the two contracts that make the corpus trustworthy: every row

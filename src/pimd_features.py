@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v7
+# PIMD Feature Extractor (pimd_features.py) v10
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -15,6 +15,8 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v10 pack_v gains age_s (old 2-field form still read); '# soak:' lines parsed
+#   v9 pack_v track + stall lines parsed; pack_v corpus column (optional on read)
 #   v8 parse_session_file: '# session_notes:' lines interspersed among data rows now parsed
 #   v7 doc-only: supply provenance vocabulary now battery|psu (free text; older corpora may hold 'usb')
 #   v6 structured target-metadata capture regime (registry-backed target_id + placement + provenance)
@@ -54,11 +56,37 @@ gui_signatures_*.csv, one row per (capture, cell)):
   fw_version       -- parsed from the board's V-identify reply
   tool_version     -- capturing tool's version string
   supply           -- battery|psu (free text; older corpora may contain 'usb')
+  pack_v           -- pack terminal voltage at capture time, V, or blank when not
+                      measured (v9). OPTIONAL on read: corpora written before v9
+                      have no such column at all -- see
+                      pimd_corpus_check.OPTIONAL_FIELDS. From a session dump it is
+                      INTERPOLATED from that session's '# pack_v:' track
+                      (pack_v_at), not a single session-level figure, because a
+                      6S pack falls volts over a multi-hour run.
+                      Note the COLUMN carries no staleness information; the
+                      session-dump track does (age_s, v10). When classviz writes
+                      this column directly it stamps whatever was in the field at
+                      capture time, however old that reading was.
 
 JOINED_CORPUS_HEADER = CORPUS_HEADER plus, from a registry join on target_id
 (blank for 'air'; pimd_features.py's own --out corpus build only):
   shape_class, dim_a_mm, dim_b_mm, dim_c_mm, wall_thickness_mm, closed_loop,
   mass_g, magnet_test, material_class, plating_material, substrate
+
+Session-dump comment lines this module parses (classviz writes them; both the
+header block and mid-stream are read, in file order):
+  # pack_v: <iso>, <volts>[, age_s=<n|unknown>]   operator-entered pack voltage.
+                      age_s is seconds since the value was last TYPED, so it says
+                      whether the number is a fresh meter reading. The 2-field
+                      form (classviz v1.64/v1.65) is still accepted.
+  # soak:   <iso>, streamed_s=<n>, stalled_s=<n>, idle_before_s=<n|unknown>,
+            event=<what>                          run/idle history (v1.66).
+                      Effective soak = streamed_s - stalled_s. idle_before_s is
+                      classviz-OBSERVED idle, not guaranteed rig idle.
+  # stall:  <iso>, <n> s gap in firmware time     the MCU stopped emitting; the
+                      rig was not sweeping and cooled. Frames either side are not
+                      one measurement.
+  # mark: / # mark_target: / # session_notes:     ground truth and operator notes.
 
 Wide format (--out-wide, one row per capture instead of per cell):
   WIDE_METADATA_FIELDS + WIDE_SCALAR_FIELDS + c00..cNN (delta_mV vector, same
@@ -85,7 +113,7 @@ import matplotlib.pyplot as plt
 import pimd_target_check
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TOOL_VERSION = 'pimd_features.py v8'
+TOOL_VERSION = 'pimd_features.py v10'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling
@@ -106,6 +134,10 @@ CORPUS_HEADER_FIELDS = [
     'long_axis', 'face_normal', 'offset_x_mm', 'offset_y_mm', 'medium', 'repeat_idx', 'notes',
     'pulse_us', 'threshold_v', 'delta_mV', 'plateau_amp_mV', 'splithalf_floor', 'quality',
     'amp_mean_abs_mV', 'profile_name', 'profile_sha8', 'fw_version', 'tool_version', 'supply',
+    # v9. Blank when not measured, and OPTIONAL on read -- see
+    # pimd_corpus_check.OPTIONAL_FIELDS. Both corpora on disk predate it, so
+    # requiring it would have made them unreadable the moment it was added.
+    'pack_v',
 ]
 CORPUS_HEADER = ','.join(CORPUS_HEADER_FIELDS)
 
@@ -120,7 +152,7 @@ WIDE_METADATA_FIELDS = ['session', 'capture_id', 'captured_at', 'target_id', 'sh
                          'medium', 'repeat_idx', 'notes']
 WIDE_SCALAR_FIELDS = ['plateau_amp_mV', 'splithalf_floor', 'quality']
 WIDE_TAIL_FIELDS = ['amp_mean_abs_mV', 'profile_name', 'profile_sha8', 'fw_version',
-                     'tool_version', 'supply']
+                     'tool_version', 'supply', 'pack_v']
 
 
 def warn(session_path, message):
@@ -162,10 +194,130 @@ class SessionData:
     session_notes: str
     marks: list              # list[(datetime, str)]
     mark_targets: list        # list[(datetime, dict)] -- structured 'mark_target:' companions
+    pack_v: list               # v10: list[(datetime, volts, age_s)] -- pack-voltage TRACK,
+                               # header reading first then every mid-stream '# pack_v:'
+                               # line, in file order. A multi-hour run falls volts (2.5 V
+                               # on 2026-07-29), so one scalar could not describe it;
+                               # interpolate onto t_seconds (pack_v_at). age_s is seconds
+                               # since the operator last TYPED the value, or None when
+                               # unknown -- v1.64/v1.65 dumps carry no age at all, and a
+                               # value restored from settings at launch reports 'unknown'.
+                               # Was a 2-tuple at v9; widened here.
+                               # Empty when never measured.
+    soak: list                  # v10: list[(datetime, streamed_s, stalled_s,
+                                # idle_before_s, event)] from '# soak:' lines (classviz
+                                # v1.66). streamed_s is cumulative seconds the stream
+                                # actually ran, across stop/start -- NOT wall elapsed.
+                                # Effective soak = streamed_s - stalled_s, because a
+                                # stalled stream is not sweeping. idle_before_s is
+                                # classviz-observed idle and may be None.
+    stalls: list                # v9: list[(datetime, float)] -- '# stall:' lines classviz
+                                # v1.64 writes on a firmware-time gap, as (when, gap_s).
+                                # Frames either side of one are not one measurement:
+                                # exclude these windows before reducing.
     t0: datetime              # first frame's pc_wallclock timestamp (epoch for t_seconds / mark alignment)
     t_seconds: np.ndarray      # (n,)
     frames_mV: np.ndarray       # (n, n_channels)
     flagged: np.ndarray           # (n,) bool
+
+
+def _parse_kv_tail(parts):
+    """['age_s=180', 'event=periodic'] -> {'age_s': '180', 'event': 'periodic'}.
+    Anything without an '=' is ignored rather than fatal (v10)."""
+    out = {}
+    for p in parts:
+        k, sep, v = p.partition('=')
+        if sep:
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _parse_pack_v_content(content):
+    """'pack_v: <iso-ts>, <volts>[, age_s=<n|unknown>]'
+    -> (datetime, volts, age_s) with age_s a float or None. None for the whole
+    line if it cannot be trusted.
+
+    **Both forms are accepted, and that is load-bearing.** classviz v1.66 added
+    the age field; v1.64/v1.65 wrote two fields only, which is what every dump
+    captured before 2026-07-30 uses -- including session_20260729_191643.csv and
+    session_20260730_082729.csv, the pair the warm-up findings rest on. A parser
+    that only understood the new form would silently drop their voltage tracks.
+
+    Note the v9 implementation float()'d everything after the FIRST comma, so it
+    would have raised on a three-field line and dropped it -- growing the written
+    format without growing this function would have made the new lines invisible.
+
+    None covers the header's '(not measured)' form and any malformed line: a
+    pack-voltage track with a bogus entry in it is worse than a shorter one,
+    because the whole point is interpolating between the entries."""
+    rest = content.split(':', 1)[1].strip()
+    parts = [x.strip() for x in rest.split(',')]
+    if len(parts) < 2:
+        return None
+    try:
+        ts = datetime.fromisoformat(parts[0])
+        volts = float(parts[1])
+    except ValueError:
+        return None
+    age = _parse_kv_tail(parts[2:]).get('age_s')
+    try:
+        age_s = None if age is None or age == 'unknown' else float(age)
+    except ValueError:
+        age_s = None       # a malformed age is unknown, not a reason to drop a good reading
+    return ts, volts, age_s
+
+
+def _parse_soak_content(content):
+    """'soak: <iso-ts>, streamed_s=<n>, stalled_s=<n>, idle_before_s=<n|unknown>,
+    event=<what>' -> (datetime, streamed_s, stalled_s, idle_before_s, event),
+    or None if unparseable. Written by classviz v1.66.
+
+    idle_before_s is None when 'unknown'. Read it as classviz-OBSERVED idle, not
+    guaranteed rig idle -- see that tool's _idle_before_s for what it cannot
+    know (app restarts, the board unplugged, the rig left powered but stopped).
+
+    Effective soak is streamed_s - stalled_s: while the stream is stalled the MCU
+    is not sweeping, so streamed_s alone overstates how long the rig has been
+    running. Both are carried so the subtraction stays visible."""
+    rest = content.split(':', 1)[1].strip()
+    parts = [x.strip() for x in rest.split(',')]
+    if len(parts) < 2:
+        return None
+    try:
+        ts = datetime.fromisoformat(parts[0])
+    except ValueError:
+        return None
+    kv = _parse_kv_tail(parts[1:])
+
+    def num(key):
+        raw = kv.get(key)
+        if raw is None or raw == 'unknown':
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    streamed = num('streamed_s')
+    if streamed is None:
+        return None          # the one field the line exists to carry
+    return ts, streamed, (num('stalled_s') or 0.0), num('idle_before_s'), kv.get('event', '')
+
+
+def _parse_stall_content(content):
+    """'stall: <iso-ts>, <gap> s gap in firmware time' -> (datetime, float
+    seconds), or None if unparseable. Written by classviz v1.64."""
+    rest = content.split(':', 1)[1].strip()
+    ts_str, sep, tail = rest.partition(',')
+    if not sep:
+        return None
+    m = re.search(r'([0-9]+(?:\.[0-9]+)?)', tail)
+    if not m:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.strip()), float(m.group(1))
+    except ValueError:
+        return None
 
 
 def _parse_mark_content(content):
@@ -226,6 +378,9 @@ def parse_session_file(path):
     firmware_v_response_raw = None
     fw_version_explicit = None
     supply = 'unknown'
+    pack_v = []
+    stalls = []
+    soak = []
     notes_lines = []
     n_bands = n_cells = n_channels = None
     session_start_iso = None
@@ -263,6 +418,14 @@ def parse_session_file(path):
                         firmware_v_response_raw = raw.strip()
                     elif content.startswith('supply:'):
                         supply = content.split(':', 1)[1].strip()
+                    elif content.startswith('pack_v:'):
+                        entry = _parse_pack_v_content(content)
+                        if entry:
+                            pack_v.append(entry)
+                    elif content.startswith('soak:'):
+                        entry = _parse_soak_content(content)
+                        if entry:
+                            soak.append(entry)
                     elif content.startswith('colmap_fields:'):
                         pass  # fixed known order (col_index,band_index,freq_hz,pulse_us,delay_us,threshold_v)
                     elif content.startswith('colmap:'):
@@ -311,6 +474,21 @@ def parse_session_file(path):
                         # fills, so session_notes reads as one block regardless
                         # of where in the file the lines landed.
                         notes_lines.append(content.split(':', 1)[1].strip())
+                    elif content.startswith('pack_v:'):
+                        # v9: the header value is the reading at session start;
+                        # these are the rest of the discharge. Both go into one
+                        # ordered track -- see SessionData.pack_v.
+                        entry = _parse_pack_v_content(content)
+                        if entry:
+                            pack_v.append(entry)
+                    elif content.startswith('stall:'):
+                        entry = _parse_stall_content(content)
+                        if entry:
+                            stalls.append(entry)
+                    elif content.startswith('soak:'):
+                        entry = _parse_soak_content(content)
+                        if entry:
+                            soak.append(entry)
                     # else: unrecognised '#' line mid-stream - ignored
                     continue
                 parts = line.split(',')
@@ -341,7 +519,7 @@ def parse_session_file(path):
         profile_raw_json=profile_raw_json, profile_sha8_explicit=profile_sha8_explicit,
         fw_version=fw_version, supply=supply,
         colmap=colmap, session_notes='\n'.join(notes_lines), marks=marks,
-        mark_targets=mark_targets,
+        mark_targets=mark_targets, pack_v=pack_v, stalls=stalls, soak=soak,
         t0=t0, t_seconds=t_seconds, frames_mV=frames_mV, flagged=flagged_arr,
     )
 
@@ -364,6 +542,27 @@ def drop_flagged(sess):
     sess.frames_mV = sess.frames_mV[mask]
     sess.flagged = sess.flagged[mask]
     return sess
+
+
+def pack_v_at(sess, t_s):
+    """Pack voltage at t_s seconds into the session, interpolated from
+    SessionData.pack_v, or None when the track is empty (v9; entries widened
+    to (ts, volts, age_s) at v10).
+
+    Linear between readings and held flat outside them. Readings are minutes
+    apart by nature -- someone reads a meter -- so this is an estimate, and
+    that is still the whole point: the alternative used on 2026-07-29 was
+    interpolating handwritten notes onto the timeline by hand afterwards."""
+    if not sess.pack_v:
+        return None
+    # v10: entries are (ts, volts, age_s); age is provenance for the analyst and
+    # is deliberately NOT used to weight or filter here -- silently discarding a
+    # stale reading would hide it from whoever is deciding whether to trust it.
+    xs = [(ts - sess.t0).total_seconds() for ts, _, _ in sess.pack_v]
+    vs = [v for _, v, _ in sess.pack_v]
+    if len(xs) == 1:
+        return vs[0]
+    return float(np.interp(t_s, xs, vs))
 
 
 def measure_frame_rate_hz(t_seconds):
@@ -684,12 +883,15 @@ def format_distance(x):
 
 def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV, plateau_amp_mV,
                splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
-               fw_version, tool_version, supply, session_path):
+               fw_version, tool_version, supply, session_path, pack_v=None):
     """One dict per cell, keyed by CORPUS_HEADER_FIELDS -- unjoined (no
     registry columns). This is the exact row shape pimd_classviz.py writes
     directly to gui_signatures_*.csv; pimd_features.py's own --out corpus
     build appends the registry-joined columns afterward (registry_join_
-    fields()), so both callers share this one implementation."""
+    fields()), so both callers share this one implementation.
+
+    pack_v (v9) is the pack voltage at capture time, or None when not measured
+    -- keyword with a default so it is additive for every existing caller."""
     if plateau.target_id is None:
         raise ValueError('build_rows() called on an unresolved plateau (target_id=None) -- '
                           'callers must skip these, see plateau_display_label()')
@@ -708,13 +910,14 @@ def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV,
             'amp_mean_abs_mV': format_value(amp_mean_abs_mV),
             'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',
             'fw_version': fw_version or 'unknown', 'tool_version': tool_version, 'supply': supply,
+            'pack_v': '' if pack_v is None else format_value(pack_v),
         })
     return rows
 
 
 def build_wide_row(session_stem, capture_id, captured_at, plateau, delta_mV, plateau_amp_mV,
                     splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
-                    fw_version, tool_version, supply):
+                    fw_version, tool_version, supply, pack_v=None):
     """One dict per plateau (not per cell): same metadata as build_rows() plus
     the full delta_mV vector as c00..cNN. Built from the exact values already
     computed for the long rows -- never recomputed -- so long and wide can't
@@ -730,6 +933,7 @@ def build_wide_row(session_stem, capture_id, captured_at, plateau, delta_mV, pla
         'quality': quality, 'amp_mean_abs_mV': format_value(amp_mean_abs_mV),
         'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',
         'fw_version': fw_version or 'unknown', 'tool_version': tool_version, 'supply': supply,
+        'pack_v': '' if pack_v is None else format_value(pack_v),
     }
     for i, v in enumerate(delta_mV):
         row['c{0:02d}'.format(i)] = format_value(v)
@@ -895,10 +1099,16 @@ def process_session(path, args, targets):
 
             joined = registry_join_fields(p.target_id, targets)
 
+            # v9: pack voltage AT THIS CAPTURE, interpolated from the session's
+            # own track rather than stamped from one session-level value. Over a
+            # multi-hour dump the pack moves volts, so a single figure would
+            # attribute the whole run's captures to the voltage at one instant.
+            pack_v_here = pack_v_at(sess, center_t)
+
             cell_rows = build_rows(session_stem, capture_id, captured_at, p, sess.colmap, delta_mV,
                                     plateau_amp_mV, splithalf_floor, quality, amp_mean_abs_mV,
                                     profile_name, profile_sha8, sess.fw_version, TOOL_VERSION,
-                                    sess.supply, path)
+                                    sess.supply, path, pack_v=pack_v_here)
             for row in cell_rows:
                 row.update(joined)
             rows.extend(cell_rows)
@@ -907,7 +1117,7 @@ def process_session(path, args, targets):
                 wide_row = build_wide_row(session_stem, capture_id, captured_at, p, delta_mV,
                                            plateau_amp_mV, splithalf_floor, quality, amp_mean_abs_mV,
                                            profile_name, profile_sha8, sess.fw_version, TOOL_VERSION,
-                                           sess.supply)
+                                           sess.supply, pack_v=pack_v_here)
                 wide_row.update(joined)
                 wide_rows.append(wide_row)
         except KeyError as e:

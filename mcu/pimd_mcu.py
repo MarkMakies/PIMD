@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.26, coil v4
+# Pulse Induction Metal Detector, v4.27, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -31,9 +31,15 @@
 #         -> R<time_ms>,<mean_uV>,<std_uV>,<n>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>
 #   V/v/? identify -> V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
+#   B/b   diagnostic counters, reset on read
+#         -> B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>
+#         emit_block_* (v4.27) count Mode 2 emits whose print() blocked longer than
+#         EMIT_BLOCK_WARN_MS — i.e. the host stopped draining USB CDC. Non-zero means
+#         the sweep was paused and the rig's thermal load changed with it.
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.27 diagnostic: emit-block counters via 'B' (host-stall detection; emit path unchanged)
 #   v4.26 FIX acquire_mode2: post-emit USB IRQ burst mis-timed cell[i]'s CC write (channel-1 σ)
 #   v4.25 FIX acquire_mode2: outlier gate could permanently latch small-signal cells
 #   v4.24 FIX acquire_mode2: boundary settling time-floored (SETTLE_FLOOR_US), not period-scaled
@@ -71,7 +77,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.26'
+FW_VERSION = '4.27'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -122,6 +128,10 @@ RAW_FULL_SCALE_UV = 10_000_000  # ±5 V differential span in µV
 # Mode 2 output rate cap and band-boundary settling
 # ---------------------------------------------------------------------------
 MIN_EMIT_MS = 10      # emit W records at most every 10 ms (100 Hz max)
+EMIT_BLOCK_WARN_MS = 50  # an emit print() slower than this counts as a host stall
+                         # (v4.27 diagnostic). A normal emit is a few ms, so this sits
+                         # an order above nominal and cannot trip on ordinary jitter.
+                         # It does NOT change the emit — see emit_block_count.
 BOUNDARY_PRIME = 15   # extra PWM periods to let coil settle after a band-freq change.
                       # 5 was insufficient for the 5µs→40µs wrap-around (8× energy step):
                       # the settling signature (3.1→1.6→0.6 mV gradient in band 0) persisted.
@@ -332,6 +342,18 @@ overrun_count = 0     # DIAGNOSTIC (temporary): counts how often acquire_mode2's
                       # per-cell loop iteration overran its period budget
                       # (remaining <= 0, no sleep_us call) — i.e. software fell
                       # behind the free-running hardware PWM. Read out via 'B'.
+emit_block_count = 0  # DIAGNOSTIC (v4.27): emits whose print() took longer than
+                      # EMIT_BLOCK_WARN_MS. print() writes to USB CDC and BLOCKS
+                      # when the host stops draining the pipe; the PWM keeps
+                      # free-running at cell[0]'s config throughout (see the
+                      # v4.24 note in acquire_mode2), so a long stall parks the
+                      # rig on one band's duty instead of sweeping all of them.
+                      # Measured 2026-07-29 23:03-23:50: a 47-minute host stall
+                      # dropped ~90% of frames and cooled the rig enough to move
+                      # the operating point (+10 mV on the 9 us band to +78 mV on
+                      # 100 us). Silent until now — hence these counters.
+emit_block_ms_max = 0 # DIAGNOSTIC (v4.27): longest single emit print(), ms.
+                      # Both read out and reset via 'B'.
 
 
 def raw14_from_bytes(data_bytes):
@@ -435,6 +457,7 @@ def acquire_mode2(profile):
     rolling[(0-1)%n] = rolling[n-1], eliminating the startup transient.
     """
     global mode2_profile_changed, overrun_count
+    global emit_block_count, emit_block_ms_max
 
     avg_depth = profile['averages']
 
@@ -593,7 +616,26 @@ def acquire_mode2(profile):
                     elapsed_ms = ticks_diff(now, base_time_ms)
                     fields = ['W{0:d}'.format(active_profile_index), '{0:d}'.format(elapsed_ms)]
                     fields += ['{0:d}'.format(m) for m in means]
+                    # v4.27: time the emit. print() blocks on USB CDC when the host
+                    # stops reading, and the PWM free-runs at cell[0]'s config while
+                    # it does (see the v4.24 note above), so an unbounded stall is a
+                    # silent change to BOTH timing and thermal load. Measuring is all
+                    # that happens here: the call, its position in the loop and the
+                    # sequencing around it are untouched, deliberately — a skip-when-
+                    # blocked guard needs bench proof that this port reports stdout
+                    # writability at all, and it would sit in the hot path.
+                    # ticks_ms, not ticks_us: ticks_us wraps every ~17.9 min and
+                    # ticks_diff is only valid over half that (~8.9 min), so the
+                    # 47-minute stall this exists to catch would decode wrong.
+                    # ticks_ms wraps at ~12.4 days. 1 ms resolution is ample against
+                    # a 50 ms threshold.
+                    _emit_t0 = ticks_ms()
                     print(','.join(fields))
+                    _emit_ms = ticks_diff(ticks_ms(), _emit_t0)
+                    if _emit_ms > EMIT_BLOCK_WARN_MS:
+                        emit_block_count += 1
+                        if _emit_ms > emit_block_ms_max:
+                            emit_block_ms_max = _emit_ms
                     last_emit_ms = now
                 if ticks_diff(now, last_poll_ms) >= COMMAND_POLL_MS:
                     check_for_commands(timeout_ms=0)
@@ -635,7 +677,7 @@ def check_for_commands(timeout_ms=1):
     """
     global state, sample_frequency_hz, pulse_width_us, sample_delay_us, down_sample
     global active_profile_index, mode2_profile_changed, dynamic_profile
-    global busy_high_count, overrun_count
+    global busy_high_count, overrun_count, emit_block_count, emit_block_ms_max
 
     try:
         if not serial_poll.poll(timeout_ms):
@@ -800,9 +842,16 @@ def check_for_commands(timeout_ms=1):
             # DIAGNOSTIC (temporary): report and reset busy_high_count and
             # overrun_count — see read_raw_sample()/acquire_mode2() and the
             # Mode 2 single-cell noise investigation.
-            print('B{0:d},{1:d}'.format(busy_high_count, overrun_count))
+            # v4.27 appends the two host-stall counters. Additive extension of a
+            # diagnostic response: nothing in src/ parses 'B' (it is read by a
+            # human over the §16 serial terminal), so the two new trailing fields
+            # break no consumer. Reset-on-read, matching the two before them.
+            print('B{0:d},{1:d},{2:d},{3:d}'.format(
+                busy_high_count, overrun_count, emit_block_count, emit_block_ms_max))
             busy_high_count = 0
             overrun_count = 0
+            emit_block_count = 0
+            emit_block_ms_max = 0
 
         else:
             print('Command Input ERROR: unknown command')

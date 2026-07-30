@@ -19,6 +19,9 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.66 session dump: pack_v carries age_s; new '# soak:' run/idle history lines
+#   v1.65 FIX corpus append wrote the tool's columns, not the file's (ragged CSV)
+#   v1.64 window span guard; stream-stall detection; pack voltage; chart pause
 #   v1.63 session logging auto-starts with the stream; Session Start adopts a running log
 #   v1.62 FIX repeat_idx stuck at r1 (re-suggest after reload; normalise the placement key)
 #   v1.61 signature list rows carry long axis + repeat; colour is per target
@@ -127,7 +130,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.63'
+APP_VERSION = '1.66'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -293,13 +296,47 @@ SHAPE_AIR_AMBER_S   = 60.0
 # 60 mm on a drifting air simulation, family read correctly out to a 15 s hold
 # at 20-40 frames and was already wrong at 5 s by 80-120 frames.
 SHAPE_AIR_N_DEFAULT      = 40
-# Live/settle window, frames. Much shorter than the Stats tab's 50 (≈15 s at
-# the ~3.3 Hz sweep rate): the settle metric only reads "settled" once the
-# whole window sits inside one state, so a 50-frame window means a target does
-# not register for 15 s — by which time drift has already spoiled the reading.
-# 15 frames ≈ 4.5 s, and the split-half noise floor over it is still ~0.5 mV
-# against a 39 mV target at 60 mm.
+# Live/settle window, frames. Much shorter than the Stats tab's 50: the settle
+# metric only reads "settled" once the whole window sits inside one state, so a
+# 50-frame window means a target does not register for a whole window — by which
+# time drift has already spoiled the reading. The split-half noise floor over 15
+# frames is still ~0.5 mV against a 39 mV target at 60 mm.
+#   Sweep rate, measured (v1.64): 6.9 Hz under cal_63_air_bat_v3, so 50 frames is
+#   ≈7.2 s and 15 frames ≈2.2 s. Earlier comments here quoted ~3.3 Hz / 15 s for
+#   the 50-frame window; that was never re-measured after the profile changed and
+#   is off by ~2×. Nothing derives timing from those numbers — they were prose —
+#   but they are what made the frame-count window look time-bounded when it is not
+#   (see _window_frames).
 SHAPE_WIN_N_DEFAULT      = 15
+# Span guard on every frame-count window (v1.64). A window of N frames is only a
+# window of time if frames keep arriving; when the host stalls, N frames can span
+# minutes and the per-channel σ over them reads accumulated DRIFT as noise. On
+# 2026-07-29 23:03-23:50 a host stall (fw v4.27 now counts these MCU-side) made a
+# 50-frame window span ~100 s instead of 7.2 s and inflated `settle` ~6×, which
+# read on-screen as a noise relapse that did not happen. Any window spanning more
+# than this multiple of its expected duration is refused rather than reduced, so a
+# stall fails safe to "not settled" instead of to a plausible-looking number.
+WINDOW_SPAN_TOLERANCE = 3.0
+# Frames used to estimate the nominal frame period for that guard, from the
+# FIRMWARE clock (_fw_ms_buf -- arrival time is burst-batched and cannot measure a
+# frame period; see that attribute). The MEDIAN is the right estimator and the
+# reason is the stall itself: through the whole 47-minute event 87% of firmware
+# intervals were still a healthy 0.144 s (the MCU emitted short bursts of
+# consecutive frames) and only 13% were the long gaps, so the median holds at
+# nominal while the window span blows out. A mean, or the live 1 s rate, would
+# rise or collapse with the stream and the guard would never trip.
+WINDOW_NOMINAL_SAMPLE_N = 500
+WINDOW_NOMINAL_MIN_N    = 20    # below this, no nominal is established and the
+                                # guard stays off (stream start must not read stalled)
+# A gap in FIRMWARE time this long counts as a stall worth recording (v1.64).
+# 2 s is ~14 nominal frames at the measured 6.9 Hz -- well clear of ordinary
+# scheduling jitter (p99 of healthy intervals on 2026-07-29 was 0.180 s) while
+# still catching every one of the 222 gaps in that session's stall window.
+FRAME_GAP_WARN_S = 2.0
+# Nag interval for a fresh pack-voltage reading while recording (v1.64), seconds.
+PACK_V_REMIND_S = 20 * 60
+# How often a '# soak:' line is written while streaming (v1.66), seconds.
+SOAK_EMIT_S = 60
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
 
@@ -502,7 +539,59 @@ class MainWindow(QMainWindow):
         self._capturing   = False
         self._capture_n   = CAPTURE_FRAMES_DEFAULT
         self._rolling_buf: deque = deque(maxlen=10_000)
+        # Firmware frame clock for the same frames, appended in lockstep with
+        # _rolling_buf and with the same maxlen so index -k aligns in both
+        # (v1.64). Kept as a parallel deque rather than widening _rolling_buf's
+        # tuple, which many consumers unpack as (ts, arr).
+        #
+        # It exists because _rolling_buf's timestamp is PC ARRIVAL time, and
+        # arrival is burst-batched: read_from_serial() drains several lines per
+        # readyRead and stamps them microseconds apart. Measured over all 114k
+        # frames of the 2026-07-29 dump, arrival intervals are bimodal -- median
+        # 0.0035 s with 57% of them under 10 ms, against p90 0.444 s -- while the
+        # firmware clock is uniform at median 0.1440 s with NONE under 10 ms. Both
+        # necessarily share the same mean (0.1683 s: same elapsed, same count),
+        # which is the trap: an arrival-time mean looks right while its median is
+        # 40x too small, and the median is what survives a stall. So arrival time
+        # cannot measure how much TIME a window of frames covers, and the
+        # firmware's own clock can. This is what the span guard measures against.
+        # The degree of batching varies -- one 10k-frame stretch of that session
+        # ran only 23% batched -- so this is not a fixed factor to correct for.
+        self._fw_ms_buf: deque = deque(maxlen=10_000)
         self._rolling_T   = ROLLING_SECS_DEFAULT
+        # v1.64 window-span guard state (see _window_frames). span/reason are
+        # written on every window reduction and read only for display; the
+        # nominal cache is keyed on _frame_count so it recomputes once a frame.
+        self._window_span_s        = None
+        self._window_block_reason  = None
+        self._nominal_frame_cache  = (-1, None)
+        # v1.64 stream-gap detection (see _note_frame_gap). Latched for the run:
+        # the Rate readout is instantaneous and clears itself, which is no use
+        # for an unattended session.
+        self._last_fw_time_ms = None
+        self._stall_count     = 0
+        self._stall_worst_s   = 0.0
+        self._stall_last_wall = None
+        # v1.64 pack voltage. None means not measured (see _pack_v_value); the
+        # persisted value is restored in _load_settings.
+        self._pack_v           = None
+        self._pack_v_last_wall = None
+        self._pack_v_edited_wall = None    # v1.66: when the field was last TYPED
+        # v1.66 soak history. The rig's thermal state depends on how long it has
+        # actually been sweeping, not on wall-clock elapsed -- a stopped stream
+        # cools it, and nothing recorded that. streamed_s accumulates ACROSS
+        # stop/start rather than being (now - session_start).
+        self._stall_total_s        = 0.0
+        self._stream_run_start_wall = None   # wall time this streaming run began
+        self._streamed_total_s     = 0.0     # completed runs, this session
+        self._last_stream_stop_iso = None    # persisted; drives idle_before_s
+        self._soak_last_emit_wall  = None
+        # v1.64 per-chart draw pause (see _make_chart_pause_checkbox). Deliberately
+        # NOT persisted: a chart that comes back frozen after a restart reads as a
+        # bug, and the reason to pause is a condition of the run, not a preference.
+        self._analysis_c2_paused = False
+        self._analysis_g8_paused = False
+        self._analysis_g9_paused = False
 
         self._freeze       = False
         self._autoscale    = True
@@ -845,6 +934,7 @@ class MainWindow(QMainWindow):
             self._session_stop_is_forced = True   # not an operator Stop; don't suppress auto-log
             self.pb_record.setChecked(False)      # triggers _toggle_record_frames → auto-save
         self._rolling_buf.clear()
+        self._fw_ms_buf.clear()      # v1.64: must stay index-aligned with the above
         self._baseline_mean = None
         self._baseline_std  = None
         self._baseline_age  = None
@@ -1914,6 +2004,41 @@ class MainWindow(QMainWindow):
         row_b.addStretch(1)
         v.addLayout(row_b)
 
+        # -- Pack voltage (v1.64) ------------------------------------------
+        # A 6S pack falls ~2.5 V across a long run and NONE of it was recorded:
+        # '# supply: battery' was the only supply fact in the dump. Settling the
+        # 2026-07-29/30 warm-up-vs-battery question needed pack voltage against
+        # the frame timeline, and that only existed as handwriting on paper.
+        row_c = QHBoxLayout()
+        row_c.addWidget(QLabel('Pack V:'))
+        self.sp_pack_v = QDoubleSpinBox()
+        self.sp_pack_v.setRange(0.0, 60.0)
+        self.sp_pack_v.setDecimals(2)
+        self.sp_pack_v.setSingleStep(0.01)
+        self.sp_pack_v.setSpecialValueText('—')      # 0.00 means "not measured"
+        self.sp_pack_v.setValue(self._pack_v or 0.0)
+        self.sp_pack_v.setToolTip(
+            'Measured pack terminal voltage, under load. 0.00 (—) means not '
+            'measured and is written as blank rather than as a reading.\n\n'
+            'Stamped into every signature capture (pack_v column) and into the '
+            'session header. Press "Log V" to timestamp it mid-stream so a long '
+            'run carries a voltage TRACK, not one value: analysis interpolates '
+            'between entries.')
+        self.sp_pack_v.valueChanged.connect(self._on_pack_v_changed)
+        row_c.addWidget(self.sp_pack_v)
+
+        self.pb_pack_v_log = QPushButton('Log V')
+        self.pb_pack_v_log.setToolTip(
+            'Append the current pack voltage to the open session dump as a '
+            'timestamped "# pack_v:" line.')
+        self.pb_pack_v_log.clicked.connect(self._on_pack_v_log)
+        row_c.addWidget(self.pb_pack_v_log)
+
+        self.lbl_pack_v_age = QLabel('')
+        row_c.addWidget(self.lbl_pack_v_age)
+        row_c.addStretch(1)
+        v.addLayout(row_c)
+
     # -- Chart 1: Analysis heatmap variant (renamed/reformatted axes) -------
 
     def _build_analysis_heatmap_group(self):
@@ -2235,6 +2360,31 @@ class MainWindow(QMainWindow):
         self.analysis_plot.setXRange(0, self._n_cells, padding=0)
         self.analysis_plot.setYRange(0, self._n_bands, padding=0)
 
+    def _make_chart_pause_checkbox(self, attr):
+        """A 'Pause' checkbox for one live chart group (v1.64).
+
+        These three charts redraw every frame and between them push 1 + n_bands +
+        n_cells setData calls per tick (17 at 63 cells) plus two scale re-syncs.
+        Drawing competes with draining the serial port on the same single-threaded
+        Qt event loop, and when the reader loses that race frames queue up (the
+        Rate readout's 'burst×N') and, at the limit, the MCU blocks in its emit
+        print() and stops sweeping — which is not merely lost data, it changes the
+        rig's thermal load (see _note_frame_gap). Pausing a chart is the direct
+        way to buy the ingest path time on a long unattended run.
+
+        Paused means "don't draw", never "don't record": the frame path,
+        _rolling_buf, the session dump and every gate are untouched. Resuming
+        picks up from live data with no backfill, which is the honest behaviour
+        for a live view."""
+        cb = QCheckBox('Pause')
+        cb.setToolTip(
+            'Stop redrawing this chart to free event-loop time for draining the '
+            'serial stream. Recording, gating and the session dump are unaffected; '
+            'the chart resumes from live data. Pausing all three also skips the '
+            'shared matrix computation behind them.')
+        cb.toggled.connect(lambda checked, a=attr: setattr(self, a, checked))
+        return cb
+
     # -- Chart 2: normalized band-mean vs pulse width -----------------------
 
     def _build_analysis_chart2_group(self):
@@ -2279,6 +2429,8 @@ class MainWindow(QMainWindow):
         self.sp_c2_scale_manual.valueChanged.connect(self._on_c2_scale_manual_changed)
         row_b.addWidget(self.sp_c2_scale_manual)
         row_b.addStretch(1)
+        self.cb_c2_pause = self._make_chart_pause_checkbox('_analysis_c2_paused')
+        row_b.addWidget(self.cb_c2_pause)
         v.addLayout(row_b)
 
     def _build_analysis_chart2(self):
@@ -2375,6 +2527,8 @@ class MainWindow(QMainWindow):
         self.sp_g8_scale_manual.valueChanged.connect(self._on_g8_scale_manual_changed)
         ctrl.addWidget(self.sp_g8_scale_manual)
         ctrl.addStretch(1)
+        self.cb_g8_pause = self._make_chart_pause_checkbox('_analysis_g8_paused')
+        ctrl.addWidget(self.cb_g8_pause)
         return ctrl
 
     def _build_analysis_grid8(self):
@@ -2475,6 +2629,8 @@ class MainWindow(QMainWindow):
         self.sp_g9_scale_manual.valueChanged.connect(self._on_g9_scale_manual_changed)
         ctrl.addWidget(self.sp_g9_scale_manual)
         ctrl.addStretch(1)
+        self.cb_g9_pause = self._make_chart_pause_checkbox('_analysis_g9_paused')
+        ctrl.addWidget(self.cb_g9_pause)
         return ctrl
 
     def _build_analysis_grid9(self):
@@ -2667,10 +2823,16 @@ class MainWindow(QMainWindow):
 
         settle_thr = self.sp_sig_settle_mv.value()
         settle_mv  = self._current_settle_mv()
+        # v1.64: show what the window actually was, not just the reduction over
+        # it. 50 frames is 7.2 s when the stream is healthy and can be minutes
+        # when it is not, and the number alone cannot tell those apart.
+        settle_blocked = settle_mv is None and self._window_block_reason == 'stalled'
         self._set_gauge(
             self.analysis_gauges, 'settle', settle_mv,
             0.0, self._gauge_hi(settle_mv, settle_thr), settle_thr,
-            '' if settle_mv is None else '{0:.3f}'.format(settle_mv), good_above=False)
+            self._window_status_text(settle_mv), good_above=False,
+            # the readout is a phrase, not a number -- don't suffix it with 'mV σ'
+            unit='' if settle_blocked else None)
 
         # Which reference is honest right now. In the two gated phases show the
         # very number the state machine is testing; otherwise show how far the
@@ -2885,31 +3047,47 @@ class MainWindow(QMainWindow):
         self._update_analysis_cbar(levels[0], levels[1])
 
     def _update_analysis_charts(self):
-        matrix = self._compute_analysis_matrix()
         if hasattr(self, 'lbl_analysis_baseline_info'):
             self.lbl_analysis_baseline_info.setText(self.lbl_baseline_info.text())
+        # v1.64: with all three paused there is nothing to draw, so don't pay for
+        # the shared matrix either -- that is the largest single saving here and
+        # the reason the check comes before _compute_analysis_matrix() rather
+        # than per-chart below. The baseline-info label still updates: it is text,
+        # it costs nothing, and it is not one of the paused charts.
+        if (self._analysis_c2_paused and self._analysis_g8_paused
+                and self._analysis_g9_paused):
+            return
+        matrix = self._compute_analysis_matrix()
         if matrix is None:
             return
         sorted_matrix = matrix[self._pulse_sort_order]   # rows now pulse_us ascending
 
-        bandmeans = sorted_matrix.mean(axis=1)
-        y2 = self._normalize_group(bandmeans, self._analysis_c2_norm_auto, self._analysis_c2_manual_ref)
-        self.analysis_c2_curve.setData(self._pulse_us_sorted, y2)
+        if not self._analysis_c2_paused:
+            bandmeans = sorted_matrix.mean(axis=1)
+            y2 = self._normalize_group(bandmeans, self._analysis_c2_norm_auto,
+                                        self._analysis_c2_manual_ref)
+            self.analysis_c2_curve.setData(self._pulse_us_sorted, y2)
 
-        for i in range(self._n_bands):
-            y = self._normalize_group(sorted_matrix[i, :], self._analysis_g8_norm_auto,
-                                       self._analysis_g8_manual_ref)
-            self.analysis_g8_curves[i].setData(np.arange(self._n_cells) + 0.5, y)
+        if not self._analysis_g8_paused:
+            for i in range(self._n_bands):
+                y = self._normalize_group(sorted_matrix[i, :], self._analysis_g8_norm_auto,
+                                           self._analysis_g8_manual_ref)
+                self.analysis_g8_curves[i].setData(np.arange(self._n_cells) + 0.5, y)
 
-        for j in range(self._n_cells):
-            y = self._normalize_group(sorted_matrix[:, j], self._analysis_g9_norm_auto,
-                                       self._analysis_g9_manual_ref)
-            self.analysis_g9_curves[j].setData(self._pulse_us_sorted, y)
+        if not self._analysis_g9_paused:
+            for j in range(self._n_cells):
+                y = self._normalize_group(sorted_matrix[:, j], self._analysis_g9_norm_auto,
+                                           self._analysis_g9_manual_ref)
+                self.analysis_g9_curves[j].setData(self._pulse_us_sorted, y)
 
         # "Y axis locked to the first chart" -- re-synced every tick since,
         # in Auto scale mode, panel 0's auto-fit range moves with live data.
-        self._apply_g8_scale()
-        self._apply_g9_scale()
+        # Skipped with its grid: re-syncing a scale nothing is drawing into is
+        # exactly the work being paused.
+        if not self._analysis_g8_paused:
+            self._apply_g8_scale()
+        if not self._analysis_g9_paused:
+            self._apply_g9_scale()
 
     def _update_analysis_strips(self):
         """One chart: the whole matrix's average delta_mV (all bands, all
@@ -2952,6 +3130,32 @@ class MainWindow(QMainWindow):
             return False
         cols = header.rstrip('\n').split(',')
         return 'target_id' in cols and 'distance_mm' in cols and 'delta_mV' in cols
+
+    def _corpus_fields_for_path(self, path):
+        """The column list to WRITE when appending a capture to `path` (v1.65).
+
+        An existing file's own header wins over `CORPUS_HEADER_FIELDS`. Both
+        append paths write one value per field and only emit a header row when
+        the file is new, so as soon as the tool's field list grew (features v9
+        added `pack_v`) appending to a file written before it produced rows with
+        one more value than the header declares -- a ragged CSV, silently, on the
+        first Save into any corpus captured earlier. That is every corpus on disk
+        today, including the v3 one in active use.
+
+        Writing the file's own columns is the right resolution rather than
+        migrating the file or refusing to append: `pack_v` is an OPTIONAL column
+        by design (pimd_corpus_check.OPTIONAL_FIELDS), so a file without it
+        simply does not record it -- exactly as a capture with no voltage entered
+        does not. A column the file declares but the row has no value for is
+        written blank, so a joined or foreign header cannot KeyError here.
+        """
+        try:
+            with open(path, newline='') as f:
+                header = next((ln for ln in f if not ln.startswith('#')), '')
+        except OSError:
+            return list(pimd_features.CORPUS_HEADER_FIELDS)
+        cols = [c for c in header.rstrip('\n').split(',') if c]
+        return cols if cols else list(pimd_features.CORPUS_HEADER_FIELDS)
 
     def _sig_dialog_dir(self):
         """Start directory for the signature file dialogs -- the last one used,
@@ -3495,18 +3699,105 @@ class MainWindow(QMainWindow):
         c0, c1 = pimd_features.central_frames(plateau)
         return c1 - c0
 
+    def _window_status_text(self, value_mv):
+        """Gauge value text for a window reduction: the number plus the window's
+        real duration, or the reason it is blank. Reads the state
+        _window_frames() just wrote, so it must be called after the reduction."""
+        if value_mv is None:
+            if self._window_block_reason == 'stalled':
+                span = self._window_span_s
+                return ('STALLED {0:.0f} s'.format(span) if span else 'STALLED')
+            return ''      # 'filling' is the ordinary startup case: plain '—'
+        span = self._window_span_s
+        if span is None:
+            return '{0:.3f}'.format(value_mv)
+        return '{0:.3f}  [{1:.1f} s]'.format(value_mv, span)
+
+    def _nominal_frame_s(self):
+        """Median FIRMWARE inter-frame interval over the recent buffer, or None
+        until WINDOW_NOMINAL_MIN_N frames exist. Cached per frame --
+        _window_frames() is called several times per frame (settle gate, both
+        gauges, Shape Space) and this is the only part of it that touches more
+        than n_win frames.
+
+        The firmware clock, not arrival time -- see _fw_ms_buf for why arrival
+        time cannot measure a frame period at all.
+
+        Median, not mean, for the reason at WINDOW_NOMINAL_SAMPLE_N: it survives
+        the very stalls the guard exists to catch. Through the whole 2026-07-29
+        event the MCU still emitted bursts of consecutive frames one nominal
+        period apart, so the median holds at nominal while the window's total
+        span blows out -- which is exactly the signal wanted."""
+        if self._nominal_frame_cache[0] == self._frame_count:
+            return self._nominal_frame_cache[1]
+        fw = list(self._fw_ms_buf)[-WINDOW_NOMINAL_SAMPLE_N:]
+        val = None
+        if len(fw) >= WINDOW_NOMINAL_MIN_N:
+            d = np.diff(np.asarray(fw, dtype=float)) / 1000.0
+            d = d[d > 0]
+            if d.size:
+                val = float(np.median(d))
+        self._nominal_frame_cache = (self._frame_count, val)
+        return val
+
+    def _window_frames(self, n_win, exact=False):
+        """The last `n_win` buffered frames, or None when the window cannot be
+        trusted (v1.64). Every frame-count window in this file goes through
+        here, so "how many frames" and "over how long" cannot drift apart again.
+
+        Returns a list of (ts, arr) tuples -- unchanged in shape, so callers
+        reduce exactly what they always did. None means don't reduce: either too
+        few frames, or the window covers more than WINDOW_SPAN_TOLERANCE × the
+        time it should, i.e. the stream stalled and the frames either side of the
+        gap are not one measurement. `exact` requires the full n_win (the wander
+        metric needs two genuinely adjacent windows, not two halves of whatever
+        arrived).
+
+        Span is measured on the FIRMWARE clock via the index-aligned _fw_ms_buf.
+        Side effect by design: records that span and the refusal reason so the UI
+        can say WHY a reading is blank. A blank nobody can explain is what let
+        the 23:03 stall run for 47 minutes."""
+        recent = list(self._rolling_buf)[-n_win:]
+        self._window_span_s = None
+        if len(recent) < 2 or (exact and len(recent) < n_win):
+            self._window_block_reason = 'filling'
+            return None
+
+        fw = list(self._fw_ms_buf)[-len(recent):]
+        nominal = self._nominal_frame_s()
+        if len(fw) == len(recent):
+            span = (fw[-1] - fw[0]) / 1000.0
+            # A firmware clock that steps backwards (board reset mid-run) makes
+            # the span meaningless rather than large: refuse on the same footing.
+            if span < 0:
+                self._window_block_reason = 'stalled'
+                return None
+            self._window_span_s = span
+            if nominal:
+                expected = (len(recent) - 1) * nominal
+                if span > expected * WINDOW_SPAN_TOLERANCE:
+                    self._window_block_reason = 'stalled'
+                    return None
+        self._window_block_reason = None
+        return recent
+
     def _current_settle_mv(self, n_win=None):
         """Mean per-channel rolling std in mV over a window of frames -- the
-        v1.31 settle-gate metric, unchanged. None if <2 frames buffered
-        (treated as not settled).
+        v1.31 settle-gate metric, unchanged. None if the window is unusable
+        (treated as not settled) -- see _window_frames for the two ways.
 
         `n_win` defaults to the Stats tab's window; the Shape Space tab passes
-        its own, much shorter one (a 50-frame window is 15 s at the sweep
-        rate, so a target appearing does not read settled for 15 s -- fine for
-        a corpus capture, far too slow for a live view)."""
+        its own, much shorter one (a 50-frame window covers a whole sweep
+        window, so a target appearing does not read settled for that long --
+        fine for a corpus capture, far too slow for a live view).
+
+        The REDUCTION is untouched at v1.64: same frames, same σ, no
+        detrending. The 0.4 mV gate and every splithalf_floor/quality value in
+        the corpora stay comparable; only demonstrably untrustworthy windows
+        now return None instead of a number."""
         n_win  = n_win or self.sp_stats_window.value()
-        recent = list(self._rolling_buf)[-n_win:]
-        if len(recent) < 2:
+        recent = self._window_frames(n_win)
+        if recent is None:
             return None
         mat = np.array([arr for _, arr in recent], dtype=float)
         return float(mat.std(0).mean()) / 1000.0
@@ -3517,9 +3808,8 @@ class MainWindow(QMainWindow):
         frames / a channel-count mismatch (profile changed mid-cycle)."""
         if self._sig_air_ref is None:
             return None
-        n_win  = self.sp_stats_window.value()
-        recent = list(self._rolling_buf)[-n_win:]
-        if len(recent) < 2:
+        recent = self._window_frames(self.sp_stats_window.value())
+        if recent is None:
             return None
         mat = np.array([arr for _, arr in recent], dtype=float) / 1000.0
         if mat.shape[1] != self._sig_air_ref.shape[0]:
@@ -3542,9 +3832,8 @@ class MainWindow(QMainWindow):
         if self._sig_target is None:
             return None
         ref = np.median(self._sig_target['frames_mV'], axis=0)
-        n_win  = self.sp_stats_window.value()
-        recent = list(self._rolling_buf)[-n_win:]
-        if len(recent) < 2:
+        recent = self._window_frames(self.sp_stats_window.value())
+        if recent is None:
             return None
         mat = np.array([arr for _, arr in recent], dtype=float) / 1000.0
         if mat.shape[1] != ref.shape[0]:
@@ -3554,8 +3843,8 @@ class MainWindow(QMainWindow):
     def _current_air_wander_mv(self):
         """Mean per-channel |Δ| between the current settle window and the one
         immediately before it -- how far the air moves on its own over one
-        window (~16 s at 50 frames / ~3 Hz). None until two full windows are
-        buffered.
+        window (≈7.2 s at 50 frames / 6.9 Hz measured, v1.64). None until two
+        full windows are buffered.
 
         Same reduction and units as _current_dev_from_air(), so it is directly
         comparable to the Detect threshold: this is the floor Detect has to
@@ -3563,13 +3852,18 @@ class MainWindow(QMainWindow):
         locked reference -- unlike a frozen reference, it does not accumulate,
         so it reads the drift RATE rather than the drift total (v1.52).
 
-        Written out rather than sharing a window helper with
-        _current_dev_from_air(): that one is on the state machine's gating hot
-        path, and a few duplicated lines are cheaper than touching it."""
+        v1.64 routes it through _window_frames() like the other three. It had
+        been written out on the argument that duplicated lines were cheaper than
+        touching the gating hot path -- but the span guard has to hold on ALL
+        four or a stall still gets read as noise through whichever one was
+        skipped, and this metric spans TWO windows so it is the most exposed of
+        them. `exact=True` keeps the original requirement that both halves be
+        full, or "one window ago" is not one window ago."""
         n = self.sp_stats_window.value()
-        recent = list(self._rolling_buf)[-2 * n:]
-        # both halves must be full, or "one window ago" is not one window ago
-        if n < 2 or len(recent) < 2 * n:
+        if n < 2:
+            return None
+        recent = self._window_frames(2 * n, exact=True)
+        if recent is None:
             return None
         mat  = np.array([arr for _, arr in recent], dtype=float) / 1000.0
         half = len(mat) // 2
@@ -3680,6 +3974,12 @@ class MainWindow(QMainWindow):
             rare non-ingest callers pay for the extra reduction."""
             s = settle_mv if settle_mv is not None else self._current_settle_mv()
             if s is None:
+                # v1.64: "filling" is only one of the two reasons now, and the
+                # other one is an operator action item -- the stream stopped.
+                # Re-reading the reason here is safe because the fallback above
+                # has just re-run the reduction when settle_mv was None.
+                if self._window_block_reason == 'stalled':
+                    return 'σ — STREAM STALLED'
                 return 'σ — (filling)'
             return 'σ{0:.3f} > {1:.3f}'.format(s, settle_thr)
 
@@ -4232,11 +4532,16 @@ class MainWindow(QMainWindow):
             stats['delta_mV'], stats['plateau_amp_mV'], stats['splithalf_floor'],
             stats['quality'], stats['amp_mean_abs_mV'], self._profile.get('name'), self._profile_sha8,
             self._parsed_fw_version(), 'pimd_classviz.py v{0}'.format(APP_VERSION),
-            self.cb_supply.currentText(), self._editable_sig_path)
+            self.cb_supply.currentText(), self._editable_sig_path,
+            pack_v=self._pack_v_value())
+        # v1.65: the FILE's columns, not the tool's -- appending 26-field rows
+        # under a 25-column header is what growing CORPUS_HEADER_FIELDS would
+        # otherwise have done to every corpus captured before features v9.
+        fields = self._corpus_fields_for_path(self._editable_sig_path)
         with open(self._editable_sig_path, 'a', newline='') as f:
             writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
             for row in rows:
-                writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
+                writer.writerow([row.get(k, '') for k in fields])
         # Mark it for auto-check *before* the reload rebuilds the list, so the
         # new row lands ticked and _merge_template_list's closing
         # _refresh_analysis_overlays() draws its overlay straight away. This
@@ -6258,7 +6563,10 @@ class MainWindow(QMainWindow):
             g['gate'].setPos(min(max(threshold, lo), hi))
         if not has_value:
             g['bar'].setOpts(x0=[lo], width=[0])
-            g['value'].setText('—')
+            # v1.64: `text or '—'` rather than a bare '—', so a caller that knows
+            # WHY there is no value can say so. Every pre-v1.64 caller passes ''
+            # in this case, so their rendering is unchanged.
+            g['value'].setText(text or '—')
             return
         clamped = min(max(value, lo), hi)
         if threshold is None:
@@ -6552,14 +6860,19 @@ class MainWindow(QMainWindow):
             stats['delta_mV'], stats['plateau_amp_mV'], stats['splithalf_floor'],
             stats['quality'], stats['amp_mean_abs_mV'], self._profile.get('name'),
             self._profile_sha8, self._parsed_fw_version(),
-            'pimd_classviz.py v{0}'.format(APP_VERSION), self.cb_supply.currentText(), path)
+            'pimd_classviz.py v{0}'.format(APP_VERSION), self.cb_supply.currentText(), path,
+            pack_v=self._pack_v_value())
         try:
+            # v1.65: same schema-follows-the-file rule as the corpus save path.
+            # A new file gets the current header; an existing one keeps its own.
+            fields = (list(pimd_features.CORPUS_HEADER_FIELDS) if is_new
+                      else self._corpus_fields_for_path(path))
             with open(path, 'a', newline='') as f:
                 writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
                 if is_new:
-                    writer.writerow(pimd_features.CORPUS_HEADER_FIELDS)
+                    writer.writerow(fields)
                 for row in rows:
-                    writer.writerow([row[k] for k in pimd_features.CORPUS_HEADER_FIELDS])
+                    writer.writerow([row.get(k, '') for k in fields])
         except OSError as e:
             self.statusBar().showMessage('Save Scratch failed: {0}'.format(e))
             return
@@ -6686,6 +6999,14 @@ class MainWindow(QMainWindow):
             self.send_command('E')
             self.pb_start.setText('Stopped')
             self.pb_start.setStyleSheet(self.MY_YELLOW)
+            # v1.66: final soak line BEFORE the dump is closed below, then bank
+            # this run's streamed time. Order matters -- pb_record.setChecked
+            # closes the file.
+            self._append_soak('stream-stop')
+            if self._stream_run_start_wall is not None:
+                self._streamed_total_s += time.time() - self._stream_run_start_wall
+                self._stream_run_start_wall = None
+            self._last_stream_stop_iso = datetime.fromtimestamp(time.time()).isoformat()
             if self._recording:
                 self._session_stop_is_forced = True   # stopping the stream, not opting out of logging
                 self.pb_record.setChecked(False)      # auto-save recorded frames
@@ -6700,7 +7021,19 @@ class MainWindow(QMainWindow):
             # scoped to one streaming run, so "stop logging this run" doesn't
             # quietly become "stop logging all day".
             self._session_autolog_suppressed = False
+            # v1.64: the stall latch is scoped to one streaming run, like the
+            # suppression flag above -- a stall from an earlier run must not sit
+            # on the Rate readout accusing this one.
+            self._last_fw_time_ms = None
+            self._stall_count     = 0
+            self._stall_worst_s   = 0.0
+            self._stall_total_s   = 0.0
+            self._stall_last_wall = None
+            # v1.66: mark the run start BEFORE the dump opens, so the header's
+            # soak line already carries this run's idle_before_s.
+            self._stream_run_start_wall = time.time()
             self._maybe_autostart_session('stream start')
+            self._append_soak('stream-start')
 
     # ------------------------------------------------------------------
     # Packet handling
@@ -6760,6 +7093,11 @@ class MainWindow(QMainWindow):
 
         self._frame_count += 1
         self._rolling_buf.append((now, raw))
+        self._fw_ms_buf.append(fw_time_ms)
+        # v1.64: gap detection on the FIRMWARE clock, before the row is written,
+        # so the '# stall:' line lands immediately above the frame that closed
+        # the gap. See _note_frame_gap for why firmware time is the right clock.
+        self._note_frame_gap(fw_time_ms, now)
 
         if self._recording and self._session_file and not self._session_paused:
             self._session_write_row(fw_time_ms, now, raw, glitch_mask)
@@ -7014,6 +7352,11 @@ class MainWindow(QMainWindow):
         self._session_path        = path
         self._session_start_wall  = time.time()
         self._session_frame_count = 0
+        # v1.64: the header line IS a reading when a voltage is entered, so the
+        # nag clock starts from it rather than from zero. With the field blank it
+        # stays None and the label says so immediately.
+        self._pack_v_last_wall    = (time.time() if self._pack_v_value() is not None
+                                     else None)
         self._recording = True
         self.pb_record.setText('■ 0 frames')
         self.pb_record.setStyleSheet(self.MY_RED)
@@ -7043,6 +7386,18 @@ class MainWindow(QMainWindow):
                 '<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>): {0}\n'.format(fw_line))
         f.write('# fw_version: {0}\n'.format(self._parsed_fw_version()))
         f.write('# supply: {0}\n'.format(self.cb_supply.currentText()))
+        # v1.64. The header value is the reading at session start; '# pack_v:'
+        # lines appended mid-stream carry the rest of the discharge, which is
+        # what a multi-hour run actually needs (2.5 V of fall on 2026-07-29).
+        pack_v = self._pack_v_value()
+        f.write('# pack_v: {0}\n'.format(
+            '{0}, {1:.2f}, {2}'.format(ts.isoformat(), pack_v, self._pack_v_age_field())
+            if pack_v is not None else '(not measured)'))
+        # v1.66: soak context at the moment this dump opens, so a dump started
+        # mid-run (a profile change opens a fresh one) is still self-describing
+        # about how long the rig had already been going.
+        f.write('# soak: {0}, {1}, event=session-open\n'.format(
+            ts.isoformat(), self._soak_fields()))
         f.write('# active_profile_idx: {0}\n'.format(self._active_profile_idx))
         f.write('# n_bands: {0}  n_cells: {1}  n_channels: {2}\n'.format(
             self._n_bands, self._n_cells, self._n_channels))
@@ -7120,6 +7475,200 @@ class MainWindow(QMainWindow):
         ts = datetime.fromtimestamp(time.time()).isoformat()
         self._session_file.write('# mark: {0}, {1}\n'.format(ts, text))
         self._session_file.flush()
+
+    def _pack_v_value(self):
+        """Current pack voltage, or None when the field reads its 0.00 '—'
+        special value. None is written as a blank column / omitted line rather
+        than as 0.00, which would look like a measurement of a flat pack."""
+        v = self.sp_pack_v.value() if hasattr(self, 'sp_pack_v') else 0.0
+        return v if v > 0.0 else None
+
+    def _on_pack_v_changed(self, value):
+        self._pack_v = value if value > 0.0 else None
+        # v1.66: when the number was last TYPED, which is not the same as when it
+        # was last logged. A reading's usefulness depends on how long ago someone
+        # actually looked at the meter, so that is what gets written out.
+        self._pack_v_edited_wall = time.time()
+
+    def _pack_v_age_s(self):
+        """Seconds since the pack-voltage field was last edited, or None when
+        that is unknown (v1.66).
+
+        Unknown covers the value restored from settings at launch: _load_settings
+        calls setValue(), which fires valueChanged like any edit, but a number
+        carried over from the last session is emphatically NOT a reading anyone
+        just took -- the field comes up pre-filled, so treating the restore as an
+        edit would stamp every launch with a confident age_s=0 it has not earned.
+        _load_settings clears the timestamp again for exactly that reason."""
+        if self._pack_v_edited_wall is None:
+            return None
+        return time.time() - self._pack_v_edited_wall
+
+    def _pack_v_age_field(self):
+        """The 'age_s=...' fragment for a written pack_v line -- an integer
+        second count, or the literal 'unknown'. Never omitted: a reader must be
+        able to tell 'nobody knows how old this is' from 'this is fresh', and an
+        absent field would read as the latter."""
+        age = self._pack_v_age_s()
+        return 'age_s=unknown' if age is None else 'age_s={0:.0f}'.format(age)
+
+    def _on_pack_v_log(self):
+        """Timestamp the current pack voltage into the open dump."""
+        volts = self._pack_v_value()
+        if volts is None:
+            self.statusBar().showMessage('Enter a pack voltage before logging it.')
+            return
+        if not (self._recording and self._session_file):
+            self.statusBar().showMessage('No session recording — pack voltage not logged.')
+            return
+        if self._session_paused:
+            self.statusBar().showMessage('Paused — resume before logging pack voltage.')
+            return
+        self._append_pack_v(volts)
+        self._pack_v_last_wall = time.time()
+        self._update_pack_v_age()
+        self.statusBar().showMessage('Logged pack voltage: {0:.2f} V'.format(volts))
+
+    def _append_pack_v(self, volts):
+        """One '# pack_v: <iso>, <volts>, age_s=<n|unknown>' line, mid-stream.
+        Same cheap write+flush on the open handle as _append_mark, and the same
+        argument for why that is safe on the event loop.
+
+        v1.66 added the age field. pimd_features v10 parses it and still accepts
+        the v1.64 two-field form, which is what every dump captured before today
+        uses -- including the 2026-07-29/30 pair the warm-up findings rest on."""
+        ts = datetime.fromtimestamp(time.time()).isoformat()
+        self._session_file.write('# pack_v: {0}, {1:.2f}, {2}\n'.format(
+            ts, volts, self._pack_v_age_field()))
+        self._session_file.flush()
+
+    def _update_pack_v_age(self):
+        """Age of the last logged reading, and the nag when it goes stale.
+
+        Status bar only, never a dialog: v1.63 established that a modal would
+        stall the stream behind a prompt nobody asked for. Sized against the
+        gap this exists to prevent -- the 2026-07-29 session has 1h51m between
+        two readings, which is exactly where interpolating pack voltage onto the
+        frame timeline is least defensible."""
+        if not hasattr(self, 'lbl_pack_v_age'):
+            return
+        if not self._recording:
+            self.lbl_pack_v_age.setText('')
+            self.lbl_pack_v_age.setStyleSheet('')
+            return
+        if self._pack_v_last_wall is None:
+            self.lbl_pack_v_age.setText('no reading logged')
+            self.lbl_pack_v_age.setStyleSheet(self.MY_YELLOW)
+            return
+        age_s = time.time() - self._pack_v_last_wall
+        self.lbl_pack_v_age.setText('last V {0:.0f} min ago'.format(age_s / 60.0))
+        if age_s >= PACK_V_REMIND_S:
+            self.lbl_pack_v_age.setStyleSheet(self.MY_YELLOW)
+            self.statusBar().showMessage(
+                'Pack voltage due — last reading {0:.0f} min ago'.format(age_s / 60.0))
+        else:
+            self.lbl_pack_v_age.setStyleSheet('')
+
+    def _streamed_s(self):
+        """Cumulative seconds the stream has actually been running this session
+        (v1.66), completed runs plus the one in progress."""
+        total = self._streamed_total_s
+        if self._stream_run_start_wall is not None:
+            total += time.time() - self._stream_run_start_wall
+        return total
+
+    def _idle_before_s(self):
+        """Seconds between the previously OBSERVED stream stop and this run's
+        start, or None when not known.
+
+        Read this as classviz-observed idle, NOT as guaranteed rig idle. If the
+        app was closed and reopened, the board was unplugged, or the rig was left
+        powered with the stream merely stopped, this number describes what this
+        tool saw and not the hardware's thermal history. It is also unknown after
+        a kill (settings are written on close), and blank on a first ever run.
+        A strong hint, not a measurement -- and it must not be read as one, since
+        the entire point of logging it is to stop inferring thermal state from a
+        proxy without saying so."""
+        if self._last_stream_stop_iso is None or self._stream_run_start_wall is None:
+            return None
+        try:
+            stopped = datetime.fromisoformat(self._last_stream_stop_iso).timestamp()
+        except (ValueError, TypeError):
+            return None
+        gap = self._stream_run_start_wall - stopped
+        return gap if gap >= 0 else None
+
+    def _soak_fields(self):
+        """The body of a '# soak:' line (v1.66).
+
+        stalled_s is carried alongside streamed_s deliberately: while the stream
+        is stalled the MCU is not sweeping (fw v4.27, _note_frame_gap), so
+        streamed_s OVERSTATES soak -- by ~45 min on the 2026-07-29 session.
+        Effective soak is streamed_s - stalled_s, and both are given rather than
+        one pre-subtracted number so the subtraction stays visible and reversible."""
+        idle = self._idle_before_s()
+        return 'streamed_s={0:.0f}, stalled_s={1:.0f}, idle_before_s={2}'.format(
+            self._streamed_s(), self._stall_total_s,
+            'unknown' if idle is None else '{0:.0f}'.format(idle))
+
+    def _append_soak(self, event):
+        """One '# soak:' line into the open dump. Same write+flush pattern and
+        the same cheapness argument as _append_mark. Silent no-op when nothing is
+        recording, so callers on the start/stop paths need no guard of their own."""
+        # `.closed` as well as the pair: this helper is called from start_stop's
+        # two branches, where the dump is opened and closed a line or two away,
+        # so it is the one append site where an inconsistent (_recording=True,
+        # handle already closed) state is a plausible ordering slip rather than
+        # an impossible one. Cheaper to tolerate here than to debug later.
+        if not (self._recording and self._session_file) or self._session_paused:
+            return
+        if getattr(self._session_file, 'closed', False):
+            return
+        ts = datetime.fromtimestamp(time.time()).isoformat()
+        self._session_file.write('# soak: {0}, {1}, event={2}\n'.format(
+            ts, self._soak_fields(), event))
+        self._session_file.flush()
+        self._soak_last_emit_wall = time.time()
+
+    def _note_frame_gap(self, fw_time_ms, wall_ts):
+        """Detect a break in the stream and record it (v1.64).
+
+        The clock is the FIRMWARE's own elapsed-ms field, not PC wall time,
+        because the question is whether the MCU stopped emitting. A gap in
+        firmware time means frames the MCU counted never arrived -- and since
+        the Mode 2 emit is a blocking print() to USB CDC, the MCU was very
+        likely stalled inside it with the PWM free-running on one band's config
+        (fw v4.27 counts these MCU-side via 'B'). That is not just missing data:
+        the rig's thermal load changes while it happens. Measured 2026-07-29
+        23:03-23:50 -- 47 minutes, ~90% of frames lost, the operating point
+        moved +10 mV (9 µs) to +78 mV (100 µs), and it went unnoticed because
+        nothing recorded it and the operator was away.
+
+        Both a durable record (a '# stall:' line in the open dump, so an
+        after-the-fact analysis can mask the window instead of inferring it) and
+        a latched UI warning, since the existing Rate readout clears itself on
+        the next good second and cannot survive an unattended run."""
+        prev = self._last_fw_time_ms
+        self._last_fw_time_ms = fw_time_ms
+        if prev is None or fw_time_ms < prev:
+            return          # first frame, or the firmware clock restarted
+        gap_s = (fw_time_ms - prev) / 1000.0
+        if gap_s < FRAME_GAP_WARN_S:
+            return
+        self._stall_count += 1
+        self._stall_worst_s = max(self._stall_worst_s, gap_s)
+        # v1.66: the SUM matters, not just the worst. While the stream is stalled
+        # the rig is not sweeping, so wall time streaming overstates soak -- by
+        # ~45 min on the 2026-07-29 session alone. '# soak:' reports this so
+        # effective soak = streamed_s - stalled_s.
+        self._stall_total_s += gap_s
+        self._stall_last_wall = wall_ts
+        if self._recording and self._session_file and not self._session_paused:
+            # Same cheap synchronous write+flush as _append_mark, and the same
+            # argument for why it is safe on the frame path.
+            self._session_file.write('# stall: {0}, {1:.3f} s gap in firmware time\n'.format(
+                datetime.fromtimestamp(wall_ts).isoformat(), gap_s))
+            self._session_file.flush()
 
     def _append_session_notes(self, text):
         """Append operator notes to a session already recording (v1.63), one
@@ -7412,6 +7961,17 @@ class MainWindow(QMainWindow):
         burst = self._serial_max_batch
         self._serial_max_batch = 0
 
+        # v1.64: piggy-backed on this existing 1 Hz timer rather than adding a
+        # second one — the pack-voltage age only needs minute resolution.
+        self._update_pack_v_age()
+        # v1.66: and the periodic soak line, on the same tick for the same reason.
+        # ~300 lines over a five-hour session against 114k data rows, and it means
+        # any stretch of frames has a nearby soak reference without interpolating.
+        if self._recording and self._stream_run_start_wall is not None:
+            last = self._soak_last_emit_wall
+            if last is None or (time.time() - last) >= SOAK_EMIT_S:
+                self._append_soak('periodic')
+
         if not self.serial.isOpen() or self.pb_start.text() != 'Running':
             self.lbl_rate.setText('Rate: — (idle)')
             self.lbl_rate.setStyleSheet('')
@@ -7419,11 +7979,20 @@ class MainWindow(QMainWindow):
 
         cell_hz = self._fps_hz * self._n_channels
         txt = 'Rate: {0:.1f} Hz  ({1:,.0f} cells/s)'.format(self._fps_hz, cell_hz)
+        # v1.64: a LATCHED stall count, because the instantaneous readout above
+        # is exactly what failed to raise the alarm on 2026-07-29 -- it recovered
+        # the moment the stream did, leaving nothing on screen to notice.
+        if self._stall_count:
+            txt += '  ⛔ {0} stall{1}, worst {2:.0f} s'.format(
+                self._stall_count, '' if self._stall_count == 1 else 's',
+                self._stall_worst_s)
         if burst > 3:
             # A single readyRead drained more than 3 complete lines -- the
             # event loop briefly fell behind the ~100 Hz nominal stream.
             txt += '  ⚠ burst×{0}'.format(burst)
             self.lbl_rate.setStyleSheet(self.MY_YELLOW)
+        elif self._stall_count:
+            self.lbl_rate.setStyleSheet(self.MY_RED)
         else:
             self.lbl_rate.setStyleSheet('')
         self.lbl_rate.setText(txt)
@@ -7462,6 +8031,19 @@ class MainWindow(QMainWindow):
             self.sp_analysis_avg_n.setValue(int(s.get('analysis_avg_n', 1)))
 
             self.cb_supply.setCurrentText(s.get('supply', SUPPLY_CHOICES[0]))
+            # v1.64. Restored as a convenience only -- the last session's closing
+            # voltage is the best guess for this session's opening one, and it is
+            # visibly editable. 0.0 restores the '—' not-measured state.
+            self.sp_pack_v.setValue(float(s.get('pack_v') or 0.0))
+            # v1.66: setValue above fired valueChanged and so looks like an edit.
+            # Undo that -- a voltage carried over from the last session is not a
+            # reading anyone just took, and pack_v lines must say age_s=unknown
+            # for it rather than claiming a confident age_s=0 every launch.
+            self._pack_v_edited_wall = None
+            # Drives idle_before_s on the next stream start. Only as good as the
+            # last clean exit: settings are written on close, so a kill loses it
+            # and idle_before_s reads unknown (see _idle_before_s).
+            self._last_stream_stop_iso = s.get('last_stream_stop_iso') or None
 
             # Defaults on (v1.63): the failure this guards against -- a bench
             # run that turns out not to have been recorded -- is unrecoverable,
@@ -7666,6 +8248,8 @@ class MainWindow(QMainWindow):
             'std_upper':       self.sp_std_upper.value(),
 
             'supply': self.cb_supply.currentText(),
+            'pack_v': self.sp_pack_v.value(),
+            'last_stream_stop_iso': self._last_stream_stop_iso,
             'session_autolog': self.cb_session_autolog.isChecked(),
 
             'sig_target_id':   self.sig_target.currentData(),
