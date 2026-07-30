@@ -1,3 +1,216 @@
+### DESIGN.md — 1.12 — audit pass: corrections against the latest bench data
+
+Human-directed, read-only rule suspended as for a §18 pass. **Not** a consolidation — no new
+tooling or hardware work is folded in. This pass fixes defects found by a full
+contradiction / unit-error / non-sequitur audit of DESIGN.md 1.11 and every CHANGELOG archive,
+run 2026-07-31. **Rule applied throughout: the latest bench data wins.** Where two measurements
+disagree the later is kept and the earlier *scoped*, never deleted; where the text cannot be
+settled from data it is flagged rather than asserted (`CLAUDE.md`).
+
+**The three substantive corrections.**
+
+1. **Frame rate — the ≈ 301 ms full-sweep refresh was never measured, and is wrong by ~2×.**
+   `acquire_mode2()` gives each cell one PWM period per sweep and emits exactly one W record
+   per sweep (`MIN_EMIT_MS = 10` never binds at these sweep times), so frame rate *is* sweep
+   rate. Measured on the firmware clock across the campaign dumps: **6.88–6.92 Hz, interval
+   0.1445–0.1455 s** (the 07-29 dump's 5.94 Hz mean is the §14.10 stall inflating gaps).
+   The ~289/301 ms figures — and the "32-deep ≈ 9.2 s rolling average" derived from them —
+   are the stale ~3.3 Hz assumption that features v11 already corrected in the tooling
+   comments; they had survived into DESIGN as though measured. §8, §9, §10, §17.7 corrected.
+
+2. **The pack-voltage window's three edges were used interchangeably, and contradicted the
+   result's own anchor observations.** §1 said the columns are bad above ≈ 23.5 V "however
+   long the rig has run" while §17.13 said always-bad begins at 24.0 V with 22.5–24.0 V a
+   soak-sensitive transition. Now stated once, consistently: **≈ 24.0 V = always-bad edge
+   (measured) · 22.5–24.0 V = transition, soak worth ~2.5–3× · 21.5–23.3 V = conservative
+   operating window · ≈ 23.5 V = operational shorthand for the transition's practical onset.**
+   Three observations that sat *outside* the window while being cited as inside it are now
+   described as what they were — the v3 lock at 23.5 → 23.35 V, the 07-28 corpus day opening
+   at 23.77 V, and §17.11's "drained into the good window" (it had drained into the
+   transition band, where a soaked rig reads clean).
+
+3. **§14.10 was carrying superseded first-pass numbers for the post-stall step** (+10 mV at
+   9 µs to +78 mV at 100 µs, one sign across bands). That reading came from the same first
+   pass through the 07-29 dump that manufactured the phantom 23:28 "noise relapse" — windows
+   spanning the stall read accumulated drift as signal. The stall-guard-cleaned re-analysis in
+   §17.13 reads **−8.3 … +23.8 mV, changing sign across bands**, which is also the only
+   version consistent with the document's own supply-vs-thermal discriminator. §14.10 now
+   carries §17.13's row.
+
+**Unit and value corrections.** RX coil wire length **30.8 m → ≈ 69.5 m**: 2 × (0.43 + 0.265) m
+× 50 turns = 69.5 m, and the measured 22.9 Ω at ~0.34 Ω/m (30 AWG) independently implies ~67 m
+— 30.8 m was wrong by 2.3× (§5). §17.1's power table de-garbled from the 2026-06-17 bench
+entries: the "10.6" cell is 10601 Hz with the kHz value left in an Hz column, and the "Freq
+(actual)" column is **supply current in mA**, not a frequency. §17.5's freeze cal "1 delay of
+72" → **13 delays** (the coherent +40 ns shift of the 4.5 V column). Registry **26 → 27
+objects** (26 at the 07-26 check plus the solder stick added 07-28; verified against the file).
+§7's Mode 2 single-cell σ "matching the M=32 boxcar expectation" → **M=16**, which is what that
+profile used and what 310 µV actually matches. §3's raw noise **±400 µV → ±1400 µV**, agreeing
+with §7 and with every measurement in this file — ±400 appears nowhere in the record. §14.11's
+"3–10× above every other cell" scoped to the two cells for which it holds. §17.9's
+decay-persistence claim reworded off "iron-bearing vs non-ferrous", which the gated ferrite
+toroid at 1.37 falsifies as stated.
+
+**Stale pointers fixed:** the scratch row's promotion path (`targets_v1.csv` → `targets_v3`),
+a §14.1 thermistor precondition that no longer exists in §14.1, a "§13 feature-portability
+question" that §13 does not contain, and the LiPo/18650 chemistry mismatch. §8's `ticks_ms`
+choice is kept but its stated reason corrected — the observed blocks were 2–15 s, well inside
+`ticks_us` validity; the guard is against a single ≥ 8.9-minute block.
+
+**Not fixed, recorded instead** (see the errata entry): items needing bench data — §3 vs §7
+filtered-noise figures, R9's clamp current against the +135 V RX flyback, the
+group-delay/settling pair, and the stall's mutually inconsistent delivery figures. (2026-07-31)
+
+---
+
+### findings — pack-voltage result independently re-measured; zone migration confirmed
+
+The 2026-07-30 result was re-derived from the raw session dumps by a different method than
+`soakvolt.py` used, as an audit check on the most consequential claim in the document.
+**It reproduces, and the structural claim comes out stronger.**
+
+**Method, and why it differs.** Per-column noise as the **standard deviation of successive
+frame differences, ÷ √2**, averaged over the seven bands of each threshold column. A plain
+windowed σ — what the published µV figures use — cannot separate noise from drift, and over a
+250-frame window drift dominates: the same windows read ~12.8 mV on *every* column during the
+15:01 warm-up, which is slope, not noise. The first-difference estimator is blind to any linear
+trend, so it measures per-frame noise directly. Absolute values therefore run ~2.8× below the
+published ones and **are not comparable to them**; the ratios are.
+
+| condition | 3.80 V | 4.40 V | 4.20 V | 2.40 V |
+|---|---|---|---|---|
+| 20:52 dump, pack B fresh, 24.90 V | **749** | **277** | 83 | 78 |
+| 08:27 dump, opening (high pack) | **719** | **449** | 130 | 67 |
+| 15:01 dump, contested cold start | **292** | 153 | 56 | 47 |
+| 17:10 dump, mid-session ~22.3 V | 67 | 72 | 68 | 57 |
+| 17:10 dump @ 20:41, 21.08 V | 64 | 70 | **173** | 55 |
+
+(µV, detrended; 400-frame windows taken past the stream-start transient.)
+
+**What it confirms.** On a fresh pack the 3.80 V and 4.40 V columns are elevated with **4.20 V
+clean between them** — the non-monotonic signature no uniform level shift can produce.
+Mid-window the whole grid sits at one floor (57–72 µV). And at 21.08 V the trouble has **left**
+3.80/4.40 V and **appeared at 4.20 V** at 2.5× the floor. That is the moving-zone model — a
+noise region fixed on the decay waveform while pack voltage scales the decay — observed
+directly, by an estimator that cannot confuse it with drift. Ratio cross-check against the
+published metric: the contested 15:01 session reads 292/749 = 0.39 of the fresh-pack value here
+against 742/2090 = 0.36 published.
+
+**What it changes — one rule.** §17.13's "below 22.5 V the 3.80 V column is *always* acceptable
+(189–502 µV)" is too strong. The 15:01 cold start reads **~5× its own floor** (292 against
+~55 µV) at a corrected ≈ 22.45 V. The changelog's settling correction for that session stopped
+at the 3.4-minute reading and put it at ≈ 22.67 V; its own 25-minute point shows settling still
+running at 0.88 V/h — ~3× the streaming drain — and back-extrapolation from the settled point
+gives **≈ 22.45–22.47 V**, which cross-checks against the session's actual 15:36 reading, where
+22.67 V matches nothing. So the contested point sits at or just below the 22.5 V edge *and* is
+genuinely elevated. Restated: below ~22.5 V those columns are usually at the floor, but the
+lower transition is **not guaranteed clean from cold**.
+
+**Hypothesis this raises — flagged, not asserted.** The 2026-07-24 survey found the same two
+columns elevated at **22.4 V**, below the "always acceptable" edge, and that has read as a flat
+contradiction. It ran `cal_63_air_v2`, whose delays are 40–144 ns earlier than v3's. Since the
+zone sits at a fixed place on the decay and each profile's delays cut that decay at different
+points, **the clean window plausibly belongs to (pack voltage × profile delays), not to pack
+voltage alone** — which would explain elevated columns at 22.4 V under v2 while v3 reads floor
+at 22.3 V. Not established: no v2-era session dumps exist to test against (auto-logging starts
+07-29). **Test:** run the §17.7 fine threshold sweep at two stated pack voltages under *both*
+delay sets, not just v3's. If it holds, §10's "a profile is only fully specified together with a
+pack-voltage range" tightens to "…and the window is itself per-profile". (2026-07-31)
+
+---
+
+### findings — errata from the 2026-07-31 document audit
+
+Contradictions and arithmetic errors found inside **archived** entries. Archives are the
+historical record and are not rewritten, so they are recorded here instead. Where DESIGN.md had
+taken a side, the side it now takes is noted.
+
+**Numbers that disagree with themselves or each other.**
+
+- **Campaign frame count: "435k frames" vs "332 957 frames"** for the same nine dumps, 31 %
+  apart. Neither matches the files today, which hold **373 325** rows — 332,957 was the
+  analysis-time snapshot (the last dump was still growing; it ran to 23:31:35, not the recorded
+  21:14 endpoint, which that dump's own soak counter also contradicts: +3,334 s past 20:52:37
+  lands at ≈ 21:48). DESIGN keeps 332,957 as the figure the analysis was actually run on, now
+  labelled as such.
+- **Host-stall delivery figures do not close.** "414 → ~35 per minute for 47 minutes" with
+  "2700 s" of dead time inside a 2,820 s window: 2,700 s dead leaves ~120 s live ⇒ ~18
+  frames/min, not ~35. The 2,700 s is corroborated twice (222 gaps averaging ~12.2 s; the
+  "overstates soak by ~45 min" figure), so "~35/min" is the suspect number. Not resolvable from
+  text — the raw gap list would settle it, and nothing downstream depends on it.
+- **34 vs 35 rejected windows** for the same 07-29 stall, between `soakvolt.py` and classviz
+  v1.64's guard, which are documented as mirroring the same test.
+- **The same pre-15:01 rest is "94 minutes" and "2 h"** in different entries. Related: the
+  "+0.29 V rest recovery" was read 20 s after load-on, so much of it is unsettled transient.
+- **The 15:01 settling correction is ≈ 22.45 V, not ≈ 22.67 V** — see the re-measurement entry
+  above, which also shows why it matters.
+- **`setData` "1 + n_bands + n_cells … (17 at 63 cells)"** — that expression gives 71;
+  17 = 1 + 7 bands + 9 thresholds.
+- **"up to 40×" vs "~28×"** for the same frame-rate window-sizing error, within one entry.
+- **`SAMPLE_PULSE_CORRECTION` 0.752 → 0.908 µs is undocumented** — no entry records the change,
+  and 0.752 µs is exactly on-grid (94 × 8 ns), so the half-grid dither v4.22 fixed could not
+  have arisen while it held.
+- **Solder-roll falloff "~1.7×" vs "1.21×"** for the same 5→15 cm ratio on the same corpus.
+- **`pimd_classify` v1.0 "a perfect score" of 6/6/5/5 against event counts 6/6/6/4** — as
+  written, session 4 scored 5 of 4. The totals match (22), so a transposition is likely.
+- **"~100 Hz nominal" Mode 2 rate** (classviz v1.28) is ~14–30× the real rate; see the DESIGN
+  1.12 entry.
+- **Registry count stated as 23** in two v1 entries; the corrected figure is 22, and that
+  correction lives only in DESIGN.
+- **Duplicate "new — v1" entries for `pimd_targets.py`** giving incompatible accounts of the
+  same negative test (5 planted errors vs 6, different sets).
+- **Corpus capture counts are three same-file snapshots**: 98 (post-repair, midday), 166
+  (features v11), and **170 today**. `pack_v` "populated on only 10 of 166, all 22.67" was
+  already stale when written — the file now carries **82** populated values spanning
+  21.08–24.4 V, of which exactly 10 are the held 22.67. The null result that used the 10-of-166
+  state is unaffected, but the figure should not be quoted as current.
+
+**Claims that outrun their evidence.**
+
+- **"Everything above is simulated"** closes the classviz v1.42 entry, which above it reports a
+  first bench run and three results labelled *Measured* — including the copper-pipe window test
+  and the spanner hold-time test the design still relies on.
+- **"Intermittent rather than a trend"** for excursion rates running 12 → 25 → 40 → 47 % across
+  four consecutive sessions, dismissed on a Spearman of +0.10 computed over all captures — which
+  tests the bulk, not the tail the entry itself says is growing.
+- **"The three implicated cells stand 3–10× above every one of the other sixty"** — the third
+  cell reads 0.61 against a 0.50 best-of-the-rest, i.e. 1.2×.
+- **"Degrades monotonically with pulse width (0.9× at 9 µs → 8.0× at 67.2 µs)"** — a series
+  monotonic in pulse width would peak at 100 µs; the parenthesis contradicts the claim.
+- **"Converging"** for the 6S thermal fingerprint, where the only quoted comparator is the
+  previous −56…+16 ns against the new −96…+16 ns.
+- **"A 60 s-old reference carries ~1 mV"** — at the 50 µV/s rate used two lines earlier that is
+  3.0 mV, and the entry's own weak-target figures are 0.35–0.36 mV.
+- **The 3381 s baseline "observed" at ~169 mV/cell** is exactly 3381 × 50 µV — the nominal
+  prediction restated as an observation. The same entries' one direct measurement (5.2 mV at
+  150 s) implies ~35 µV/s, which would predict ~117 mV. The 50 vs 35 µV/s discrepancy runs
+  through every reference-age figure and is nowhere acknowledged.
+- **"Right to within a few minutes"** for a runtime prediction whose crossing was never observed
+  (the pack came off first) and which the entry's own drain rate puts ~20 min out.
+- **A findings heading asserting "the Frames default caused it"** while its body says two
+  candidate causes were "not separated", and the adjacent entry favours the other one.
+- **The "equal-power bands"** description is contradicted by the same era's own P ∝ pulse² · freq
+  model, which spans 12× across those bands; three incompatible power models are in use.
+- **The 64-frame median "ensures ≥ 33 clean frames"** against a 32-frame glitch — 64 − 32 = 32,
+  exactly the case with no clean majority.
+- **v1.63's "the 8 minutes that happened to be running"** cannot exist on that entry's own
+  timeline, which has logging stopping before the settle began.
+- **The ≈ 4.67 V noise-zone edge is called "consistent with" the 07-13 mapping**, which recorded
+  4.6625 V as clean; and that mapping's stated ~4.45 V lower bound never accounts for its own
+  4.475 V step.
+
+**Known issue, not fixed** (docs-only pass): `src/pimd_delaycal.py` sets the fine-step default to
+**100 ns**, which is not a multiple of 8 and is unreachable by the spinbox's own 8 ns steps —
+reintroducing, as a default, the off-grid condition v1.26 existed to remove. Left for a
+deliberate code pass.
+
+**Needs bench data, flagged in DESIGN rather than resolved:** §3's filtered ±200 µV against §7's
+450 µV floor (both pre-enclosure); R9's "≈ 9.6 mA at the +50 V damped peak" against the measured
++135 V RX flyback, which would imply ~28 mA; and the filtered path's 0.46 s group delay against
+0.5 s settling. (2026-07-31)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-30

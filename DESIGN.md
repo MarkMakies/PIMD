@@ -3,7 +3,7 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S LiPo supply (2026-07-24) · **Firmware:** v4.27 · **PC tools:** gui v4.13 · classviz v1.66 · delaycal v1.29 · features v11 · shape v1 · target_check v4 · corpus_check v1.8 · **Coil:** v4 · **Operating profile:** cal_63_air_bat_v3 (locked 2026-07-26, sha `4a2352d2`)
 **Last bench update:** 2026-07-30 (pack-voltage operating window established, 21.5–23.3 V; nine-session campaign over packs A and B)
-**Doc rev:** 1.11 (2026-07-30) — consolidation pass. **The pack-voltage result.** Nine session dumps over 2026-07-29/30 (333k frames, packs A and B, spanning 21.0 → 25.0 V) establish that the elevated **3.80 V and 4.40 V threshold columns track pack voltage, not soak time** — 43–51 mV/V with **one sign across all seven bands**, against the sign-*changing* fingerprint a thermal shift produces. This **corrects §12**: the "state of charge does not reach the operating point" result is true only over the 0.55 V interval it was measured on (§17.10), and is false over 21–25 V. It **resolves §14.7**: a noise zone fixed on the *decay waveform* while pack voltage scales the decay explains both the operating-point tracking and the noisy–clean–noisy reading, so both follow-ups must now be specified at a stated pack voltage. **New operating constraint — run the pack at 21.5 – 23.3 V**; a ≈ 23.5 V **data-quality ceiling** now sits beside the 21.0 V **regulation floor** and they are different kinds of limit (§12, §17.13). Pack A measures **620 streaming-min (10.3 h, ≈ 5.2 Ah)** full to empty, of which the clean window is **4.55 h (44 %)** and the unusable top **1.78 h (17 %)**; idle drain is ~15× below streaming drain, so a fresh pack **cannot be idled** into the window — it has to be streamed down (§12). The "≈ 3 h warm-up" is largely **pack discharge, not thermal soak**; thermal drift remains a genuine open problem and is the smaller of the two effects (§3, §14.1). **New locked profile `cal_63_air_bat_v3`** (2026-07-26, sha `4a2352d2`): `cal_63_air_v2`'s band plan with the third threshold moved **4.70 → 4.75 V** and delays re-anchored **+40…+144 ns** for the battery supply — both a new calibration epoch *and* a threshold-geometry change, so the §13 feature-portability question the 1.10 pass deferred is now live rather than hypothetical, and the **state-of-charge window** it also deferred is now a term of the §10 profile contract. Battery supply lowered the achievable autonudge convergence threshold to **0.3 mV**, never reachable under the bench PSU, and a thermal **convergence** criterion replaces the retired thermistor check (§17.11). Registry → **`targets_v3.csv`** (26 objects), `targets_v1.csv` superseded. fw v4.27 adds emit-block counters on `B` after the host was found **blocking the MCU for 47 minutes** (new §14.10); the `(9 µs, 4.9 V)` noise corner is **3 cells of 63** and a *static* cell exclusion cannot fix it, because which cells are bad is a function of pack state (new §14.11). Tooling: classviz v1.42→v1.66 (session dumps auto-log with the stream, pack-voltage and soak tracks, window span guard + stall detection, Trigger Levels gauges, Family Plane per-axis scales), delaycal v1.25→v1.29 (Compare Profiles tab, fine step in ns, named profile export with generated notes), features v7→v11 (firmware clock exposed, frame-rate measurement fixed), target_check v3→v4, corpus_check v1.6→v1.8, and new tracked `/utilities/` analysis tools (§15). **Highest-value measurement outstanding**, unchanged in kind but now sharper: the **+15 V rail under scope during a TX pulse**, fresh pack vs near-flat (§12). (Previous: 1.10 (2026-07-24) — consolidation pass. **Supply epoch:** the 1990s bench supply failed and the detector moved to a 6S LiPo pack (19.8–25.2 V, working floor 21.0 V), roughly doubling L7815 dissipation and lengthening warm-up (§4, §12, §14.1). Measured result that the regulator holds the operating point across the regulated window, so this is **not** a measurement-epoch reset — no §3/§17 value is voided by it (§17.10). classviz v1.39→v1.42: new **Shape Space** tab (a fourth tab) and scratch captures, built on the new shared feature module **`pimd_shape.py` v1** (§15). First post-enclosure corpus captured 2026-07-23 — 66 captures under `cal_63_air_v2`, analysed into the family-plane / crossing-axis / decay-persistence geometry, with the five analysis figures now cited in §15 (§17.9). New findings: the §14.7 threshold noise zone tracks the **operating point** rather than a fixed voltage, and reads noisy–clean–noisy (§14.7); **reference age** sets a hard ceiling on any frozen-reference measurement (§14.1, §17.10); the family-plane early-band axis needs a confidence band, not a sign test (new §14.9). Deferred to the next pass for want of bench facts: the new locked profile and the state-of-charge window it adds to the §10 profile contract; feature-level portability across that threshold-geometry change (§13); the delaycal settings-persistence fix-or-procedure decision (§15). 1.9.2 (2026-07-23) — §15 `src/data/profiles/` row: the superseded locks are now listed file-by-file in `.gitignore` rather than excluded by a `dir/*` + negation pair (git handled the wildcard form correctly, but that idiom renders unreliably in some editors' ignore decorations). Net tracking is unchanged — only `cal_63_air_v2.json` is tracked — but new delaycal candidates now stay visible as untracked instead of being ignored by default; 1.9.1 (2026-07-23) — post-consolidation corrections (human-directed): `pimd_targets.py` renamed **`pimd_target_check.py`** (v2→v3; import-contract change only, no functional change) — §15 row and the classviz row's reference follow. Repo hygiene, all files kept on disk: `src/data/profiles/` is now gitignored except the operating `cal_63_air_v2.json` (superseded locks untracked), the three previous-epoch `References/profile8b-*` captures untracked, and the stray `src/data/delaycal_1706-104844.csv` deleted; §15 profiles row records the new tracking policy; 1.9 (2026-07-23) — consolidation pass, **PC-tooling only**: no hardware, firmware, profile or measured-value change, and no new bench observations (§3 and §17 untouched — every entry consolidated here is tooling work). classviz v1.32→v1.39: the **Training Session tab is gone**, all corpus capture is now the Analysis tab's automated Training cycle, plus capture ergonomics (shrinkable heatmap split, auto-visible new captures, per-parameter quality colouring) and two latent-bug fixes. features v6→v7 (doc-only); targets v1→v2 — registry relocated to `src/data/targets/targets_v1.csv`; corpus_check v1.4→v1.6 — migrated onto the `target_id`/`distance_mm` schema and fixed so an air capture no longer aborts the run (§15). §15 corrections: registry path and object count (22, not 23). Next phase: systematic target signature/profile capture under the existing `cal_63_air_v2` profile and `targets_v1` registry, both deliberately left untouched; 1.8.2 (2026-07-15) — §15: added rows for the seven previously uncited `References/` images (pcb-coil-baseline, warmup-with-8ns-steps, new-training-data, training-targets-v3, training-results-v1a/b/c — the last three flagged previous-epoch), captions written from the images; 1.8.1 (2026-07-15) — post-consolidation corrections: delaycal v1.25 (`APP_VERSION` constant re-synced with its header — no functional change); `pimd_corpus_check.py` re-tracked and its §15 row restored (v1.4 is maintained against the current schema regime; `pimd_classify.py`/`pimd_v2_findings.py` remain local-only); 1.8 (2026-07-15) — consolidation pass: fw v4.25 outlier-gate latch fix + v4.26 post-emit CC-write race fix, both bench-verified (§8, §17.8); 6 µs band dropped → 63-cell profiles, soaked recal locked as **cal_63_air_v2** (§10); threshold-noise-zone upper edge located ≈ 4.67 V on the 100 µs band, thermal operating-point drift mapped (§14.7, §17.8); structured target-metadata capture regime landed — `targets.csv` registry + `pimd_targets.py` v1, classviz v1.31→v1.32, features v6 (§15); `USAGE.md` added, `docs/` removed; §15 asset rows: scope baseline renamed `scope-pulse-baseline.jpeg`, four previous-epoch profile8b rows dropped; 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only); 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.) Bump this line on every edit.
+**Doc rev:** 1.12 (2026-07-31) — **audit pass, not a consolidation.** No new tooling, hardware or bench campaign is folded in; this pass fixes defects found by a full contradiction / unit-error / non-sequitur audit of 1.11 and every `CHANGELOG.md` archive, applying the rule **latest bench data wins** (later measurement kept, earlier scoped rather than deleted; flagged rather than asserted where data cannot settle it). **Three substantive corrections.** (1) **Frame rate:** the "≈ 289 → ≈ 301 ms full-sweep refresh" was modelled, never measured, and is ~2× wrong — the firmware takes one period per cell per sweep and emits one W record per sweep, and the firmware clock reads **6.88–6.92 Hz (0.1445–0.1455 s)**; the "32-deep ≈ 9.2 s rolling average" fell out of the same bad model and is ~4.6 s (§8, §9, §10, §17.7). (2) **Pack-voltage window edges** were used interchangeably and contradicted three of the result's own anchor observations; now stated once — **≈ 24.0 V always-bad edge · 22.5–24.0 V transition where soak is worth ~2.5–3× · 21.5–23.3 V operating window · ≈ 23.5 V shorthand for the transition's onset** — and the v3 lock (23.5→23.35 V), the 07-28 corpus day (opened 23.77 V) and §17.11's "drained into the good window" are re-described as the transition-band observations they were (§1, §10, §12, §17.11, §17.12, §17.13). (3) **§14.10's post-stall step** was carrying superseded first-pass numbers (+10…+78 mV, one sign) from the same pass that manufactured the phantom "noise relapse"; it now carries §17.13's stall-guard-cleaned **−8.3…+23.8 mV, sign-changing** row. **New bench evidence:** the pack-voltage result was **independently re-measured** by a drift-immune estimator and **reproduces** — 3.80/4.40 V bad with 4.20 V clean between them on a fresh pack, one floor mid-window, and the trouble moved to 4.20 V at 21.08 V; the zone-migration model is now confirmed by two methods (§14.7, §17.13). It also softens one rule: "below 22.5 V *always* acceptable" → *usually*, since the 15:01 cold start (voltage corrected **≈ 22.67 → ≈ 22.45 V**) reads ~5× its floor. **Unit/value fixes:** RX coil wire **30.8 → ≈ 69.5 m** (2.3× error, wrong against both its own geometry and its own resistance, §5); §17.1's power table de-garbled (the "10.6" cell is 10601 Hz; the "Freq (actual)" column is **current in mA**); §17.5 freeze cal **1 → 13 delays**; registry **26 → 27 objects**; §7 single-cell σ matches **M=16**, not M=32; §3 raw noise **±400 → ±1400 µV**; §14.11's "3–10×" scoped to the two cells it holds for; §17.9's decay-persistence claim reworded off "iron-bearing vs non-ferrous", which its own ferrite toroid at 1.37 falsifies. **Flagged, not resolved** (need bench data): §3-vs-§7 filtered noise, R9's clamp current against the +135 V RX flyback, and the stall's mutually inconsistent delivery figures. Corpus/campaign counts are now labelled as snapshots (the corpus is **170 captures / 82 with `pack_v`** today; the nine dumps hold 373 325 frames against the 332 957 analysed). Full detail, plus errata for changelog-internal contradictions left standing in the archives, in `CHANGELOG.md`. (Previous: 1.11 (2026-07-30) — consolidation pass. **The pack-voltage result.** Nine session dumps over 2026-07-29/30 (333k frames, packs A and B, spanning 21.0 → 25.0 V) establish that the elevated **3.80 V and 4.40 V threshold columns track pack voltage, not soak time** — 43–51 mV/V with **one sign across all seven bands**, against the sign-*changing* fingerprint a thermal shift produces. This **corrects §12**: the "state of charge does not reach the operating point" result is true only over the 0.55 V interval it was measured on (§17.10), and is false over 21–25 V. It **resolves §14.7**: a noise zone fixed on the *decay waveform* while pack voltage scales the decay explains both the operating-point tracking and the noisy–clean–noisy reading, so both follow-ups must now be specified at a stated pack voltage. **New operating constraint — run the pack at 21.5 – 23.3 V**; a ≈ 23.5 V **data-quality ceiling** now sits beside the 21.0 V **regulation floor** and they are different kinds of limit (§12, §17.13). Pack A measures **620 streaming-min (10.3 h, ≈ 5.2 Ah)** full to empty, of which the clean window is **4.55 h (44 %)** and the unusable top **1.78 h (17 %)**; idle drain is ~15× below streaming drain, so a fresh pack **cannot be idled** into the window — it has to be streamed down (§12). The "≈ 3 h warm-up" is largely **pack discharge, not thermal soak**; thermal drift remains a genuine open problem and is the smaller of the two effects (§3, §14.1). **New locked profile `cal_63_air_bat_v3`** (2026-07-26, sha `4a2352d2`): `cal_63_air_v2`'s band plan with the third threshold moved **4.70 → 4.75 V** and delays re-anchored **+40…+144 ns** for the battery supply — both a new calibration epoch *and* a threshold-geometry change, so the §13 feature-portability question the 1.10 pass deferred is now live rather than hypothetical, and the **state-of-charge window** it also deferred is now a term of the §10 profile contract. Battery supply lowered the achievable autonudge convergence threshold to **0.3 mV**, never reachable under the bench PSU, and a thermal **convergence** criterion replaces the retired thermistor check (§17.11). Registry → **`targets_v3.csv`** (26 objects), `targets_v1.csv` superseded. fw v4.27 adds emit-block counters on `B` after the host was found **blocking the MCU for 47 minutes** (new §14.10); the `(9 µs, 4.9 V)` noise corner is **3 cells of 63** and a *static* cell exclusion cannot fix it, because which cells are bad is a function of pack state (new §14.11). Tooling: classviz v1.42→v1.66 (session dumps auto-log with the stream, pack-voltage and soak tracks, window span guard + stall detection, Trigger Levels gauges, Family Plane per-axis scales), delaycal v1.25→v1.29 (Compare Profiles tab, fine step in ns, named profile export with generated notes), features v7→v11 (firmware clock exposed, frame-rate measurement fixed), target_check v3→v4, corpus_check v1.6→v1.8, and new tracked `/utilities/` analysis tools (§15). **Highest-value measurement outstanding**, unchanged in kind but now sharper: the **+15 V rail under scope during a TX pulse**, fresh pack vs near-flat (§12). (Previous: 1.10 (2026-07-24) — consolidation pass. **Supply epoch:** the 1990s bench supply failed and the detector moved to a 6S LiPo pack (19.8–25.2 V, working floor 21.0 V), roughly doubling L7815 dissipation and lengthening warm-up (§4, §12, §14.1). Measured result that the regulator holds the operating point across the regulated window, so this is **not** a measurement-epoch reset — no §3/§17 value is voided by it (§17.10). classviz v1.39→v1.42: new **Shape Space** tab (a fourth tab) and scratch captures, built on the new shared feature module **`pimd_shape.py` v1** (§15). First post-enclosure corpus captured 2026-07-23 — 66 captures under `cal_63_air_v2`, analysed into the family-plane / crossing-axis / decay-persistence geometry, with the five analysis figures now cited in §15 (§17.9). New findings: the §14.7 threshold noise zone tracks the **operating point** rather than a fixed voltage, and reads noisy–clean–noisy (§14.7); **reference age** sets a hard ceiling on any frozen-reference measurement (§14.1, §17.10); the family-plane early-band axis needs a confidence band, not a sign test (new §14.9). Deferred to the next pass for want of bench facts: the new locked profile and the state-of-charge window it adds to the §10 profile contract; feature-level portability across that threshold-geometry change (§13); the delaycal settings-persistence fix-or-procedure decision (§15). 1.9.2 (2026-07-23) — §15 `src/data/profiles/` row: the superseded locks are now listed file-by-file in `.gitignore` rather than excluded by a `dir/*` + negation pair (git handled the wildcard form correctly, but that idiom renders unreliably in some editors' ignore decorations). Net tracking is unchanged — only `cal_63_air_v2.json` is tracked — but new delaycal candidates now stay visible as untracked instead of being ignored by default; 1.9.1 (2026-07-23) — post-consolidation corrections (human-directed): `pimd_targets.py` renamed **`pimd_target_check.py`** (v2→v3; import-contract change only, no functional change) — §15 row and the classviz row's reference follow. Repo hygiene, all files kept on disk: `src/data/profiles/` is now gitignored except the operating `cal_63_air_v2.json` (superseded locks untracked), the three previous-epoch `References/profile8b-*` captures untracked, and the stray `src/data/delaycal_1706-104844.csv` deleted; §15 profiles row records the new tracking policy; 1.9 (2026-07-23) — consolidation pass, **PC-tooling only**: no hardware, firmware, profile or measured-value change, and no new bench observations (§3 and §17 untouched — every entry consolidated here is tooling work). classviz v1.32→v1.39: the **Training Session tab is gone**, all corpus capture is now the Analysis tab's automated Training cycle, plus capture ergonomics (shrinkable heatmap split, auto-visible new captures, per-parameter quality colouring) and two latent-bug fixes. features v6→v7 (doc-only); targets v1→v2 — registry relocated to `src/data/targets/targets_v1.csv`; corpus_check v1.4→v1.6 — migrated onto the `target_id`/`distance_mm` schema and fixed so an air capture no longer aborts the run (§15). §15 corrections: registry path and object count (22, not 23). Next phase: systematic target signature/profile capture under the existing `cal_63_air_v2` profile and `targets_v1` registry, both deliberately left untouched; 1.8.2 (2026-07-15) — §15: added rows for the seven previously uncited `References/` images (pcb-coil-baseline, warmup-with-8ns-steps, new-training-data, training-targets-v3, training-results-v1a/b/c — the last three flagged previous-epoch), captions written from the images; 1.8.1 (2026-07-15) — post-consolidation corrections: delaycal v1.25 (`APP_VERSION` constant re-synced with its header — no functional change); `pimd_corpus_check.py` re-tracked and its §15 row restored (v1.4 is maintained against the current schema regime; `pimd_classify.py`/`pimd_v2_findings.py` remain local-only); 1.8 (2026-07-15) — consolidation pass: fw v4.25 outlier-gate latch fix + v4.26 post-emit CC-write race fix, both bench-verified (§8, §17.8); 6 µs band dropped → 63-cell profiles, soaked recal locked as **cal_63_air_v2** (§10); threshold-noise-zone upper edge located ≈ 4.67 V on the 100 µs band, thermal operating-point drift mapped (§14.7, §17.8); structured target-metadata capture regime landed — `targets.csv` registry + `pimd_targets.py` v1, classviz v1.31→v1.32, features v6 (§15); `USAGE.md` added, `docs/` removed; §15 asset rows: scope baseline renamed `scope-pulse-baseline.jpeg`, four previous-epoch profile8b rows dropped; 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only); 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.)) Bump this line on every edit.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -45,25 +45,32 @@ targets at 60–420 mm under `cal_63_air_v2`. Its offline analysis established t
 geometry the classification layer will be built on: signatures separate into three family
 quadrants on an early-vs-late pulse plane, the zero-crossing pulse width is a stable third
 coordinate that orders the crossover family, and a threshold-axis "decay persistence" ratio
-separates iron-bearing from non-ferrous independently of sign (§17.9). That geometry is now
+reads decay behaviour independently of sign — a second opinion to the family verdict rather
+than a class test, since the ferrite toroid reads ferrous by sign and non-ferrous by decay
+(§17.9). That geometry is now
 live in the tooling — `pimd_shape.py` v1 holds the maths, classviz's **Family Plane Analysis**
 tab (named Shape Space before v1.43) displays it (§15).
 
-**Supply epoch (2026-07-24):** the bench supply failed and the detector moved to a **6S LiPo
-pack** (§12). Unlike the enclosure change this is *not* a measurement-epoch reset — no §3 or
+**Supply epoch (2026-07-24):** the bench supply failed and the detector moved to a **6S Li-ion
+pack** (18650 cells; called "6S LiPo" in earlier entries — §12). Unlike the enclosure change this is *not* a measurement-epoch reset — no §3 or
 §17 value is voided by it — but warm-up is longer, and the regulated-window claim is narrower
 than it first read (§12, §17.10, §17.13). Recalibration against the new supply completed
 2026-07-26: **`cal_63_air_bat_v3` is the locked operating profile** (sha `4a2352d2`, §10) and
-the registry moved to **`targets_v3.csv`** (26 objects). The supply change paid off directly —
+the registry moved to **`targets_v3.csv`** (27 objects). The supply change paid off directly —
 autonudge now converges at a 0.3 mV threshold that was never reachable on the bench PSU
 (§17.11).
 
 **Pack state of charge is an operating variable (2026-07-30).** The most consequential result
 since the enclosure: the two highest-signal threshold columns are unusable on a freshly-charged
 pack and clean on a half-drained one, because a noise zone sits at a fixed place on the **decay
-waveform** while pack voltage scales the decay. **Run the pack at 21.5 – 23.3 V** — above
-≈ 23.5 V the 3.80/4.40 V columns are bad however long the rig has run, and below ≈ 21.5 V the
-trouble migrates to other cells. This is a *data-quality* window sitting inside the wider
+waveform** while pack voltage scales the decay. **Run the pack at 21.5 – 23.3 V.** Above
+**≈ 24.0 V** the 3.80/4.40 V columns are bad however long the rig has run; **22.5 – 24.0 V** is
+a transition band where soak time is worth ~2.5–3× against voltage's ~11×, so a soaked rig can
+read clean inside it; below ≈ 21.5 V the trouble migrates to the 4.20 V / 4.75 V columns and the
+9 µs band. The 21.5 – 23.3 V window is the conservative interior, and **≈ 23.5 V is shorthand
+for the transition's practical onset**, not a fourth limit *(edges restated 2026-07-31 — they
+were previously used interchangeably; §12, §17.13)*. This is a *data-quality* window inside the
+wider
 *regulation* window, and it costs the top 1.78 h (17 %) of every pack, which must be streamed
 off rather than waited out (§12, §14.7, §17.13). It also reattributes the "≈ 3 h warm-up",
 which is largely this discharge rather than thermal soak; thermal drift is real but smaller
@@ -105,9 +112,16 @@ eddy currents weaken it).
   Node after R9 **−0.48 / +5.11 V**; ADC input settles **~5.0 V**, edge ring peaks
   **+5.30 / −0.69 V** (brief, harmless, current-limited). Detail in §7.
 
-- **Noise:** *(measured, DF256)*: filtered path ≈ **±200 µV**; raw ≈ **±400 µV**; warmed-up
-- **Sample-timing precision: ** ≈ **5 ns** *(measured)*. **Thermal drift** ≈ **−50 µV/s**
-  at 10 kHz / 20 µs *(measured)* 
+- **Noise, warmed-up** *(measured, DS 256)*: filtered path (SDOA) ≈ **±200 µV**; raw single
+  sample (SDOB) ≈ **±1400 µV**. *(Corrected 2026-07-31: this line read "raw ≈ ±400 µV", a
+  figure that appears nowhere in the record; §7 and every changelog measurement give ±1400 µV,
+  and the boxcar arithmetic throughout this document is built on it. The filtered figure is
+  not reconciled with §7's "real-world 450 µV floor" at 5 kHz — both are pre-enclosure and
+  are on the §14.8 re-measurement backlog.)*
+- **Sample-timing precision** ≈ **5 ns** *(measured)*. **Thermal drift** ≈ **−50 µV/s**
+  at 10 kHz / 20 µs *(measured)*. *(Note: the one direct check of this rate — 5.2 mV
+  accumulated over 150 s, §17.10 — implies ≈ 35 µV/s. The reference-age figures in §14.1
+  are computed at 50 µV/s and are therefore an upper bound.)*
 
 - **Standard Operating Conditions (SoC)** *(established 2026-06-18)*: Mode 1 · 10.0 kHz /
   20.0 µs pulse / 10.0 µs sample delay / DS 256 · coil in air, no targets · 20 V bench
@@ -130,8 +144,11 @@ eddy currents weaken it).
   §17.13)*. There is no single number, so pick by criterion: **49 of 63 cells reach the floor
   within minutes** and stay there (excluding the two affected threshold columns the grid reads
   0.141 mV cold, unchanged for five hours); a capture the quality gate accepts takes **~2 h**;
-  the 4.40 V column clears in **~70 min** and the 3.80 V column in **~2h50m**; the 100 µs band
-  is the long pole and was **not at the floor in 90 min**. The dominant mechanism in all of it
+  the 4.40 V column clears in **~70 min** and the 3.80 V column in **~2h50m**; within those two
+  columns the 100 µs band is the long pole and was **not at the floor in 90 min** *(scoped
+  2026-07-31: the "long pole" applies to the affected columns' cells, not to the 100 µs band as
+  a whole — §17.13 measures the other seven columns flat from the first window)*. The dominant
+  mechanism in all of it
   is the pack draining into the 21.5–23.3 V window — **1.78 h of unavoidable streaming from
   full** — not thermal settling.
 
@@ -172,7 +189,11 @@ both embedded for mechanical stability (earlier coils shifted under rover vibrat
 epoxy/Perspex fixed the resulting drift). Faraday shield on RX with **no closed loop**.
 
 TX 520 × 360 mm, 10 turns 0.5 mm (24 AWG) enamelled, 17.6 m, 1.7 Ω ·
-RX 430 × 265 mm, 50 turns 0.25 mm (30 AWG) Teflon silver-plated wire-wrap, 30.8 m, 22.9 Ω.
+RX 430 × 265 mm, 50 turns 0.25 mm (30 AWG) Teflon silver-plated wire-wrap, **≈ 69.5 m**, 22.9 Ω.
+*(Corrected 2026-07-31: this read 30.8 m, which is impossible for the stated geometry —
+2 × (0.43 + 0.265) m × 50 turns = 69.5 m — and inconsistent with its own resistance, since
+22.9 Ω at ~0.34 Ω/m for 30 AWG implies ~67 m. Two independent routes agree; 30.8 m was out by
+2.3×. TX checks exactly: 2 × (0.52 + 0.36) × 10 = 17.6 m.)*
 Cable: RG62A/U coax (93 Ω, 47 pF/ft) + twin 26/0.3.
 
 
@@ -212,10 +233,14 @@ RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
                       └─ 47R ─► LT6203 +input (single +12V supply)
 ```
 
-- **R1 = 1.3k (shunt) is the RX damping resistor. **critically damps at ≈ 1.3–1.4k** *(measured)*, which also
-  cleans up TX via mutual coupling.
+- **R1 = 1.3k (shunt) is the RX damping resistor** — **critically damps at ≈ 1.3–1.4k**
+  *(measured)*, which also cleans up TX via mutual coupling.
 - **R9 = 4.7k (series) is clamp current-limit only**, not damping — it holds clamp current
-  to ≈ 9.6 mA at the +50 V damped peak, well inside the LT6203 rating.
+  to ≈ 9.6 mA at the +50 V damped peak, well inside the LT6203 rating. *(Open, flagged
+  2026-07-31: the +50 V "damped peak" is not reconciled with the §3 flyback measurement of
+  **+135 V at the RX coil**, which through 4.7k would imply ~28 mA. Either the two are measured
+  at different points or under different damping — a scope check at the post-R9 node would
+  settle it. Not a claim that the front end is out of spec: it has run for months.)*
 - **D2 (4.7 V zener) / D3 (1N5819 Schottky)** sit in series across the post-R9 node and only
   conduct outside ~0–5 V; between the rails the diodes are off and R1 does the damping.
 - **47 Ω** between the LT6203 output and the ADC input limits over-range current into the
@@ -258,7 +283,10 @@ min/max diagnostic: outliers at ≈ 375 000 µV and 750 000 µV alongside normal
 sample rate to ≈ 1.6 kHz (vs 10 kHz configured). Accepted tradeoff for accuracy.
 
 **Mode 2 single-cell noise:** normal multi-cell sweeps (cells alternating duty values) give
-≈ 310 µV std dev — matching the M=32 boxcar expectation (≈ 1400 µV / √32). A degenerate
+≈ 310 µV std dev — matching the **M=16** boxcar expectation (≈ 1400 µV / √16 = 350 µV), which
+is the averaging depth the profile under test actually used. *(Corrected 2026-07-31: this read
+"M=32", whose expectation is 247 µV — 25 % below the measurement it was said to match.)*
+A degenerate
 single-cell run where the PWM compare value never changes gives ≈ 24–30 mV std dev. The
 exact RP2040 PWM register mechanism is unconfirmed empirically; the finding is reproducible.
 Practical conclusion: use Mode 1 for single-point measurement; Mode 2 is for multi-cell sweeps.
@@ -296,7 +324,11 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   / period))`. The earlier period-only budget under-settled high-frequency bands (25 kHz:
   600 µs, 20 kHz: 750 µs vs the ~1 ms+ the band-to-band energy-step transient needs) —
   root cause of the first-heatmap-column noise, bench-verified fixed (§17.7). Sweep cost
-  ≈ +12 ms on the 72-cell profile (~289 → ~301 ms refresh).
+  ≈ +12 ms on the 72-cell profile. *(Corrected 2026-07-31: this used to add "(~289 → ~301 ms
+  refresh)". Those figures were never measured — they came from a per-cell timing model that
+  assumed 32 conversions per cell per visit. The firmware takes **one** period per cell per
+  sweep and emits one W record per sweep, and the measured interval is **0.1445–0.1455 s
+  (6.88–6.92 Hz)** on the 63-cell profile, §17.13. The +12 ms settle cost is unaffected.)*
 - **Raw-read outlier gate is floored** *(fw v4.25, 2026-07-14)*: the v4.21 plausibility
   gate now compares against `abs(mean_raw)` with an absolute floor
   `OUTLIER_GATE_MIN = 164` raw14 counts (≈ 100 mV). Previously a near-zero or negative
@@ -317,9 +349,13 @@ enters the linear 0–5 V window — is the true earliest-valid sample time. The
   it — observed for 47 minutes (§14.10, §17.13). v4.27 **counts** these rather than preventing
   them: the emit `print()` is bracketed with `ticks_ms()` and calls over
   `EMIT_BLOCK_WARN_MS = 50` increment `emit_block_count` / `emit_block_ms_max`, reported on `B`
-  (§9). `ticks_ms` not `ticks_us` is load-bearing — `ticks_us` wraps every ~17.9 min with
-  `ticks_diff` valid over only half a wrap, so a 47-minute stall would have decoded to
-  plausible-looking garbage. Making the emit non-blocking is **deliberately not done**: dropping
+  (§9). `ticks_ms` not `ticks_us` is a deliberate margin choice — `ticks_us` wraps every
+  ~17.9 min with `ticks_diff` valid over only half a wrap (~8.9 min), so any *single* emit
+  blocked longer than that would decode to plausible-looking garbage. *(Reason corrected
+  2026-07-31: this claimed the 47-minute stall itself would have decoded wrong. It would not
+  have — the counter brackets one `print()` call, and that stall was 222 separate blocks of
+  2–15 s, all far inside `ticks_us` range. The choice is still right, as nothing bounds a
+  single block.)* Making the emit non-blocking is **deliberately not done**: dropping
   a record beats stalling the sweep and no invariant objects, but it sits in the acquisition hot
   path (the v4.13/v4.20/v4.24/v4.26 sequence is fair warning) and needs bench proof that
   MicroPython's rp2 port reports stdout writability at all. Measure first — the counters say
@@ -345,7 +381,11 @@ At the 8 ns PWM grid every value is an exact multiple of 8.)*
 **Mode 2 — raw interleaved moving-average sweep** (new; under active development):
 - **in:** `Q<n>` select profile · `G`/`g` start streaming · `E`/`e` stop
 - **out:** `W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...`
-- **rate:** min(100 Hz, profile_freq / n_cells); `S` rejected while Mode 2 runs
+- **rate:** one W record per full sweep of the profile, rate-limited to at most one per
+  `MIN_EMIT_MS = 10` ms (100 Hz ceiling, never reached in practice). Each cell gets one PWM
+  period per sweep, with a rolling average `averages` deep held *across* sweeps — so the
+  emitted rate is the sweep rate. **Measured 6.88–6.92 Hz** (0.1445–0.1455 s) under
+  `cal_63_air_bat_v3` *(2026-07-30/31, firmware clock, §17.13)*. `S` rejected while Mode 2 runs
 
 **Both modes:**
 - `V`/`v`/`?` identify → `V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>`
@@ -395,16 +435,20 @@ bench PSU to the 6S pack. Two changes from `cal_63_air_v2`:
   *plus* supply change, and the two are not separated.
 
 **This is both a new calibration epoch and a threshold-geometry change**, which is weaker than
-a clean epoch change and is the §13 feature-portability question made live. Cross-epoch
+a clean epoch change and makes the feature-portability question live (raised in §17.10's closing
+bench observation, still unsettled). Cross-epoch
 comparison is interpretable for the eight columns whose target voltage is unchanged; **the
 third column is not comparable to v2's even feature-wise.** An identical cell count does *not*
 imply comparability — a cell-count sanity check passes here — so comparability rests entirely
 on the `(profile_name, profile_sha8)` guard in `pimd_features`, **which must not be relaxed.**
 
 **Calibration conditions:** pack **23.5 → 23.35 V** across the sweep; thermal state at lock
-not recorded. Noted for any future re-lock: 23.5 V is the **upper edge** of the 21.5–23.3 V
-clean window (§17.13) — ~22.5 V would be more central. **No profile change follows from the
-2026-07-30 result**; the ladder and `4a2352d2` stand.
+not recorded. Noted for any future re-lock: that span sits **above** the 21.5–23.3 V window,
+inside the 22.5–24.0 V transition band, where a soaked rig reads clean but a cold one need not
+(§17.13) — **~22.5 V would be more central** and is the voltage to re-lock at. *(Restated
+2026-07-31: this previously called 23.5 V "the upper edge of the clean window", which it is
+not.)* **No profile change follows from the 2026-07-30 result**; the ladder and `4a2352d2`
+stand.
 
 **Revised delaycal parameters** — without these the calibration is not reproducible: fine
 sweep 80 → **40**, autonudge threshold 0.5 → **0.3 mV**, nudge step 16 → **8 ns**, soak
@@ -424,6 +468,10 @@ sweep 80 → **40**, autonudge threshold 0.5 → **0.3 mV**, nudge step 16 → *
 serves both. Full delay table lives in `src/data/profiles/cal_63_air_bat_v3.json`, the only
 tracked profile (§15).
 
+**Frame rate: 6.88–6.92 Hz measured** (0.1445–0.1455 s per sweep, firmware clock, §17.13). One
+W record is emitted per sweep, and each cell is sampled once per sweep into a 32-deep rolling
+average held across sweeps — so frame rate and sweep rate are the same number.
+
 ### Superseded — `cal_63_air_v2` (locked 2026-07-14)
 
 Same 63-cell geometry as above, with 4.70 V in the third threshold position, delays anchored
@@ -440,8 +488,9 @@ under the **bench PSU**. This is `cal_72_air_v3`'s band plan and top-dense thres
   earlier warm). This retired the drift that had pushed the 100 µs / 4.70 V cell onto the
   ≈ 4.67 V upper edge of the §17.7 threshold noise zone (bench-confirmed fixed, §17.8).
 
-Full-sweep refresh slightly under `cal_72_air_v3`'s ≈ 301 ms (one 5.8 ms band and one
-boundary-settle fewer) — the figure applies to the operating profile too. Superseded by
+Sweep time is slightly under `cal_72_air_v3`'s (one band and one boundary-settle fewer); the
+measured figure for the 63-cell profiles is 0.1445–0.1455 s. *(2026-07-31: this sentence used
+to give ≈ 301 ms, from the unmeasured model corrected in §8.)* Superseded by
 `cal_63_air_bat_v3` at the supply epoch and **retired from tracking 2026-07-26**; the JSON is
 retained on disk, and stays available to delaycal's Compare Profiles as a reference. Note
 `gui_signatures_targets_v1_20260723.csv` was captured under v2, so the only tracked profile no
@@ -487,7 +536,10 @@ principles established here still govern the operating profile:
 | 7 | 4.0 | 67.20 | 26.9 % | 24.9 % |
 | 8 | 3.125 | 100.00 | 31.25 % | 31.9 % |
 
-Full-sweep refresh ≈ 301 ms with fw v4.24's time-floored boundary settling (was ≈ 289 ms).
+Full-sweep time rose by ≈ 12 ms with fw v4.24's time-floored boundary settling. *(The ≈ 289 →
+≈ 301 ms figures previously quoted here were modelled, not measured, and are ~2× the measured
+sweep time — see §8. This profile is retired, so it was never re-measured directly; the 63-cell
+successors run 0.1445–0.1455 s.)*
 Band 2 runs 25 kHz, not the duty-rule 31.25 kHz — see §8 known-bad rate. Bands 7+8 consume
 ~57 % of acquisition time and are retained deliberately: target data (§17.6, historical)
 showed ferrous targets and copper still rising steeply at the top of the ladder. Full delay
@@ -515,7 +567,9 @@ table lives in the profile JSON (`src/data/profiles/cal_72_air_v3.json`).
 | +2V5 | U7 LT1762-2.5 | ADC |
 | 5 V ref | U5 LTC6655-5 | precision reference |
 
-Input: **6S LiPo (19.8–25.2 V)**, F1 2 A, D4 1N4004 reverse protection, FB1 ferrite bead. A
+Input: **6S Li-ion (19.8–25.2 V)** — 18650 cells; earlier entries say "LiPo", and the pack in
+use is built from recovered ICR18650-26C cells (see the capacity bullet below). F1 2 A, D4
+1N4004 reverse protection, FB1 ferrite bead. A
 **dedicated** battery powers the detector (the rover's 40 V supply was too noisy).
 
 **6S epoch (2026-07-24).** The 1990s bench supply failed and the pack replaced it. A cell was
@@ -529,17 +583,33 @@ so this brings forward a supply change the soil phase would have forced anyway.
 - **Working discharge floor 21.0 V** (3.5 V/cell) — comfortably above the ≈ 18 V at which the
   7815 loses headroom, and coincident with the cells' own useful-capacity limit, so there is
   no region where the electronics still work but the pack is being damaged.
-- **Cost: roughly double the dissipation in U1** (≈ 2.5 W → ≈ 4.6 W at the §17.1 measured
-  ~0.5 A average), inside a sealed shielded enclosure, on a project whose first open problem
-  is thermal drift. Warm-up is correspondingly longer than the 5S/bench-supply case (§14.1).
-- **Data-quality ceiling ≈ 23.5 V** *(measured 2026-07-30, §17.13)* — a **different kind of
-  limit** from the floor above, and the one that actually binds in practice. Above ≈ 24.0 V the
-  3.80 V and 4.40 V threshold columns are unusable however long the rig has run; those two
-  columns carry the *most* target signal in the grid, so they cannot be worked around by
-  ignoring them. **Operating window: 21.5 – 23.3 V** (3.58–3.88 V/cell). Below ≈ 21.5 V the
-  trouble migrates to the 4.20 V and 4.75 V columns and the 9 µs band, so the window is bounded
-  on both sides. The 21.0 V regulation floor needs no change — it was never the binding limit
-  for data quality.
+- **Cost: up to roughly double the dissipation in U1** (≈ 2.5 W on the old 20 V bench supply →
+  ≈ 4.6 W at the top of a charged pack, at the §17.1 measured ~0.5 A average; across the usable
+  discharge the average is nearer ≈ 3.6–3.8 W, so "double" is the worst case, not the mean),
+  inside a sealed shielded enclosure, on a project whose first open problem is thermal drift.
+  Warm-up is correspondingly longer than the 5S/bench-supply case (§14.1).
+- **Data-quality limits** *(measured 2026-07-30, §17.13)* — a **different kind of limit** from
+  the regulation floor above, and the one that actually binds in practice. The 3.80 V and
+  4.40 V threshold columns carry the *most* target signal in the grid, so they cannot be worked
+  around by ignoring them. Four numbers, which are **not interchangeable** *(restated
+  2026-07-31 — they had been used as if they were)*:
+  - **≈ 24.0 V — always-bad edge.** Above it those two columns are unusable however long the
+    rig has run.
+  - **22.5 – 24.0 V — transition band.** Here soak time is a real second variable, worth
+    ~2.5–3× against voltage's ~11× across its full range, so a well-soaked rig can read clean
+    inside this band and a cold one need not. The v3 profile was locked at 23.5 → 23.35 V,
+    i.e. *here* (§10).
+  - **21.5 – 23.3 V — the operating window.** The conservative interior; state it for any
+    capture campaign.
+  - **≈ 21.5 V — lower edge.** Below it the trouble migrates to the 4.20 V and 4.75 V columns
+    and the 9 µs band, so the window is bounded on both sides.
+
+  "**≈ 23.5 V ceiling**" as used elsewhere in this document is shorthand for the transition's
+  practical onset, not a fifth limit. The 21.0 V regulation floor needs no change — it was never
+  the binding limit for data quality. **Caveat on the lower edge** *(2026-07-31)*: "below
+  22.5 V the columns are always acceptable" is too strong — the one cold start measured near
+  that edge (≈ 22.45 V) still read ~5× its own floor. Below ~22.5 V they are *usually* at the
+  floor, but a cold rig there is not guaranteed clean.
 - **Pack state of charge DOES reach the operating point** — **43–51 mV/V over 21–25 V**, one
   sign across all seven bands, r = 0.96–0.97 *(2026-07-30, §17.13)*. This **corrects the
   earlier reading.** §17.10 established the opposite across 23.60 → 23.05 V, and is not wrong
@@ -693,11 +763,24 @@ flash raises the noise floor ~10×.
    3.80 V degradation peaks in the middle bands, 19× at 20–45 µs, and is weakest at 9 µs and
    100 µs), consistent with each band having a differently-shaped decay so the zone lands on a
    different threshold in each.
+   **Independently re-measured 2026-07-31** by a drift-immune estimator (successive-frame
+   differences, so a warm-up slope cannot masquerade as noise): on a fresh pack the 3.80/4.40 V
+   columns read 749/277 µV against 83 µV at 4.20 V between them, the whole grid sits at one
+   57–72 µV floor mid-window, and at 21.08 V the trouble has left 3.80/4.40 V (64/70 µV) and
+   appeared at 4.20 V (173 µV). The migration is confirmed on the raw dumps, not only inferred.
+   **Unresolved tension, flagged rather than resolved:** the 2026-07-24 survey above found the
+   columns elevated **at 22.4 V**, which the 07-30 rule would call clean. That survey ran
+   `cal_63_air_v2`, whose delays are 40–144 ns *earlier* than v3's. Since the zone sits at a
+   fixed place on the decay and each profile's delays cut the decay at different points, the
+   clean window may belong to **(pack voltage × profile delays)** rather than to pack voltage
+   alone — which would reconcile the two readings. This is a hypothesis, not a result: no
+   v2-era session dumps exist to test it (auto-logging begins 07-29).
    **What is still open:** the zone's actual position and width *on the decay*, and its physical
    cause. Both listed follow-ups stand — fine threshold sweep (§17.7 method) and a scope on the
    front end — but they must now be specified **at a stated pack voltage** or they will not
    reproduce. Best single experiment: repeat the §17.7 fine sweep at **two** stated voltages
-   (say 24.5 and 22.0 V), which maps the zone's position directly and would turn the present
+   (say 24.5 and 22.0 V) **and under both v2's and v3's delay sets**, which maps the zone's
+   position directly, tests the per-profile hypothesis above, and would turn the present
    inference into a model. A related open question the logs cannot answer: **does the noise
    follow the DELAY or the THRESHOLD?** A fine delay sweep at the 3.80/4.40 cells separates
    those. Note the ~4.45–4.65 V keep-out zone (§17.7) and the `(9 µs, 4.9 V)` corner (§14.11)
@@ -719,10 +802,18 @@ flash raises the noise floor ~10×.
    rediscovering it a third time.
 10. **The host can block the MCU, and did — for 47 minutes.** *(2026-07-29, §17.13.)* The Mode 2
     emit is a blocking `print()` to USB CDC (§8); when the host stopped draining the pipe the MCU
-    stalled inside it and frame delivery collapsed **414 → ~35 per minute**. It is not merely
-    lost data — **the rig cooled**, because the PWM free-runs at cell[0]'s config during the
-    print, so a long stall parks the detector on one band's duty instead of sweeping seven, and
-    the operating point stepped +10 mV (9 µs) to +78 mV (100 µs). Likely trigger, not
+    stalled inside it and frame delivery collapsed from **414 per minute to ~20–35** *(the
+    recorded figures do not close: ~35/min over 47 min cannot coexist with the 2 700 s of dead
+    time counted in the same 2 820 s window, which leaves only ~120 s live ⇒ ~18/min. The 2 700 s
+    is corroborated twice; the rate is the soft number.)* It is not merely lost data — **the rig
+    cooled**, because the PWM free-runs at cell[0]'s config during the print, so a long stall
+    parks the detector on one band's duty instead of sweeping seven. The operating point stepped
+    **−8.3 mV (9 µs) to +23.8 mV (100 µs)** — changing sign across the ladder, the thermal
+    signature (§17.13). *(Corrected 2026-07-31: this read "+10 mV (9 µs) to +78 mV (100 µs)",
+    one sign across all bands. That was the first pass through this dump — the same pass whose
+    stall-spanning windows manufactured the phantom "noise relapse" below. The sign-changing row
+    is from the stall-guard-cleaned re-analysis and is the only version consistent with the
+    supply-vs-thermal discriminator this document relies on.)* Likely trigger, not
     established: the PC suspending or starving the Qt event loop. **Detection landed, the fix did
     not** — fw v4.27 counts blocked emits (§8, §9), classviz v1.64 latches a stall warning and
     writes `# stall:` lines into the session dump, and the window-span guard now fails safe to
@@ -732,8 +823,10 @@ flash raises the noise floor ~10×.
     and unnoticed **in analysis** because a fixed-frame window silently becomes a longer *time*
     window during a stall — which manufactured a phantom "noise relapse" that does not exist.
 11. **The `(9 µs, 4.9 V)` corner — 3 cells of 63, and it cannot be fixed statically.**
-    *(2026-07-28, §17.12.)* Noise/signal is 3–10× above every other cell at `(9 µs, 4.9 V)`,
-    `(9 µs, 4.8 V)` and marginally `(13.44 µs, 4.9 V)` — 4.8 % of the grid, the **top of the
+    *(2026-07-28, §17.12.)* Noise/signal at `(9 µs, 4.9 V)` and `(9 µs, 4.8 V)` runs **3–10×
+    above every other cell**; `(13.44 µs, 4.9 V)` is implicated only marginally — it reads about
+    **1.2×** the best of the rest, so the "3–10×" applies to two cells, not three *(scoped
+    2026-07-31)*. Together 4.8 % of the grid, the **top of the
     ladder meeting the shortest band**, and a *separate* observation from both §14.7 and the
     ~4.45–4.65 V keep-out zone. Because `splithalf_floor` is an L2 over all 63 cells, that corner
     sets the noise figure for the whole capture, which is why it presents as a floor problem.
@@ -767,12 +860,12 @@ flash raises the noise floor ~10×.
 | `src/pimd_features.py` | Session-CSV / gui_signatures-CSV → training-corpus builder (**v11**, offline CLI). Registry join (`target_id` + structured placement replace free text), hard geometry guard — one `(profile_name, profile_sha8)` per corpus build; direct-ingest path for classviz corpus CSVs; pre-v1.32 free-text inputs loudly rejected, no migration by design. **v8–v11:** parses mid-stream `# session_notes:` (v8, needed once classviz auto-started sessions and the operator's notes began arriving *after* the header); a **`pack_v` track** — `list[(datetime, volts, age_s)]`, a track and not a scalar because a 6S pack falls volts over a multi-hour run, with `pack_v_at()` interpolating per capture and refusing to guess at malformed lines — plus parsed `# stall:` and `# soak:` lines, and `pack_v` appended to `CORPUS_HEADER_FIELDS` (v9–v10). **v11 exposes `SessionData.fw_seconds`, the firmware clock**, which `parse_session_file()` had always read and then discarded, and **fixes `measure_frame_rate_hz()`**, which was being fed PC arrival timestamps: USB delivery is burst-batched, so the measured rate came out **73–290 Hz against a true 6.94 Hz**, and its consumers size segmentation windows in frames from it. It hid because the two clocks share the same *mean* — only the median is wrong, and the median is used deliberately since it survives stalls. **No corpus row on disk was ever built through that path** (all 166 captures come from classviz directly), so no rebuild was required — verified, not assumed. The `pack_v` **corpus column carries no staleness information** while the session track does: it stamps the field's current value, so a stale entry reads as confident |
 | `src/pimd_target_check.py` | Shared target-registry loader/validator (**v4**, CLI + library; named `pimd_targets.py` before v3). Reads `src/data/targets/targets_v3.csv`, collects all errors/warnings (ids, enums, numerics, dims order, mass plausibility); never writes the registry. `DEFAULT_REGISTRY_PATH` here is the single source of truth for the registry location — classviz and features both derive from it, so repointing it at v3 moved all three. Used by classviz (capture-time) and features (build-time). **v4:** the CLI's registry path default is **removed** — `-f/--file` is required, because with several registry versions on disk a defaulted path had become a trap (it still named v1 while the live registry was v3, so a clean run said nothing about the file in use), and the run now prints the absolute path it loaded. `wall_thickness_mm` gains an explicit **0 = solid / not applicable** sentinel, replacing v3's `na` (rejected as unparseable) and v1's empty cell; both legacy spellings still normalise to `0.0`, so the column is now always a float |
 | `src/pimd_corpus_check.py` | Corpus-level acceptance checker (**v1.8**, offline CLI) — shape distance-invariance, split-half SNR, repeat consistency, falloff fit, optional `--baseline` cross-campaign comparison; one flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. Reads the v1.32+ `target_id`/`distance_mm` schema only (legacy `target`/`distance_cm` cleanly rejected). Distances are data-driven — a target at ≥2 distances gets shape rows, ≥3 gets a falloff fit; repeats key off the `repeat_idx` column against the physical placement tuple; the old canary-drift check is retired (per-capture air bracketing does that correction in features). Air captures carry no distance: they appear in the SNR check as `@air` and are excluded from every distance-keyed check. **v1.7:** `placement_key()` normalises the three fields classviz v1.60 froze (`face_normal` → `na`, both offsets → 0) through a shared `placement_value()` **that classviz imports**, so the app and the checker cannot drift on what "the same placement" means — without it a corpus straddling that change splits one physical placement into two groups and repeat-consistency compares nothing against nothing (on the live corpus this took the run from 30 checks to 90, and made the distance-falloff fit run at all). **v1.8:** `pack_v` is an **optional** column — `REQUIRED_FIELDS` was the whole field list, so adding any column to `CORPUS_HEADER_FIELDS` would have failed every corpus written before it; additive schema growth belongs here rather than in a migration |
-| `src/data/targets/targets_v3.csv` | Human-authored registry, **current** — 26 physical target objects, single source of target physical metadata (id, material, shape, dims, mass, …). Human-owned data: tooling reads and validates only. Revision v3 added rocks, quartz and a water bottle, changed the solder roll, and later a weighed 56 g solder stick. Loads with **0 errors**; the one remaining warning is deliberate (see below). Two provenance notes worth keeping: the LibreOffice export had been written as **UTF-7**, arriving with every `_`/`-`/`#` as a `+AF8-`-style escape (decoded in place with `iconv`; the export dialog remembers the charset, so it needs setting back to UTF-8 or this recurs), and `Fe_heavy_pully` was reclassified `disc` → **`ring`** — its 66 mm wall was flagged as set on a solid shape, but the measurement is right (a real bore, 66 = (150−18)/2), so the row was a shape misclassification, not a bad number. Flagged, not changed: that id misspells "pulley" and ids are stable by the registry's own rule (renaming would orphan captures), and its `closed_loop=y` reads the flag as "supports a large circulating eddy path" rather than the header's stricter written rule — a registry-wide semantics decision left open |
+| `src/data/targets/targets_v3.csv` | Human-authored registry, **current** — **27** physical target objects *(verified against the file 2026-07-31; the "26" recorded previously was the count at the 2026-07-26 validation run, before the solder stick was added on 07-28)*, single source of target physical metadata (id, material, shape, dims, mass, …). Human-owned data: tooling reads and validates only. Revision v3 added rocks, quartz and a water bottle, changed the solder roll, and later a weighed 56 g solder stick. Loads with **0 errors**; the one remaining warning is deliberate (see below). Two provenance notes worth keeping: the LibreOffice export had been written as **UTF-7**, arriving with every `_`/`-`/`#` as a `+AF8-`-style escape (decoded in place with `iconv`; the export dialog remembers the charset, so it needs setting back to UTF-8 or this recurs), and `Fe_heavy_pully` was reclassified `disc` → **`ring`** — its 66 mm wall was flagged as set on a solid shape, but the measurement is right (a real bore, 66 = (150−18)/2), so the row was a shape misclassification, not a bad number. Flagged, not changed: that id misspells "pulley" and ids are stable by the registry's own rule (renaming would orphan captures), and its `closed_loop=y` reads the flag as "supports a large circulating eddy path" rather than the header's stricter written rule — a registry-wide semantics decision left open |
 | `src/data/targets/targets_v1.csv` | **Superseded** registry of 22 objects, retained on disk and tracked. The 2026-07-23 corpus (§17.9) references it, so it is the registry that corpus must be read against |
 | `src/data/profiles/` | Locked calibration profiles (firmware↔ML contract, §10). Only the **operating** profile is tracked in git — **`cal_63_air_bat_v3.json`**; the superseded `cal_63_air_v2.json`, `cal_63_air_v1.json`, `cal_72_air_v3.json`, `cal_72_air_v2.json` are retained on disk but untracked — each is listed individually in `.gitignore` as it is retired. delaycal writes candidate profiles here routinely; those stay visible as untracked until they are either locked (tracked) or retired (ignored). Nothing in the code loads a profile by name, and both Import Profile and Compare Profiles scan the directory off disk, so a retired profile stays usable as a comparison reference for as long as the file is kept |
-| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema). `gui_signatures_targets_v1_20260723.csv` — 66 captures, 22 targets, 60–420 mm, under `cal_63_air_v2` (§17.9). `gui_signatures_targets_v3_20260728_142316.csv` — the v3-epoch corpus under `cal_63_air_bat_v3`, 166 captures at the last count (§17.12). Untracked in git while capture is underway (working data until a corpus is accepted), which means **git cannot restore a damaged corpus** — the two 2026-07-30 repairs each took a timestamped `.bak-` copy first and proved the write against it. One lesson from those: comparing a file against its own backup cannot detect damage that predates the backup, so row width is now asserted against the **header** |
+| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema). `gui_signatures_targets_v1_20260723.csv` — 66 captures, 22 targets, 60–420 mm, under `cal_63_air_v2` (§17.9). `gui_signatures_targets_v3_20260728_142316.csv` — the v3-epoch corpus under `cal_63_air_bat_v3`, **170 captures / 10 710 rows as at 2026-07-31**, of which **82 carry a `pack_v`** spanning 21.08–24.4 V (the 88 without it are the 07-28 captures, which predate voltage logging). *(§17.12/§17.13 quote 166 captures with `pack_v` on 10 — that was the state at analysis time on 07-30, and the figures its null result was computed from. This file grows with each capture day, so any count in this document is a snapshot: check the file.)* Untracked in git while capture is underway (working data until a corpus is accepted), which means **git cannot restore a damaged corpus** — the two 2026-07-30 repairs each took a timestamped `.bak-` copy first and proved the write against it. One lesson from those: comparing a file against its own backup cannot detect damage that predates the backup, so row width is now asserted against the **header** |
 | `src/data/sessions/` | Raw Mode 2 session dumps (`session_<ts>.csv`) — self-describing per-session CSV with embedded profile JSON, per-column map, marks, and the `# pack_v:` / `# soak:` / `# stall:` comment tracks. Written automatically whenever the stream runs (classviz v1.63), ~220 KB/min. Untracked, and **not reconstructable after the fact** — the 2026-07-29/30 pack-voltage result (§17.13) exists only because auto-logging captured windows nobody would have pressed Record for |
-| `src/data/scratch/` | Scratch captures of **unregistered** objects from the Shape Space tab (`gui_scratch_<date>.csv`, same CORPUS_HEADER schema, `scratch_<slug>` ids). Deliberately never written into `src/data/corpora/`: a corpus build hard-errors on an unregistered `target_id` and that guard stays — promotion means registering the object in `targets_v1.csv` and recapturing properly. The air-anchor mode (`[anchor=flat]` / `[anchor=air2]`) is recorded in the notes, because a flat single-anchor capture is not drift-corrected and that must stay visible afterwards. Untracked |
+| `src/data/scratch/` | Scratch captures of **unregistered** objects from the Shape Space tab (`gui_scratch_<date>.csv`, same CORPUS_HEADER schema, `scratch_<slug>` ids). Deliberately never written into `src/data/corpora/`: a corpus build hard-errors on an unregistered `target_id` and that guard stays — promotion means registering the object in the current registry (`targets_v3.csv`) and recapturing properly. The air-anchor mode (`[anchor=flat]` / `[anchor=air2]`) is recorded in the notes, because a flat single-anchor capture is not drift-corrected and that must stay visible afterwards. Untracked |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` (sliders/QLineEdit fixed to match code, 2026-07-02) |
 | `utilities/` | Local analysis tools that are **not** part of the PIMD toolset — one directory each, ordinary tools by convention (`TOOL_VERSION`, terse `# History:` header lineage, read-only with respect to the repo), with their history in `CHANGELOG.md` under a `### utilities/<name>/` heading like anything else. **The rule: a utility cited from `CHANGELOG.md` has to be tracked** — the 2026-07-30 result names `soakvolt.py` as the tool behind it, and had that file stayed local the project's headline finding would not have been reproducible from a clone. (A separate untracked `CHANGELOG.local.md` was tried and abandoned: two places to look, two formats to keep in step, and detail behind a tracked finding living where no clone would see it.) |
 | `└─ soak_vs_voltage/soakvolt.py` | **v1** — reads every classviz session dump for a campaign and separates pack voltage from soak time, the two variables every session before 2026-07-30 confounded in the same direction (ρ 0.80–0.91 against either, identical magnitude, so no *within*-session correlation could have settled it). The tool behind §17.13. Four things it does that a one-off script would not: window hygiene as a **span test on the firmware clock** mirroring classviz's own guard, so it caught the §14.10 host stall without being told about it; **three provenance grades** on every voltage figure (`typed` / `held` / `note`, degrading to `interp` / `extrap`), never mixed silently, with a header `pack_v` of unknown age **dropped** as a settings restore rather than a reading; **loaded readings only**, never interpolating across a rest, because a rested pack rebounds; and the stream-start transient removed **by test** (every column above 5× its own session floor) rather than by duration, so it cannot silently eat real warm-up. Emits JSON |
@@ -875,13 +968,21 @@ updated in place with a dated note and the raw observation is recorded in `CHANG
 ### 17.1 Power / current vs pulse width
 "current" = average bench-supply current (at 20 V), not peak coil current. 
 
-| Pulse (µs) | Freq Req (Hz) | Freq (actual) | Current (mA) |
+| Pulse (µs) | Rep rate (Hz) | Supply current (mA) | Note |
 |---|---|---|---|
-| 40 | 10.6 | 500 | raise freq until 0.5 A |
-| 30 | 17599 | 500 | as above |
-| 20 | 29201 | 410 | now frequency/duty-cycle constrained |
-| 10 | 43003 | 201 | as above |
-| 5 | 56992 | 105 | as above |
+| 40 | 10 601 | 500 | rate raised until draw reached the 0.5 A target |
+| 30 | 17 599 | 500 | as above |
+| 20 | 29 201 | 410 | 0.5 A not reached — frequency/duty-cycle constrained |
+| 10 | 43 003 | 201 | as above |
+| 5 | 56 992 | 105 | as above |
+
+*(Table repaired 2026-07-31. It previously had four columns — "Freq Req (Hz)", "Freq (actual)"
+and "Current (mA)" — in which the 40 µs rate appeared as "10.6" (the kHz value left in an Hz
+column), the 500/500/410/201/105 series sat under "Freq (actual)" although it is the **current
+in mA**, and the current column held the procedural note. The values are unchanged; only the
+column identities are corrected, from the 2026-06-17 bench entries. These are the measured
+operating points of the power sweep — the rate was raised per pulse width until the supply
+drew 0.5 A, which the two widest pulses reached and the three shortest did not.)*
 
 ### 17.2 Standard Operating Conditions / noise floor
 
@@ -949,7 +1050,8 @@ near-duplicates). Findings from the series:
 - **Thermal warm-up fingerprint:** two cals 12 min apart — light bands repeat to ≤ 8 ns
   (one grid step); heavy bands drift monotonically with pulse width, up to −248 ns at 100 µs
   (decays arrive earlier warm). Basis of the ≈ 5 min Mode 2 warm-up (§3). After full soak,
-  the freeze cal adjusted only 1 delay of 72 (+40 ns).
+  the freeze cal adjusted 13 delays of 72 — mostly a coherent +40 ns shift of the 4.5 V
+  clamp-release column *(corrected 2026-07-31: this read "only 1 delay of 72 (+40 ns)")*.
 - **31.25 kHz known-bad rep rate** — see §8. Band 2 moved to 25 kHz / 9 µs.
 - **Top-anchor sensitivity:** the highest-threshold column is consistently the noisiest
   (clamp-release region, flattest curve, thermal drift appears there first); anchor stepped
@@ -999,9 +1101,12 @@ air floor. Key findings:
   against the ~1 ms+ the band-to-band energy-step transient needs; band 1's first cell
   escaped by accident because the ms-scale W-record print at loop index 0 donated extra
   settling every sweep. The ±1-period jitter in effective settle count became telegraph
-  noise, smeared into seconds-scale wander by the 32-deep (~9.2 s) rolling average.
+  noise, smeared into seconds-scale wander by the 32-deep rolling average (32 sweeps, i.e.
+  ~4.6 s at the later-measured 6.9 Hz; this was written as ~9.2 s from the ~3.3 Hz sweep-time
+  assumption corrected in §8).
   fw v4.24 floors settling at SETTLE_FLOOR_US = 3 ms per boundary (§8) — bench-verified:
-  first-column σ normalised, wander gone. Sweep refresh ≈ 289 → ~301 ms.
+  first-column σ normalised, wander gone. Sweep time rose ≈ 12 ms *(the "≈ 289 → ~301 ms"
+  figures once quoted here were modelled, not measured — see §8)*.
 - **Threshold noise zone mapped: ~4.45–4.65 V.** Fine sweep 4.700 → 4.400 V in 37.5 mV
   steps, all 8 bands: endpoints clean (mostly ≤ 0.5 mV σ), interior 4.625–4.513 V columns
   elevated in nearly every band (up to 2.24 mV at 30 µs / 4.588 V). 4.7/4.8/4.9 V and
@@ -1069,11 +1174,16 @@ layer is being built on. At an SNR ≥ 5 gate: **46 of 66 captures gated**, fami
   disc 26.4–30.9, cast-iron trivet latest at 33.9–34.4 µs. Every gated ferrous target crosses
   by ≤ 11 µs (i.e. is already positive at the bottom of the ladder) and every gated
   non-ferrous never crosses — so the two ends need sentinel values, not a crossing.
-- **A threshold-axis "decay persistence" ratio separates iron-bearing from non-ferrous
-  independently of sign** — mean |Δ| over the two lowest-voltage threshold columns ÷ the two
-  highest. Every gated ferrous/crossover capture ≥ 2.44; every non-ferrous ≤ 1.75. The
-  ferrite toroid is the instructive case: **ferrous by sign, non-ferrous by decay (1.37)**,
-  and both readouts are true of it — which is why neither test may overrule the other.
+- **A threshold-axis "decay persistence" ratio is a second, independent readout to sign** —
+  mean |Δ| over the two lowest-voltage threshold columns ÷ the two highest. Every gated
+  **solid-metal** ferrous/crossover capture ≥ 2.44; every non-ferrous ≤ 1.75. **The ferrite
+  toroid is the exception that defines the rule:** it is iron-bearing, reads ferrous by sign,
+  and reads **1.37 by decay** — below the non-ferrous ceiling. So this ratio does *not* separate
+  iron-bearing from non-ferrous as a class test; it separates by decay behaviour, and a ferrite
+  behaves like a non-ferrous there while behaving like a ferrous by sign. Both readouts are
+  true of it, which is why neither may overrule the other. *(Reworded 2026-07-31: the previous
+  text claimed an iron-bearing/non-ferrous separation and quoted the ≥ 2.44 bound as covering
+  every gated ferrous/crossover capture, which the ferrite in the same sentence contradicts.)*
 - **Shape is distance-invariant to within the noise budget.** Measured within-target cosine
   across distance pairs sits on the ceiling predicted from the captures' own SNRs (fig4 left):
   what degrades with distance is amplitude, not shape. Amplitude falls with a slope steepening
@@ -1097,6 +1207,16 @@ layer is being built on. At an SNR ≥ 5 gate: **46 of 66 captures gated**, fami
 floor — at or near the 1284 µV display ceiling, only the 20 µs / 4.40 V cell falling short —
 while **4.20 V read clean between them**. Follows the threshold axis, not the band axis. Full
 reading and the two unresolved anomalies in §14.7.
+
+> **Tension with the 2026-07-30 window, flagged 2026-07-31.** This survey was taken at
+> **22.4 V**, and §17.13's rule says those columns are acceptable below 22.5 V. Both readings
+> are direct measurements, so neither is discarded. The difference that is not controlled for
+> is the **profile**: this ran `cal_63_air_v2`, whose delays sit 40–144 ns earlier than
+> `cal_63_air_bat_v3`'s, and the zone's position is defined on the *decay*, which the two
+> profiles sample at different points. That makes "the clean window" plausibly a property of
+> **(pack voltage × profile delays)** rather than of pack voltage alone — a hypothesis, not a
+> result, and untestable from logs because session auto-logging begins 2026-07-29. §14.7
+> carries the experiment that would settle it.
 
 **Calibration series — three runs, none locked.**
 
@@ -1186,8 +1306,9 @@ locked, sha `4a2352d2` (§10)*
   from one another: 6S pack, heavier cabling, ferrite common-mode chokes on power and USB, and
   100 nF across the pack.
 - **A thermal convergence criterion replaces the thermistor check.** The TX damping-resistor
-  thermistor is no longer fitted since the shielded case was built, so §14.1's documented
-  "calibrate once the resistor reaches ~80 °C" precondition **cannot be applied**. Replaced by
+  thermistor is no longer fitted since the shielded case was built, so the old
+  "calibrate once the resistor reaches ~80 °C" precondition **cannot be applied** *(that
+  precondition is no longer stated in §14.1, which this bullet used to cite for it)*. Replaced by
   measuring the thing it was a proxy for — successive calibrations compared cell by cell:
   15 min after the first, differences up to **−24 ns** concentrated in the long-pulse bands;
   subsequent runs ~10 min apart, **±8 ns in 6 of 63 cells** and zero elsewhere. 8 ns is the PWM
@@ -1199,9 +1320,13 @@ locked, sha `4a2352d2` (§10)*
   their original values while only the third moved (4.70 → 4.75 V, §10). Confirmed from a Std
   Dev rolling-N heatmap. Attributed at the time to the elevation having been "supply-borne" —
   meaning the failing bench PSU. **That attribution was later vindicated on much stronger
-  evidence but for a different reason: it is pack voltage, and the columns were clean because
-  the pack had drained into the good window** (§17.13). The conclusion was right; the mechanism
-  named was not.
+  evidence but for a different reason: it is pack voltage** (§17.13). The conclusion was right;
+  the mechanism named was not. *(Precise 2026-07-31: the sweep ran at 23.5 → 23.35 V, which is
+  in the **22.5–24.0 V transition band**, not in the 21.5–23.3 V window — this bullet used to
+  say the pack "had drained into the good window". The reading is still explained, because soak
+  is the second variable inside the transition and this rig was soaked; §17.13 measures 316 µV
+  at 23.27 V soaked against 862 µV at 23.22 V freshly started. It does mean the "clean"
+  confirmation was taken at the edge, which is why §10 recommends ~22.5 V for any re-lock.)*
 - **Open at this point, resolved later:** whether the 4.70 V misbehaviour past ~30 min was drift
   into the ~4.45–4.65 V keep-out zone as the rig warmed (the §14.1 fingerprint) or a fresh
   mechanism. §17.13's moving-zone result supplies the explanation.
@@ -1216,18 +1341,24 @@ locked, sha `4a2352d2` (§10)*
   floor as having doubled between the first two sessions of the day: that was drawn from 12
   captures and does not survive 50. Per-session `splithalf_floor` medians run 1.25 / 1.52 /
   1.77 / 1.67 mV — the floor sits at ~0.9 mV across the whole day. What actually changes is the
-  **rate of excursions** (captures above 2.0 mV run 12 % → 25 % → 40 % → 47 %), but Spearman
+  **rate of excursions** (captures above 2.0 mV run 12 % → 25 % → 40 % → 47 %), while Spearman
   rank correlation against elapsed time is only **+0.10** over 133 min: the distribution is
   growing a tail, not shifting. Against amplitude the correlation is +0.15, so the metric is
-  target-independent as intended.
+  target-independent as intended. *(Caveat 2026-07-31: a rate rising monotonically across four
+  consecutive sessions is itself a trend in the tail — the Spearman is computed over all
+  captures and so tests the bulk, which is the thing it correctly reports as unchanged. It is
+  not evidence that the tail growth is noise. Whether that growth is real is untested.)*
 - **Two supply nulls, one of them acted on in advance.** Two batteries were swapped and left to
   settle partly on the strength of the retracted floor-doubling reading; **the swap changed
   nothing**, and the post-swap session is indistinguishable from the two before it. The pack
   also fell 23.77 → ~22.5 V across the day with no measurable effect — amplitude reproducibility
   for repeats of one placement held to ~6 %. The two **air** captures closing the day — the
   purest noise probe available, no target coupling — read **0.899 and 0.974 mV**, as clean as the
-  best capture of the day. *(Both nulls are consistent with §17.13: the day ran entirely inside
-  the clean window, below the ≈ 23.5 V ceiling, where there is no sensitivity left to detect.)*
+  best capture of the day. *(Both nulls are consistent with §17.13, with one correction made
+  2026-07-31: the day **opened at 23.77 V, inside the 22.5–24.0 V transition band**, not
+  "entirely inside the clean window" as this used to read, and dropped into the window as it
+  went. A soaked rig reads clean through that band, which is the condition here, so the nulls
+  stand — but the day was not the pure inside-the-window test it was described as.)*
 - **Tested and rejected:** that the first capture at a placement is noisier than its repeat (the
   rig still settling after handling). Across 21 placements holding both r1 and r2, r1 was noisier
   in 10 and r2 in 11, medians 1.64 vs 1.67. No effect.
@@ -1247,7 +1378,8 @@ locked, sha `4a2352d2` (§10)*
 
 ### 17.13 The pack-voltage result — state of charge reaches the operating point
 
-*2026-07-29 19:17 → 2026-07-30 21:14 · **332 957 frames**, nine session dumps, packs A and B ·
+*2026-07-29 19:17 → 2026-07-30 (last dump runs to 23:31) · **332 957 frames as analysed**, nine
+session dumps, packs A and B ·
 fw v4.26/v4.27 · classviz v1.63→v1.66 · `cal_63_air_bat_v3` / `4a2352d2` · free air ·
 analysed with `pimd_features` v11 and `utilities/soak_vs_voltage/soakvolt.py` v1 ·
 pre-registered predictions in `References/V3/NEXT_SESSION_soak_vs_voltage.md` §1 (§15)*
@@ -1255,6 +1387,21 @@ pre-registered predictions in `References/V3/NEXT_SESSION_soak_vs_voltage.md` §
 The most consequential measurement since the enclosure, and the one that corrects standing
 ground truth in §12, §14.1 and §14.7. **Only possible because classviz v1.63 auto-logs** — these
 are warm-up windows nobody would have pressed Record for.
+
+> **Frame count is a snapshot** *(noted 2026-07-31)*: 332 957 is what the nine dumps held when
+> the analysis ran, with the last dump still being written. The same nine files now hold
+> **373 325** rows. Nothing downstream changes — the analysis is reproducible against the frames
+> it used — but the figure is not a property of the campaign. *(A "435k frames" figure also
+> appears in `CHANGELOG.md` for the same run and matches neither; see the errata entry.)*
+
+> **Independently re-measured 2026-07-31, and it reproduces.** A drift-immune estimator
+> (standard deviation of successive frame differences ÷ √2, which no warm-up slope can inflate)
+> run over the same dumps returns the same structure: 3.80/4.40 V at 749/277 µV with 4.20 V
+> clean at 83 µV on a fresh 24.90 V pack; the whole grid at one 57–72 µV floor mid-window; and
+> at 21.08 V the trouble gone from 3.80/4.40 V (64/70 µV) and present at 4.20 V (173 µV).
+> Absolute values run ~2.8× below the µV figures quoted in this section because the metric
+> differs — compare ratios, not levels. The zone-migration model is now observed by two
+> independent methods (§14.7).
 
 **The metric was validated against the result it overturns before anything was concluded** — the
 published column table reproduces at **r = 0.9960 across all 54 cells**. Same method, same
@@ -1283,11 +1430,17 @@ numbers: the disagreement was about **causation, not measurement**.
   something soak time can produce — the soak hypothesis predicts ~185 µV there and is out by an
   order of magnitude. No model is needed to read this pair.
 - **Ordered by voltage it is a threshold crossing, not a linear trend.** Above 24.0 V the 3.80 V
-  column is *always* bad (1031–2090 µV) whatever the soak; below 22.5 V it is *always* acceptable
-  (189–502 µV); **22.5–24.0 V is the transition, and that is where soak is visible as the second
-  variable** — at matched voltage, 23.27 V soaked 135 min reads 316 µV against 23.22 V freshly
-  started at 862 µV. So soak buys ~2.5–3× inside the transition band while voltage spans ~11×
-  across its range. **Both are real; voltage dominates.**
+  column is *always* bad (1031–2090 µV) whatever the soak; below 22.5 V it is **usually**
+  acceptable (189–502 µV); **22.5–24.0 V is the transition, and that is where soak is visible as
+  the second variable** — at matched voltage, 23.27 V soaked 135 min reads 316 µV against
+  23.22 V freshly started at 862 µV. So soak buys ~2.5–3× inside the transition band while
+  voltage spans ~11× across its range. **Both are real; voltage dominates.**
+  *(Softened from "*always* acceptable" 2026-07-31. Two measurements sit against the stronger
+  claim: the 15:01 cold start, whose voltage corrects to ≈ 22.45 V — at or just below the edge —
+  read 742 µV, ~4–5× its own floor by an independent estimator; and the 2026-07-24 survey read
+  both columns elevated at 22.4 V, though under a different profile, §17.10. Below ~22.5 V the
+  columns are usually at the floor, but a **cold** rig near the lower edge is not guaranteed
+  clean.)*
 - **The band signature identifies the mechanism, and the discriminator is the *sign*, not the
   correlation with pulse width** — both candidates have one:
 
@@ -1304,9 +1457,18 @@ numbers: the disagreement was about **causation, not measurement**.
   -pack session, soak predicted the 3.80 V column starts bad at 1700–2100 µV; voltage predicted
   clean at 200–400 µV. It read **742 µV** — 2.3× better than soak predicted, 1.9× worse than
   voltage predicted. **Soak is falsified as the controlling variable, voltage is substantially
-  right, and soak survives as a real secondary effect.**
+  right, and soak survives as a real secondary effect.** *(Voltage of this session corrected
+  2026-07-31 to **≈ 22.45 V**, from ≈ 22.67 V. The load-settling correction had been taken from
+  the 3.4-minute reading only; the session's own 25-minute point shows settling still running at
+  0.88 V/h, ~3× the streaming drain, and back-extrapolating from the settled point gives
+  22.45–22.47 V — which also reproduces the session's actual 15:36 reading, where 22.67 V does
+  not. This puts the row at or just below the 22.5 V edge rather than inside the transition,
+  which is why the "always acceptable below 22.5 V" wording above is softened. The prediction
+  test itself is unaffected: 742 µV lies between the two predictions either way.)*
 - **Operating window — the actionable result. Run the pack at 21.5 – 23.3 V** (3.58–3.88 V/cell).
-  Ceiling ≈ 23.5 V is the constraint that was missing; floor ≈ 21.5 V is where trouble migrates
+  The missing constraint was the upper one: always-bad from ≈ 24.0 V, with 22.5–24.0 V a
+  soak-sensitive transition, so ≈ 23.5 V is the practical onset to stay under rather than a
+  hard edge. Floor ≈ 21.5 V is where trouble migrates
   to the 4.20 V / 4.75 V columns and the 9 µs band. Full numbers, capacity and the idle-drain
   consequence in §12. **A delay recalibration does not fix this** — a cal at 24.5 V re-anchors
   the delays so the zone falls between thresholds, but the zone moves with the pack, so the fix
