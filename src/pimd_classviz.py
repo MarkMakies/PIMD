@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.63
+# PIMD Signature Visualiser (ClassViz) v1.67
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.67 Tilt (°) capture input for oblique poses; tilt_deg joins the placement tuple
 #   v1.66 session dump: pack_v carries age_s; new '# soak:' run/idle history lines
 #   v1.65 FIX corpus append wrote the tool's columns, not the file's (ragged CSV)
 #   v1.64 window span guard; stream-stall detection; pack voltage; chart pause
@@ -130,7 +131,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.66'
+APP_VERSION = '1.67'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -1618,6 +1619,30 @@ class MainWindow(QMainWindow):
         setattr(self, '{0}_long_axis'.format(prefix), long_axis)
         row_b.addWidget(long_axis)
 
+        # Tilt (v1.67). The oblique-pose input long_axis cannot express: the
+        # 2026-07-31 corpus analysis could confirm the two-basis model's rank-2
+        # structure but not its mixing law, because every capture on disk sits
+        # at exactly 0 or 90 deg to the coil axis.
+        tilt_tip = (
+            'Tilt of dim_a AWAY FROM THE COIL NORMAL, in degrees. 0 = dim_a '
+            'straight down the coil axis (same pose as Long axis = z), '
+            '90 = dim_a lying in the coil plane (same pose as x/y). Only '
+            'meaningful with Long axis = z, and written blank otherwise — '
+            'blank means "not recorded", which is NOT the same as a recorded 0.')
+        lbl_tilt = QLabel('Tilt (°):')
+        lbl_tilt.setToolTip(tilt_tip)
+        setattr(self, '{0}_tilt_deg_label'.format(prefix), lbl_tilt)
+        row_b.addWidget(lbl_tilt)
+        tilt_deg = QSpinBox()
+        tilt_deg.setRange(0, 90)
+        tilt_deg.setSingleStep(5)
+        tilt_deg.setValue(0)
+        tilt_deg.setToolTip(tilt_tip)
+        setattr(self, '{0}_tilt_deg'.format(prefix), tilt_deg)
+        row_b.addWidget(tilt_deg)
+        long_axis.currentTextChanged.connect(
+            lambda _t, p=prefix: self._update_tilt_enabled(p))
+
         row_b.addWidget(QLabel('Medium:'))
         medium = QComboBox()
         medium.addItems(['air', 'soil', 'other'])
@@ -1677,12 +1702,34 @@ class MainWindow(QMainWindow):
             'offset_y_mm': 0,
             'medium': getattr(self, '{0}_medium'.format(prefix)).currentText(),
             'repeat_idx': getattr(self, '{0}_repeat_idx'.format(prefix)).value(),
+            # v1.67. The single place the blank-when-not-applicable rule lives.
+            # A tilt is only defined relative to the coil normal, so it is only
+            # recorded when the operator declared that pose; for x/y/na the
+            # angle is already implied by long_axis and writing a number here
+            # would key those captures differently from every historical one.
+            'tilt_deg': (getattr(self, '{0}_tilt_deg'.format(prefix)).value()
+                         if getattr(self, '{0}_long_axis'.format(prefix)).currentText() == 'z'
+                         else ''),
             # The Notes entry box was dropped in v1.38 (dead weight in the
             # capture flow -- nothing was being typed into it). The key and
             # the corpus 'notes' column stay, always empty, so build_rows()
             # and the session dump's mark_target: line are unchanged.
             'notes': '',
         }
+
+    def _update_tilt_enabled(self, prefix):
+        """Tilt is only meaningful when dim_a was declared along the coil
+        normal, so the spinbox follows the Long axis combo (v1.67). Kept
+        separate from _update_sig_capture_gating() because that one is about
+        whether a file is open, and both conditions have to hold."""
+        tilt = getattr(self, '{0}_tilt_deg'.format(prefix), None)
+        if tilt is None:
+            return   # mid-build
+        is_z = getattr(self, '{0}_long_axis'.format(prefix)).currentText() == 'z'
+        enabled = is_z and (self._editable_sig_path is not None
+                            if prefix == 'sig' else True)
+        tilt.setEnabled(enabled)
+        getattr(self, '{0}_tilt_deg_label'.format(prefix)).setEnabled(enabled)
 
     def _update_sig_repeat_idx_suggestion(self):
         """Auto-increments the Analysis tab's repeat_idx spinbox to the next
@@ -1756,6 +1803,10 @@ class MainWindow(QMainWindow):
             (self.sig_target, 'currentIndexChanged'), (self.sig_distance_mm, 'valueChanged'),
             (self.sig_long_axis, 'currentIndexChanged'),
             (self.sig_medium, 'currentIndexChanged'),
+            # v1.67: tilt joined the placement tuple, so changing it selects a
+            # different placement and must re-run the Repeat # suggestion --
+            # otherwise a 30 deg capture inherits the 0 deg placement's count.
+            (self.sig_tilt_deg, 'valueChanged'),
         ):
             getattr(widget, signal_name).connect(self._update_sig_repeat_idx_suggestion)
 
@@ -4273,6 +4324,7 @@ class MainWindow(QMainWindow):
         self.sig_target.setEnabled(has_file)
         self.sig_distance_mm.setEnabled(has_file)
         self.sig_long_axis.setEnabled(has_file)
+        self._update_tilt_enabled('sig')   # needs has_file AND long_axis == z
         self.sig_medium.setEnabled(has_file)
         self.sig_repeat_idx.setEnabled(has_file)
         self.sp_sig_capture_n.setEnabled(has_file)
@@ -4401,13 +4453,19 @@ class MainWindow(QMainWindow):
                 offset_y_mm=first[idx['offset_y_mm']], medium=first[idx['medium']],
                 repeat_idx=first[idx['repeat_idx']],
                 profile_name=first[idx['profile_name']],
+                # Bounds-guarded (v1.67): `idx` comes from the TOOL's field
+                # list while `first` comes from the FILE, and every corpus
+                # written before features v12 is one column short. An
+                # unguarded read would IndexError on opening any of them.
+                tilt_deg=(first[idx['tilt_deg']]
+                          if len(first) > idx['tilt_deg'] else ''),
             )
         return sigs
 
     @staticmethod
     def _placement_tuple_key(sig):
         """The brief's repeat-disambiguation tuple: (target_id, distance_mm,
-        long_axis, face_normal, offset_x_mm, offset_y_mm, medium) --
+        long_axis, face_normal, offset_x_mm, offset_y_mm, medium, tilt_deg) --
         identifies "the same placement", which is what repeat_idx
         auto-increments against. Accepts either a _scan_editable_signature_
         file() value dict (string fields, from CSV) or a
@@ -4420,8 +4478,14 @@ class MainWindow(QMainWindow):
         normalisation matters since v1.60: rows captured before it carry
         face_normal='z' and the widgets now yield 'na', so without it a
         placement fails to match its own history and repeat_idx restarts at 1
-        (v1.62)."""
-        return tuple(pimd_corpus_check.placement_value(f, sig[f])
+        (v1.62). tilt_deg (v1.67) needs the same treatment from the other
+        direction -- it is absent from every corpus written before it, and
+        PLACEMENT_BLANK_FIELDS makes absent, None and '' one value so those
+        rows keep matching live captures that record no angle.
+
+        .get(), not [], for the same reason: a dict built from a file with no
+        tilt_deg column simply has no such key."""
+        return tuple(pimd_corpus_check.placement_value(f, sig.get(f))
                       for f in pimd_corpus_check.PLACEMENT_FIELDS)
 
     def _reload_editable_signature_list(self):
@@ -4514,7 +4578,8 @@ class MainWindow(QMainWindow):
             long_axis=placement['long_axis'], face_normal=placement['face_normal'],
             offset_x_mm=placement['offset_x_mm'], offset_y_mm=placement['offset_y_mm'],
             medium=placement['medium'], repeat_idx=placement['repeat_idx'], notes=placement['notes'],
-            is_air=(target_id == 'air'), start_idx=0, end_idx=0)
+            is_air=(target_id == 'air'), start_idx=0, end_idx=0,
+            tilt_deg=placement['tilt_deg'])
 
         # Last line of defence against a reused capture_id (see
         # _reload_editable_signature_list): a collision would append the rows
@@ -7699,6 +7764,10 @@ class MainWindow(QMainWindow):
             placement['long_axis'], placement['face_normal'],
             placement['offset_x_mm'], placement['offset_y_mm'], placement['medium'],
             placement['repeat_idx'], placement['notes'],
+            # Appended last (v1.67), matching pimd_features._MARK_TARGET_KEYS --
+            # that parser zips positionally, so older dumps with nine fields
+            # still read correctly and gain a blank tilt.
+            placement['tilt_deg'],
         ])
         self._session_file.write('# mark_target: {0}, {1}'.format(ts, buf.getvalue()))
         self._session_file.flush()
@@ -8072,6 +8141,11 @@ class MainWindow(QMainWindow):
                 # longer read (v1.60). Leaving them unread rather than
                 # migrating the file is the point: a stale persisted
                 # face_normal is exactly what was leaking into captures.
+                # sig_tilt_deg is NOT persisted either, and for the same
+                # reason (v1.67) -- it always opens at 0, so an angle set for
+                # one session cannot silently ride along into the next. Within
+                # a session it holds its value, and it is blanked on write
+                # whenever Long axis is not z, so it cannot reach an x/y row.
                 self.sig_medium.setCurrentText(s.get('sig_medium', 'air'))
 
             self.cb_hm_norm.setCurrentIndex(int(s.get('analysis_hm_norm_idx', 0)))

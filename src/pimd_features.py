@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v11
+# PIMD Feature Extractor (pimd_features.py) v12
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -15,6 +15,7 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v12 tilt_deg column — oblique orientation capture; optional, last in the field list
 #   v11 firmware clock exposed as fw_seconds; FIX frame rate measured on it, not arrival time
 #   v10 pack_v gains age_s (old 2-field form still read); '# soak:' lines parsed
 #   v9 pack_v track + stall lines parsed; pack_v corpus column (optional on read)
@@ -44,6 +45,18 @@ gui_signatures_*.csv, one row per (capture, cell)):
   offset_y_mm      -- int, target centroid offset from coil centre (coil short axis)
   medium           -- air|soil|other
   repeat_idx       -- int >= 1, disambiguates repeated captures of the same placement tuple
+  tilt_deg         -- int 0-90, or blank when not recorded (v12). Tilt of dim_a AWAY
+                      FROM THE COIL NORMAL: 0 = dim_a straight down the coil axis,
+                      90 = dim_a lying in the coil plane. Deliberately redundant with
+                      long_axis at the two ends -- tilt 0 is the same pose as
+                      long_axis=z, tilt 90 the same as long_axis=x/y -- and exists to
+                      express the OBLIQUE poses long_axis cannot. Only meaningful with
+                      long_axis=z; classviz writes it blank otherwise.
+                      Blank and absent are the same statement ("not recorded") and key
+                      identically in the placement tuple, so adding the column
+                      re-groups nothing in a corpus written before it. A recorded 0 is
+                      a real axial capture and is NOT the same as blank.
+                      OPTIONAL on read -- see pimd_corpus_check.OPTIONAL_FIELDS.
   notes            -- free text, per-capture
   pulse_us         -- band pulse width
   threshold_v      -- cell sample threshold
@@ -139,6 +152,13 @@ CORPUS_HEADER_FIELDS = [
     # pimd_corpus_check.OPTIONAL_FIELDS. Both corpora on disk predate it, so
     # requiring it would have made them unreadable the moment it was added.
     'pack_v',
+    # v12. Tilt of dim_a away from the coil normal, degrees, or blank when not
+    # recorded. Same optional-on-read contract as pack_v, and for the same
+    # reason -- every corpus on disk predates it. MUST stay last: classviz's
+    # _scan_editable_signature_file() indexes positionally off this list while
+    # reading files that do not have the column, so appending is safe and
+    # inserting is not.
+    'tilt_deg',
 ]
 CORPUS_HEADER = ','.join(CORPUS_HEADER_FIELDS)
 
@@ -150,7 +170,7 @@ JOINED_CORPUS_HEADER = ','.join(JOINED_CORPUS_HEADER_FIELDS)
 
 WIDE_METADATA_FIELDS = ['session', 'capture_id', 'captured_at', 'target_id', 'short_name',
                          'distance_mm', 'long_axis', 'face_normal', 'offset_x_mm', 'offset_y_mm',
-                         'medium', 'repeat_idx', 'notes']
+                         'medium', 'repeat_idx', 'notes', 'tilt_deg']
 WIDE_SCALAR_FIELDS = ['plateau_amp_mV', 'splithalf_floor', 'quality']
 WIDE_TAIL_FIELDS = ['amp_mean_abs_mV', 'profile_name', 'profile_sha8', 'fw_version',
                      'tool_version', 'supply', 'pack_v']
@@ -343,8 +363,12 @@ def _parse_mark_content(content):
     return datetime.fromisoformat(ts_str.strip()), label.strip()
 
 
+# Positional -- parse_mark_target_line() zips this against the line's fields, so
+# a new key may only be APPENDED. zip() truncates on the shorter old lines and
+# the setdefault()s below fill the gap; inserting mid-list would silently
+# re-interpret every session dump already on disk.
 _MARK_TARGET_KEYS = ['target_id', 'distance_mm', 'long_axis', 'face_normal', 'offset_x_mm',
-                     'offset_y_mm', 'medium', 'repeat_idx', 'notes']
+                     'offset_y_mm', 'medium', 'repeat_idx', 'notes', 'tilt_deg']
 
 
 def parse_mark_target_line(content):
@@ -370,6 +394,10 @@ def parse_mark_target_line(content):
     d.setdefault('face_normal', 'na')
     d.setdefault('medium', 'air')
     d.setdefault('notes', '')
+    # v12: '' rather than 0 -- blank means "not recorded", which is a different
+    # statement from a genuine 0 deg (axial) capture, and the placement key
+    # depends on the two not being conflated.
+    d['tilt_deg'] = d.get('tilt_deg', '').strip()
     return datetime.fromisoformat(ts_str.strip()), d
 
 
@@ -624,6 +652,9 @@ class Plateau:
     is_air: bool
     start_idx: int
     end_idx: int              # [start_idx, end_idx) into the flagged-dropped frame arrays
+    # v12. Degrees, or '' when not recorded. Defaulted so the ~9 construction
+    # sites across this module and pimd_classviz did not have to change.
+    tilt_deg: object = ''
 
 
 def parse_mark_label(raw_text):
@@ -685,7 +716,7 @@ def segment_from_marks(sess, frame_rate_hz, settle_s, targets):
                 long_axis=mt['long_axis'], face_normal=mt['face_normal'],
                 offset_x_mm=mt['offset_x_mm'], offset_y_mm=mt['offset_y_mm'], medium=mt['medium'],
                 repeat_idx=mt['repeat_idx'], notes=mt['notes'], is_air=is_air,
-                start_idx=start_idx, end_idx=end_idx))
+                start_idx=start_idx, end_idx=end_idx, tilt_deg=mt.get('tilt_deg', '')))
             continue
 
         # Legacy fallback: no structured companion line for this mark. 'air'
@@ -916,6 +947,19 @@ def format_distance(x):
     return str(int(xf)) if xf.is_integer() else format_value(xf)
 
 
+def format_tilt(x):
+    """tilt_deg for the CSV (v12): degrees, or '' when not recorded.
+
+    None and '' both mean "no angle was recorded" and must render the same,
+    because pimd_corpus_check's placement key compares the stored string and a
+    corpus written before this column reads back as ''. A recorded 0 is a real
+    axial capture and must NOT collapse to blank."""
+    if x is None or (isinstance(x, str) and not x.strip()):
+        return ''
+    xf = float(x)
+    return str(int(xf)) if xf.is_integer() else format_value(xf)
+
+
 def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV, plateau_amp_mV,
                splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
                fw_version, tool_version, supply, session_path, pack_v=None):
@@ -939,6 +983,7 @@ def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV,
             'long_axis': plateau.long_axis, 'face_normal': plateau.face_normal,
             'offset_x_mm': str(int(plateau.offset_x_mm)), 'offset_y_mm': str(int(plateau.offset_y_mm)),
             'medium': plateau.medium, 'repeat_idx': str(int(plateau.repeat_idx)), 'notes': plateau.notes,
+            'tilt_deg': format_tilt(plateau.tilt_deg),
             'pulse_us': format_value(c['pulse_us']), 'threshold_v': format_value(c['threshold_v']),
             'delta_mV': format_value(delta_mV[ch]), 'plateau_amp_mV': format_value(plateau_amp_mV),
             'splithalf_floor': format_value(splithalf_floor), 'quality': quality,
@@ -964,6 +1009,7 @@ def build_wide_row(session_stem, capture_id, captured_at, plateau, delta_mV, pla
         'long_axis': plateau.long_axis, 'face_normal': plateau.face_normal,
         'offset_x_mm': str(int(plateau.offset_x_mm)), 'offset_y_mm': str(int(plateau.offset_y_mm)),
         'medium': plateau.medium, 'repeat_idx': str(int(plateau.repeat_idx)), 'notes': plateau.notes,
+        'tilt_deg': format_tilt(plateau.tilt_deg),
         'plateau_amp_mV': format_value(plateau_amp_mV), 'splithalf_floor': format_value(splithalf_floor),
         'quality': quality, 'amp_mean_abs_mV': format_value(amp_mean_abs_mV),
         'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',

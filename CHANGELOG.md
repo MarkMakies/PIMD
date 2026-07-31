@@ -1,3 +1,103 @@
+### src/pimd_classviz.py — v1.67 — Tilt (°) capture input for oblique poses
+
+`long_axis` can only express 0° or 90° to the coil axis, so every capture in every corpus
+on disk sits at one of those two poses. That is why the 2026-07-31 analysis could confirm
+the two-basis model's rank-2 structure and its x ≈ y prediction (cosine 0.998) but **not
+its actual content** — that an oblique orientation is a weighted mix landing on the arc
+between the extremes. Nothing in the capture path could record an intermediate angle.
+
+New **Tilt (°)** spinbox (0–90, step 5) in the Analysis tab's Signatures placement row,
+immediately right of Long axis. It is enabled only when **Long axis is `z`** — a tilt is
+defined relative to the coil normal, so it is meaningless against the others — *and* a
+signature file is open; `_update_tilt_enabled()` is kept separate from
+`_update_sig_capture_gating()` because both conditions have to hold and they change
+independently. `_placement_from_widgets()` is the single place the rule lives: it emits
+the spinbox value for `z` and `''` for everything else, so a 30° left over from an
+oblique run cannot reach an x/y row.
+
+**Deliberately not persisted to settings.** It reopens at 0 every launch. A persisted
+placement combo silently riding along on every later capture is exactly what got
+`face_normal` removed at v1.60, and the same trap is available here; holding the value
+within a session but not across launches keeps the convenience without it.
+
+`tilt_deg` joins the placement tuple, so the Repeat # suggestion had to be re-wired to
+the spinbox's `valueChanged` — otherwise a 30° capture inherits the 0° placement's count
+and the two poses collide as repeats of one placement.
+
+**One guard is load-bearing.** `_scan_editable_signature_file()` builds its column index
+from the *tool's* `CORPUS_HEADER_FIELDS` while reading rows from the *file*, and every
+corpus on disk is one column short of the grown list. Verified: an unguarded
+`first[idx['tilt_deg']]` raises `IndexError` on all three real files
+(v3 26 cols, v1 25, scratch 25), i.e. opening any of them would have broken the signature
+list. Guarded, they read `''`. `_placement_tuple_key()` moved to `.get()` for the same
+reason. `_append_mark_target()` appends the field last, matching
+`pimd_features._MARK_TARGET_KEYS`. Header title line also corrected — it still read
+v1.63 against `APP_VERSION` 1.66. (2026-07-31)
+
+---
+
+### src/pimd_features.py — v12 — tilt_deg column
+
+New `tilt_deg` column: tilt of `dim_a` away from the coil normal in degrees, or blank when
+not recorded. **0 = `dim_a` down the coil axis** (the same pose as `long_axis=z`),
+**90 = in the coil plane** (the same pose as `x`/`y`). The two ends are deliberately
+redundant with `long_axis`; the column exists for the angles in between.
+
+Appended **last** in `CORPUS_HEADER_FIELDS`, and that is a constraint rather than a
+preference: `pimd_classviz._scan_editable_signature_file()` indexes positionally off this
+list while reading files that lack the column, so appending is safe and inserting would
+silently misread every corpus on disk. Same reasoning for `_MARK_TARGET_KEYS`, which
+`parse_mark_target_line()` zips positionally — appending leaves old nine-field lines
+parsing correctly and gaining a blank tilt (verified both ways).
+
+`Plateau` gains the field with a default, so none of the ~9 construction sites across this
+module and classviz needed touching, and the air/placeholder/scratch paths keep writing
+blank. New `format_tilt()` renders `None` and `''` identically as `''` while preserving a
+recorded `0` — the distinction the placement key depends on. Optional on read, like
+`pack_v` and for the same reason: every corpus on disk predates it. (2026-07-31)
+
+---
+
+### src/pimd_corpus_check.py — v1.9 — tilt_deg joins the placement tuple
+
+`tilt_deg` added to `PLACEMENT_FIELDS`, so 0°/30°/60° at one distance are three distinct
+placements with independent `repeat_idx` sequences rather than three repeats of one — the
+whole point of recording the angle. Added to `OPTIONAL_FIELDS`.
+
+The delicate part is that an optional field in the placement key can present as an absent
+column, a missing dict key, `None` or `''`, and all four are the same physical statement.
+New `PLACEMENT_BLANK_FIELDS` collapses them to `''`; `placement_key()`/`target_key()` moved
+from `sig[f]` to `sig.get(f)` so a dict built from a corpus without the column does not
+`KeyError`. This is the failure `PLACEMENT_CONSTANT_FIELDS` was created to prevent arriving
+by a different route — without it every historical placement would split in two and every
+`repeat_idx` restart.
+
+**A recorded `0` is not blank.** 0° is a real axial capture; conflating it with "no angle
+recorded" would merge the oblique study's 0° base with every `long_axis=x/y` capture of the
+same target.
+
+Verified rather than argued: `pimd_corpus_check` output on both corpora is **byte-identical**
+to the pre-change baseline, all 377 checks and all 134 repeat-consistency rows. (2026-07-31)
+
+---
+
+### src/data/corpora/gui_signatures_targets_v3_20260728_142316.csv — migrated for tilt_deg
+
+Corpus append writes **the file's own header columns**, not the tool's (classviz v1.65), so
+appending an oblique capture to a file with no `tilt_deg` column would have silently dropped
+the angle — the feature would appear to work and record nothing. The active v3 corpus is
+therefore migrated in place: `tilt_deg` appended to the header, one blank cell added to each
+of 10 710 rows. Backup kept alongside the existing ones as `.bak-*-pre-tilt`.
+
+Migrating rather than starting a fresh file keeps the corpus in one piece, which the
+2026-07-31 analysis supports directly — the between-session noise component measured **zero**
+across three days and eight sessions, so captures made before and after this line are
+comparable. Verified: every pre-existing column byte-identical across all 10 710 rows, and
+`pimd_corpus_check` output identical to the pre-migration baseline. The v1 corpus and the
+scratch file are left unmigrated; they still load, reading blank. (2026-07-31)
+
+---
+
 ### findings — v3 corpus analysis: the two-basis model holds, and "crossover" is orientation
 
 *2026-07-31 · `gui_signatures_targets_v3_20260728_142316.csv` · 170 captures / 25 targets over

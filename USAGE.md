@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.26
+# PIMD — Usage Guide (USAGE.md) v1.27
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,10 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.27 2026-07-31 classviz v1.66 → v1.67, features v11 → v12, corpus_check v1.8 → v1.9.
+                §5's Analysis bullet: the new Tilt (°) input and the tilt_deg column —
+                zero reference, the enabled-only-when-z rule, its place in the
+                placement tuple, and the pre-v1.67 corpus migration it needs.
 v1.26 2026-07-30 classviz v1.65 → v1.66, features v9 → v10. §5's Pack V sub-bullet:
                 the logged line now carries age_s. New §5 sub-bullet for the
                 '# soak:' run/idle lines and what idle_before_s does NOT mean.
@@ -302,7 +306,7 @@ validated against the target registry.
 - **Analysis tab:** live comparison charts, a **Signatures** group (signature file
   management, registry-validated target combo from `targets_v1.csv` via
   `pimd_target_check.py`, structured placement fields — distance_mm, long_axis,
-  medium, repeat_idx — a per-parameter green/amber/red readout and Save/Delete;
+  tilt_deg, medium, repeat_idx — a per-parameter green/amber/red readout and Save/Delete;
   each signature row reads `target @distance  axis  r<n>  amp=… SNR=… [quality]`,
   v1.61, so the several captures that share a target and distance are tellable
   apart, and its **colour is per target** — one hue per `target_id`, shaded and
@@ -368,6 +372,28 @@ validated against the target registry.
   `dim_a` points: `x` = coil long axis (520 mm), `y` = coil short axis (360 mm, the rover's
   direction of travel), `z` = coil normal (vertical, target standing at right angles to
   the coil plane).
+  **`Tilt (°)` records oblique poses (v1.67).** `long_axis` can only say 0° or 90° to the
+  coil axis, which is why the 2026-07-31 analysis could confirm the two-basis model's
+  rank-2 structure but not its mixing law. The spinbox is enabled only when **Long axis
+  is `z`** (a tilt is defined relative to the coil normal) and *a signature file is open*,
+  and it writes the new `tilt_deg` corpus column: **0 = `dim_a` straight down the coil
+  axis** — the same pose as `long_axis=z` — **90 = `dim_a` lying in the coil plane**, the
+  same pose as `x`/`y`. The two ends are deliberately redundant with `long_axis`; the
+  value of the column is the angles in between.
+  `tilt_deg` **joins the placement tuple**, so 0°/30°/60° at one distance are three
+  placements with independent `Repeat #` sequences rather than three repeats of one.
+  It is written **blank** for any other `long_axis`, and blank/absent/unset all key
+  alike (`pimd_corpus_check.PLACEMENT_BLANK_FIELDS`) so adding the column re-grouped
+  nothing in the corpora written before it — but a **recorded `0` is a real axial
+  capture and is not the same as blank**. Like `pack_v` it is an **optional** column
+  (`OPTIONAL_FIELDS`), so older corpora still load. It is deliberately **not persisted
+  to settings** — it reopens at 0 every launch, so an angle set once cannot silently
+  ride along into a later session the way `face_normal` did.
+  **A corpus file written before v1.67 must be migrated before it can record a tilt:**
+  corpus append writes the *file's own* header columns (v1.65), so appending to a file
+  with no `tilt_deg` column silently drops the angle. `gui_signatures_targets_v3_20260728_142316.csv`
+  has been migrated (backup kept as `.bak-*-pre-tilt`); any other file needs the column
+  appended to its header and a blank cell to every row, or start a fresh file.
   - **Trigger Levels (v1.51–v1.54).** A five-gauge column at the top-left of the
     Analysis tab's chart area, for setting the Training thresholds against the live
     signal instead of guessing and then debugging a cycle. Each bar carries a dashed

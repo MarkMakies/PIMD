@@ -2,7 +2,7 @@
 """
 pimd_corpus_check.py — corpus-level acceptance checks for a PIMD signature corpus.
 
-Version: 1.8
+Version: 1.9
 
 Reads the v1.32+ target-registry corpus schema (the CORPUS_HEADER schema that
 pimd_classviz.py's Training capture and pimd_features.py's corpus builder both
@@ -10,10 +10,12 @@ write). The authoritative column list is pimd_features.CORPUS_HEADER_FIELDS;
 real files live at src/data/corpora/gui_signatures_*.csv. Capture identity is
 (session, capture_id); the *physical* identity used for cross-capture checks is
 the placement tuple (target_id, distance_mm, long_axis, face_normal,
-offset_x_mm, offset_y_mm, medium) -- mirrors pimd_classviz._placement_tuple_key,
-which imports the field list and the per-field normalisation from here so the
-two cannot drift. face_normal and the offsets stopped being capture inputs at
-classviz v1.60 and are normalised when keying (PLACEMENT_CONSTANT_FIELDS).
+offset_x_mm, offset_y_mm, medium, tilt_deg) -- mirrors
+pimd_classviz._placement_tuple_key, which imports the field list and the
+per-field normalisation from here so the two cannot drift. face_normal and the
+offsets stopped being capture inputs at classviz v1.60 and are normalised when
+keying (PLACEMENT_CONSTANT_FIELDS); tilt_deg (v1.9) is optional, so its
+unrecorded forms are normalised together (PLACEMENT_BLANK_FIELDS).
 
 Distances are read from the data (whatever distance_mm values were captured),
 not hardcoded -- a target seen at >= 2 distances gets shape-invariance rows and
@@ -61,7 +63,7 @@ CROSS_CAMPAIGN_COS_MIN = 0.99
 # distance_mm and keys "the same physical target across distances" (used by the
 # shape-invariance and falloff checks).
 PLACEMENT_FIELDS = ('target_id', 'distance_mm', 'long_axis', 'face_normal',
-                    'offset_x_mm', 'offset_y_mm', 'medium')
+                    'offset_x_mm', 'offset_y_mm', 'medium', 'tilt_deg')
 TARGET_FIELDS = tuple(f for f in PLACEMENT_FIELDS if f != 'distance_mm')
 
 # Fields that stopped being capture inputs at classviz v1.60 and are written
@@ -77,14 +79,28 @@ TARGET_FIELDS = tuple(f for f in PLACEMENT_FIELDS if f != 'distance_mm')
 # and neither can be entered any more. Revisit if that stops being true.
 PLACEMENT_CONSTANT_FIELDS = {'face_normal': 'na', 'offset_x_mm': '0', 'offset_y_mm': '0'}
 
+# Fields whose "not recorded" states must all key alike (v1.9). tilt_deg is
+# OPTIONAL, so the same physical placement can present as an absent column (any
+# corpus written before features v12), a missing dict key (a caller built before
+# it), None, or ''. Collapsing all four to '' is what lets the column be added
+# without re-grouping a single historical placement -- the failure mode
+# PLACEMENT_CONSTANT_FIELDS exists to prevent, arriving by a different route.
+#
+# A RECORDED 0 is not blank: 0 deg is a real axial capture, and conflating it
+# with "no angle recorded" would merge the oblique study's 0 deg base with every
+# long_axis=x/y capture of the same target.
+PLACEMENT_BLANK_FIELDS = {'tilt_deg'}
+
 
 def placement_value(field, value):
-    """The keying value for one placement field -- the stored value, or the
-    v1.60 constant for the three fields that no longer vary. Shared with
-    pimd_classviz._placement_tuple_key() so the two tools cannot disagree
-    about what 'the same placement' means."""
+    """The keying value for one placement field -- the stored value, the v1.60
+    constant for the three fields that no longer vary, or '' for an unrecorded
+    optional field. Shared with pimd_classviz._placement_tuple_key() so the two
+    tools cannot disagree about what 'the same placement' means."""
     if field in PLACEMENT_CONSTANT_FIELDS:
         return PLACEMENT_CONSTANT_FIELDS[field]
+    if field in PLACEMENT_BLANK_FIELDS and (value is None or not str(value).strip()):
+        return ''
     return str(value)
 
 
@@ -102,7 +118,9 @@ CORPUS_FIELDS = pimd_features.CORPUS_HEADER_FIELDS
 # were written; requiring it would have made them unreadable the moment it was
 # added, for a column that is blank whenever nobody measured a voltage anyway.
 # Additive schema growth belongs here rather than in a migration.
-OPTIONAL_FIELDS = {'pack_v'}
+# `tilt_deg` (features v12) is optional for the same reason, and additionally is
+# blank on every capture that is not an oblique one.
+OPTIONAL_FIELDS = {'pack_v', 'tilt_deg'}
 REQUIRED_FIELDS = set(CORPUS_FIELDS) - OPTIONAL_FIELDS
 
 
@@ -201,6 +219,10 @@ def load_corpus(path):
             # same. No check consumes it yet; it is carried so one can.
             pack_v=(float(field('pack_v'))
                     if 'pack_v' in idx and field('pack_v').strip() else None),
+            # v1.9: kept as a STRING, not a float -- placement_value() compares
+            # stringified values, and '' must survive as '' rather than becoming
+            # 'None'. Absent column and blank cell both give ''.
+            tilt_deg=(field('tilt_deg') if 'tilt_deg' in idx else ''),
         ))
 
     n_cells = {len(s['shape']) for s in sigs}
@@ -233,12 +255,18 @@ def label_of(sig):
     return sig['short_name'] or sig['target_id']
 
 
+# .get(), not [] (v1.9): an OPTIONAL placement field may be absent from a dict
+# built by a caller that predates it, and PLACEMENT_BLANK_FIELDS already defines
+# a missing value as equivalent to a blank one. A required field that goes
+# missing is a real bug, but it would surface as a mismatched key rather than a
+# KeyError -- accepted, because the alternative is that opening any older corpus
+# raises instead of reading.
 def placement_key(sig):
-    return tuple(placement_value(f, sig[f]) for f in PLACEMENT_FIELDS)
+    return tuple(placement_value(f, sig.get(f)) for f in PLACEMENT_FIELDS)
 
 
 def target_key(sig):
-    return tuple(placement_value(f, sig[f]) for f in TARGET_FIELDS)
+    return tuple(placement_value(f, sig.get(f)) for f in TARGET_FIELDS)
 
 
 def one_per_distance(sigs):
