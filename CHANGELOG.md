@@ -1,3 +1,188 @@
+### findings — v3 corpus analysis: the two-basis model holds, and "crossover" is orientation
+
+*2026-07-31 · `gui_signatures_targets_v3_20260728_142316.csv` · 170 captures / 25 targets over
+eight sessions 07-28 → 07-30 · `cal_63_air_bat_v3` sha `4a2352d2` · fw 4.26 · 6S battery ·
+gate = SNR ≥ 5 on `splithalf_floor` unless stated. Compared throughout against the 2026-07-23
+`targets_v1` corpus (66 captures, `cal_63_air_v2`, bench PSU).*
+
+**1. The Pasion–Oldenburg two-basis model is supported, and the coil-frame prediction is
+confirmed.** Placement records `long_axis` in the coil frame: **z = axial** (dim_a down the
+coil's winding axis), **x and y = transverse** (both in the coil plane, differing by a 90°
+in-plane rotation). If a signature is a weighted mix of one axial and one transverse basis
+shape, then x and y must be the *same* mix and every target's orientation set must be rank 2.
+
+Both hold. Across the five targets holding both x and y, `cos(x̄, ȳ) = 0.998` median, minimum
+0.983 — the two transverse orientations are indistinguishable *even for a 210 mm spanner*,
+where a 90° in-plane rotation is a large physical change. All the variation sits on the
+transverse↔axial contrast, and it is graded by geometry:
+
+| target | cos(transverse, axial) | rank-1 → rank-2 RMS residual | own repeat noise |
+|---|---|---|---|
+| Cu_pipe_01 (tube) | 0.991 | 0.137 → 0.109 | 0.114 |
+| Fe_Zn_gal_rhs_01 (tube) | 0.982 | 0.171 → 0.144 | 0.154 |
+| Fe_spanner_01 (irregular) | 0.986 | 0.183 → 0.131 | 0.144 |
+| Al_plate_01 (plate) | 0.950 | 0.153 → 0.099 | 0.042 |
+| Cu_Zn_brass_block_01 | 0.935 | 0.180 → 0.078 | 0.158 |
+| Fe_SS_disc_01 (thin disc) | 0.776 | 0.338 → **0.043** | 0.062 |
+| Fe_Cast_iron_trivet_01 (thin disc) | 0.736 | 0.446 → 0.266 | 0.320 |
+| Sn_Pb_solder_spool_01 (see §5) | **−0.298** | 0.602 → 0.127 | 0.201 |
+
+Every anisotropic target collapses to its own electronics-noise floor at rank 2, and rank 3
+buys nothing. Rod-like targets are already rank 1 — they have no measurable orientation
+dependence at all, which the model permits (axial ≈ transverse basis). **`Al_plate_01` is the
+only apparent counterexample** (rank-2 residual 0.099 against a 0.042 noise reference), and it
+is not one: its residual correlates −0.82 with SNR and +0.54 with distance, its noise reference
+is estimated from four high-SNR placements only, and within its best-sampled orientation
+(ax = y, n = 9, SNR 7.7–189) it is rank 1 at 0.048. The excess is the marginal 300/360 mm
+captures sitting on the gate.
+
+**What this corpus cannot test, and it is the whole remaining question.** `long_axis` only ever
+takes x, y or z, so **every capture is at 0° or 90° to the coil axis.** Rank-2 structure and
+x ≈ y are necessary consequences of the two-basis model but they are also consequences of
+"there are two placements and they differ". The model's actual content — that an oblique
+orientation is a *weighted mix* landing on the arc between the two extremes — is untested,
+because no oblique placement exists. **Test:** capture one strongly anisotropic target
+(`Fe_Cast_iron_trivet_01` or `Fe_SS_disc_01`, cos 0.74–0.78, the largest lever in the set) at
+~30° and ~60° at 60 mm, and check the fitted mixing weight against cos²θ. Two placements per
+target would settle it.
+
+**2. "Ferrous vs crossover" is an orientation coordinate, not a material one.** This is the
+session's main reframe. The early-band sign — which is what separates `ferrous` from
+`crossover` in `pimd_shape.family()` — splits by *placement*, not by target:
+
+| orientation | ferrous-vs-crossover accuracy (gated) |
+|---|---|
+| ax = y (transverse) | 90.9% (n = 22) |
+| ax = x (transverse) | 75.0% (n = 16) |
+| ax = z (**axial**) | **53.8%** (n = 13) |
+
+Every crossover→ferrous miss in the corpus is an ax = z capture. `Fe_Cast_iron_trivet_01` is
+the clean demonstration: lying flat (ax = x) it reads `crossover` at 29–36 µs crossing with
+early −50 to −102 ×10⁻³; stood on edge (ax = z) it reads `ferrous`, crossing pinned at the
+8 µs rail, early +7 to +47 — and it is 2.4× louder on edge (50.1 mV against 20.9 mV L2 at
+60 mm). That is what a 3 mm-thick 75 mm disc should do: face-on, flux threads the disc and the
+eddy loop has the full 75 mm of area, so the fast negative eddy term dominates the early bands;
+edge-on the loop area collapses to the 3 mm thickness, the eddy term goes with it and the
+magnetic term is left exposed. The spanner fails the other way — it reads `crossover` broadside.
+
+So the early axis measures **presented eddy-loop area** = geometry × orientation, and cannot be
+read as a material subclass. Decay persistence does not rescue the split either: ferrous
+median 4.20, crossover median 4.82, fully overlapping. Recommend the tier be renamed and
+re-scoped rather than its accuracy chased.
+
+**3. What survives the reframe is stronger than the old family verdict.** The *late*-band sign
+— iron-bearing vs non-ferrous — is the robust axis, and it does not need the gate:
+
+| tier | rule | accuracy |
+|---|---|---|
+| **1 — iron-bearing vs non-ferrous** | sign of late-band mean | **97.2%** (141/145) **ungated**; 98.3% gated |
+| 2 — ferrous vs crossover | sign of early-band mean | 76.5% (39/51) gated — see §2 |
+| combined 3-class (the v1 comparison) | current `family()` | 88.1% gated, 85.5% ungated |
+
+Against the 2026-07-23 epoch's 100% gated / 95.3% ungated three-class figure this reads as a
+regression, and it is not one: the v1 corpus held **no ax = z captures of any crossover
+target**. It sampled only the orientation where the early sign happens to work. The v3 corpus
+is 2.6× larger and deliberately spans orientation, so it exposes a failure mode the earlier
+number could not see. Decay persistence remains a clean independent second opinion on tier 1 —
+non-ferrous 0.65–1.80, iron-bearing 2.12–9.02, **no overlap** (excluding the two contaminated
+captures of §5). The `ferrite_toroid_01` contradiction reproduces: positive by sign, 1.51 by
+persistence — still the mineralised-ground preview.
+
+A noise-scaled dead band on the early axis works as anticipated but is a coverage trade, not a
+fix, since the misses are physical rather than marginal: 1.5σ → 90.7% on 92% decided; 3σ →
+95.7% on 80% decided.
+
+**4. Placement variation is below the electronics noise floor — it is not the limiting factor.**
+Repeats at an identical placement tuple were captured without moving the target, so they
+measure electronics alone; the same tuple recaptured in a *later session* necessarily involved
+re-placing it. The two distributions are the same:
+
+| | n | median cos | p10 | min | median angle |
+|---|---|---|---|---|---|
+| same session (never moved) | 46 | 0.9894 | 0.9550 | 0.577 | 8.3° |
+| cross session (**re-placed**) | 37 | 0.9899 | 0.9675 | 0.948 | 8.1° |
+
+The re-placed set is if anything *tighter* in the tail. Across 11 tuples spanning four targets,
+manual re-placement at a nominal (distance, orientation) contributes nothing measurable on top
+of the measurement noise. Amplitude repeatability at a fixed placement: CV median 2.6%, p90
+9.6% (consistent with the ~6% in the 07-28 entry).
+
+Shape scatter does **not** saturate — it tracks SNR all the way down (13.4° at SNR 5–10,
+7.8° at 10–20, 4.8° at 20–40, 2.6° at 40–100, 1.2° above 100). But it runs **2.4× the
+isotropic-additive-noise prediction** built from `splithalf_floor` in 90% of pairs, which is
+the same factor the air captures show directly (across-capture L2 4.03 mV against a median
+`splithalf_floor` of 1.82 mV, ×2.2). **`splithalf_floor` understates reproducibility noise by
+roughly 2×**, because it is a within-capture short-timescale statistic. Practical consequence:
+the SNR ≥ 5 gate is really a reproducibility gate of ≈ 2.5–3.5, which is why raising it keeps
+paying.
+
+**5. Two data-integrity items found, both isolated and both needing an operator decision.**
+
+- **`Sn_Pb_solder_spool_01` is a different physical object across the epoch boundary.**
+  `targets_v3.csv`'s own header records "changed solder roll", and the data agrees
+  emphatically: cross-epoch cosine of the mean shapes is **+0.143**, against ≥ 0.95 for every
+  other matched target. In v1 it read textbook non-ferrous (early −94, late −130, never
+  crosses, persistence 0.88). In v3 it reads non-ferrous end-on (ax = z) but **ferrous**
+  broadside (ax = y: early +31, late +166, crossing at the 8 µs rail, persistence 4.28), with
+  cosine **−0.3 between its own two orientations** — the largest orientation effect in the
+  corpus by a wide margin. The registry row still says `magnet_test = none`,
+  `material_class = solder_sn_pb`, which cannot be right for an object behaving this way; a
+  steel spool core is the obvious candidate. **Actions:** magnet-test the new roll and correct
+  the registry; and since `target_id` must never be reused (registry rule), the new object
+  needs its own id, with the v1 captures left pointing at the old one. All cross-epoch
+  comparison for this id is invalid until then. It is excluded from the aggregates above.
+- **One rogue capture: `Fe_Cast_iron_trivet_01` @ 120 mm, ax = x, r1 (07-28T16:30).** Cosine
+  0.33–0.68 to every other trivet capture *including its own r2 sibling at 0.577*; persistence
+  1.15 against 2.6–4.4 for the rest; late-band mean +70 against +116…+155. It passes both
+  quality gates — stamped `ok`, SNR 16.5 — and it single-handedly sets the worst within-target
+  cross-distance cosine in the corpus (0.591, against a 0.985 median) and inflates the trivet's
+  noise reference from ~0.13 to 0.320. Air-reference staleness is the leading suspect (§17.4:
+  a reference older than ~10 s rivals a weak target) but the corpus carries no air age, so this
+  cannot be settled from the file. **Neither gate catches it; a within-placement consistency
+  check between repeats would.**
+
+**6. The epoch change is a coherent one-parameter shift; nothing needs re-labelling.** No target
+changed its majority family verdict between `cal_63_air_v2` and `cal_63_air_bat_v3`. The early
+and late band-range means both moved **+5.2 ×10⁻³ median** (positive), and every crossing width
+that is interior to the ladder in both epochs moved **shorter, ratio 0.76 median** — trivet
+34 → 24 µs, SS disc 31 → 18, gal RHS 21 → 19, gal pipe 17 → 13. Direction and sign are what the
+profile's own delay re-anchoring predicts: v3 samples 40–144 ns *later*, the fast negative eddy
+term has decayed further by the sample instant, so every band-mean moves positive and the
+negative→positive crossing arrives at a shorter pulse width. The shift lands hardest on the
+crossover family because that is where |early| is smallest. Amplitude moved by family, not by
+gain: non-ferrous ×0.67–0.89 (Al plate, Cu pipe), iron-bearing ×1.28–1.79 (trivet, ferrite,
+SS disc, shackle) — same explanation, and not a supply effect, which would scale everything one
+way. **Crossing widths are therefore per-epoch quantities and the §17.6 ladder values need
+restating against v3.**
+
+**7. Noise: the corpus's 19 air captures are the best floor probe in the record, and they say
+the between-session component is zero.** Pooling within-session per-cell σ against the
+all-captures σ gives L2 4.24 mV vs 4.03 mV — **no measurable session-to-session offset** across
+three days and eight sessions. Captures from different days are directly comparable, which is
+what a training corpus needs.
+
+The floor is not flat, and the dominant feature is **not** the (9 µs, 4.9 V) corner of the
+07-28 entry. Per-cell σ over the 19 air captures puts **46% of all noise energy in the 3.80 V
+column alone** (column L2 2.85 mV against 0.37–1.48 for the other eight), concentrated at long
+pulse widths — (100 µs, 3.80 V) = 1.91 mV, (45 µs, 3.80 V) = 1.23, (100 µs, 4.40 V) = 1.02.
+The three corner cells carry 7%. The two findings are not in conflict: the 07-28 corner came
+from matched target pairs within one afternoon, this is across-capture σ spanning the campaign,
+and the 3.80 V excess is **entirely confined to the fresh-pack and cold-start captures** —
+21:17 at 24.40 V reads 5.55 mV on that column, 22:34 at 23.69 V reads 4.39, the 09:39/09:52
+cold pair read 4.85/6.15, while every settled capture in the 21.1–23.4 V window reads
+0.64–2.06. That is §17.13's moving-zone model showing up in target-free data, and it means
+**the 46% is a pack-state artefact that operator discipline already removes**, not a property
+of the profile. Air captures at 23.36 V *after* a long soak read clean (0.64, 1.56),
+consistent with the transition band being soak-sensitive rather than voltage-fatal.
+
+Aggregate floor comparison against the v1 epoch is unfavourable at face value — median
+`splithalf_floor` 1.245 → 1.784 mV, and matched (target, distance) SNR down ×0.73 median — but
+this is composition plus the pack-state tail above, not a regression in the rebuilt supply:
+the 07-28 session opens at 1.25 median, indistinguishable from v1, and the settled air captures
+close at 0.90–0.97. (2026-07-31)
+
+---
+
 ### DESIGN.md — 1.12 — audit pass: corrections against the latest bench data
 
 Human-directed, read-only rule suspended as for a §18 pass. **Not** a consolidation — no new
