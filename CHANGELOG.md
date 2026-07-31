@@ -1,3 +1,179 @@
+### DESIGN.md — 1.13.1 — post-consolidation corrections (§18)
+
+Human-directed, read-only rule suspended per §18. **Not a consolidation and no new bench data** —
+this folds in the four entries below, all of which are same-day desk work on defects 1.13 had
+itself recorded as *known but not fixed*. Doc-rev 1.13.1 rather than 1.14, matching the 1.9.1 /
+1.8.1 precedent for a correction pass.
+
+**Why it was needed immediately rather than at the next §18.** 1.13 shipped three statements that
+the same day's code changes made false — §14.12 "recorded there and not fixed", and two §15 rows
+carrying "Known defect … not fixed". A curated snapshot that describes fixed defects as open is
+worse than one that lags, because a reader has no way to tell which claims are stale.
+
+**Sections changed.** Header → versions classviz **v1.69**, delaycal **v1.30**, features **v14**;
+Doc-rev 1.13.1, keeping 1.13's summary as a one-line `Previous:` tail rather than a chain.
+**§14.12** rewritten from an open problem to a resolved one, carrying the measured before/after
+(61 of 4 079 windows now refused on the 07-29 stall dump; worst case 101 s / 14× nominal, from
+which the old path drew 1 716 µV of drift as noise; the glitch half verified by injection at
+334× → 1.00× because all 12 dumps hold **zero** mid-run glitch frames). **§15** classviz,
+features and delaycal rows carry the fixes and both "Known defect" notes are gone. **§17.15**'s
+closing line updated — the change it called for was made.
+
+**New §14.15 — both offline acceptance gates fail on the current corpus, and neither failure is a
+regression.** This is the one genuinely outstanding item and it needs an operator decision, so it
+is recorded as an open problem rather than quietly fixed. `pimd_shape --selftest` reads FAIL (46)
+against v3 and PASS against v1 because its expectations are hard-coded from the 2026-07-23
+`cal_63_air_v2` analysis and **38 of the 46 are the crossing ladder**, which §17.14 has just shown
+to be per-epoch — so §16's documented command has been wrong since the registry moved to v3.
+Three fixes are possible and none is obviously right (point back at v1 / re-derive against v3 /
+parameterise by epoch), and the trade-offs are recorded with it. `pimd_corpus_check`'s 411 checks
+/ 229 FAIL is **not diagnosed** and is written as such — consistent in kind with §17.14's own
+measurements, but not assumed to be them. **§16 carries a caveat on both commands** and its
+selftest line now points at the v1 corpus, which is the only invocation that currently means
+anything, until §14.15 is settled.
+
+**Nothing dropped, no content removed.** (2026-07-31)
+
+---
+
+### findings — the documented `pimd_shape --selftest` command fails, and §17.14 says why
+
+Found while regression-testing the v1.69/v1.30/v14 fixes, **pre-existing and unrelated to them**
+(identical output with those changes stashed). Recorded, not fixed — the fix is a judgement call
+about what the acceptance test is for.
+
+`DESIGN §16` instructs:
+
+```
+python pimd_shape.py --selftest data/corpora/gui_signatures_targets_v3_20260728_142316.csv
+```
+
+That reads **FAIL (46 problems)**. Against the v1 corpus it reads **PASS**. The expectations are
+hard-coded from the 2026-07-23 `cal_63_air_v2` analysis, and 38 of the 46 are item 3 — the
+**crossing ladder**, which §17.14 has just established is a **per-epoch quantity**: under v3 every
+interior crossing moves shorter by ×0.76 median, so `Fe_SS_disc_01 @60` reads 18.59 µs against a
+hard-coded `30.6 ± 1.5`. The test is not detecting a regression; it is correctly reporting that
+the corpus it was pointed at belongs to a different epoch from its expectations. Item 4's two
+failures are the same story (`Fe_Cast_iron_trivet_01 @120` decay 1.15 — the §14.13 rogue capture)
+and item 3 also names `Fe_SS_shackle_01` / `Fe_Zn_gal_pipe_01` captures now absent from the gated
+set.
+
+So §16's command has been wrong since the registry moved to v3: the selftest is an acceptance
+check for the **feature maths**, and it can only serve that role against the corpus its
+expectations were derived from. **Three options, none obviously right:** point §16 back at
+`gui_signatures_targets_v1_20260723.csv` (honest, but the check then never exercises the current
+epoch); re-derive the expectations against v3 (exercises the live epoch, but bakes in the rogue
+capture unless it is excluded first); or make the expectations epoch-parameterised. Wants a
+decision before the next capture day leans on it as a gate.
+
+Separately and also pre-existing: `pimd_corpus_check` on the v3 corpus reads **411 checks:
+181 PASS, 229 FAIL** — 101 `splithalf-snr`, 95 `repeat-consistency`, 24 `shape-invariance`,
+9 `distance-falloff`. Not diagnosed here. Consistent in kind with §17.14's own measurements (the
+SNR gate really being a reproducibility gate of ≈ 2.5–3.5, the §14.13 rogue capture, the §14.14
+solder spool), but the count is high enough to want its own look rather than an assumption.
+(2026-07-31)
+
+---
+
+### src/pimd_classviz.py — v1.69 — FIX both Std Dev displays bypassed the glitch filter and the stall guard
+
+The Std Dev (rolling N) heatmap was the only heatmap mode not getting two guards the other
+three get. The Stats table's **Mean/Std columns share the same defect and the same fix** — they
+had to, because "the heatmap and stats-table std dev always agree for the same N" is a stated
+property of `_compute_rolling_stddev_nxn()`, and fixing one alone would have quietly broken it.
+Both are display-path only: **no recorded data was ever affected**, and no corpus row, session
+dump or capture changes.
+
+**1. No glitch substitution.** Both read `_rolling_buf`, which holds unfiltered `raw`; the
+Δ / Z / RAW modes read `_latest_raw`, which is the 64-frame-median-substituted `raw_display`. So
+a single ADC bit-truncation artifact entered σ at full weight and stayed visible for a whole
+window (~7.2 s at N=50) — **a glitch drawn as a noisy cell, in the display used to judge noise.**
+
+**2. No window-span stall guard.** Both sliced the buffer directly, so under a host stall
+(§14.10) they reduced across the gap and drew accumulated **drift** as noise while the gauges
+beside them correctly refused. This is the exact failure that manufactured the phantom
+2026-07-29 "noise relapse".
+
+**The fix.** A new `_rolling_disp_buf` carries the glitch-substituted frames, appended in
+lockstep with `_rolling_buf` and `_fw_ms_buf` and with the same maxlen, so index `-k` aligns
+across all three — the same parallel-deque pattern v1.64 used for the firmware clock, and for
+the same reason (`_rolling_buf` must keep holding unfiltered raw, because the session dump and
+the capture path read it and a recording has to stay faithful). `_get_current_baseline()`'s
+rolling mode is deliberately **left on the raw buffer**: it reduces with a median, which is
+already immune. A single new `_stddev_window()` is now the only place either display computes σ,
+so they cannot drift apart again.
+
+`_window_frames()` gains `record=False`. The guard's side effect — publishing span and reason for
+`_window_status_text()` — is ordering-sensitive, and the heatmap redraws on the 30 Hz timer
+*ahead* of the gauges, so a recording call from it would have described the heatmap's window
+underneath the gauges' number. New `_window_last_span_s` / `_window_last_reason` are written
+either way so a non-publishing caller can still read its own verdict. All four existing callers
+keep the default and are byte-for-byte unaffected.
+
+**Refusal is now visible rather than silent**, which was the point of the guard in the first
+place: the heatmap draws zeros *and* the scale label reads `STALLED 307 s window — not reduced`
+(or `filling…`), and the Stats table shows `—` with neutral colouring instead of a green cell
+over a stall. Drawing a stalled stream as a quiet grid would have been a new version of the same
+bug.
+
+**Measured before/after on the real dumps**, since this changes a long-standing instrument.
+Replaying `session_20260729_191643` (the 47-minute stall) through both paths: of 4 079 sampled
+windows, **61 are now refused that the old path reduced**, worst case a window spanning **101 s
+(14× nominal) from which the old path drew a mean σ of 1 716 µV** — drift rendered as noise, at a
+magnitude squarely in the range of the elevated-column readings this display exists to detect.
+A healthy dump (`session_20260730_171026`, 89 692 frames) refuses **nothing**, so the guard does
+not cost normal operation.
+
+**The glitch half is defensive, and the honest statement is that it has no measured effect on
+anything on disk.** Across all 12 session dumps (373 k+ frames) there are **zero mid-run glitch
+frames** — every flagged frame sits in the first 64, i.e. the glitch buffer's own fill period.
+Verified by injection instead: one 600 mV artifact on one frame takes the old path to
+**83 993 µV, 334× the 251 µV floor**, while the new path reads **252 µV, 1.00×**.
+
+Verified against the real methods (bound to a stub, frames from a real dump, no Qt widgets):
+σ on a healthy window matches a direct reduction exactly; `record=False` leaves the published
+pair untouched while still setting the last-reason; σ follows the substituted buffer, not raw;
+a 300 s gap is refused with the span available for the label; too few frames reads `filling`,
+not `stalled`; and a backwards firmware clock refuses with span left `None` so the label says
+just `STALLED`. Both apps still construct headless. (2026-07-31)
+
+---
+
+### src/pimd_features.py — v14 — TOOL_VERSION constant re-synced with the header
+
+`TOOL_VERSION` sat at `pimd_features.py v11` through the v12 and v13 edits while the header read
+v13 — the same de-sync `pimd_delaycal.py` v1.25 fixed. It is not a label: it is stamped into
+every corpus row's `tool_version` column, so anything built by v12 or v13 was recorded as the
+work of v11. Nothing on disk is affected — all corpus rows to date come from classviz directly,
+not through this path — but the next `--out` build would have mislabelled its output. Bumped to
+v14 rather than quietly set to v13, so the corrected stamp has a version of its own and the
+`tool_version` values in any future corpus stay meaningful. Constant now carries a comment saying
+it is output, not a label. (2026-07-31)
+
+---
+
+### src/pimd_delaycal.py — v1.30 — fine step snapped to the 8 ns grid at default, restore and use
+
+The fine-step spinbox shipped a default of **100 ns**, which is 12.5 PWM grid steps —
+reintroducing *as a default* the off-grid condition v1.26 existed to remove. The stepper cannot
+produce an off-grid value (range and single-step are both 8), but three other routes can, and one
+of them is how 100 got there: `_load_settings()`'s v1.25 migration multiplies a stored µs value by
+1000, so a persisted `0.1 µs` lands on exactly 100 ns; typing works too; and an off-grid value
+then persists itself on the next save, which is how it survived v1.26.
+
+Fixed at all three points rather than just the default: new `PWM_GRID_NS` / `FINE_STEP_DEFAULT_NS`
+constants (default now **96 ns**, the nearest on-grid value to the old 100), a `_snap_step_ns()`
+helper applied on settings restore *and* where the value becomes a sweep parameter, and the
+tooltip now says what happens. The snap rounds **down**, not to nearest: a fine step is a
+resolution promise, so rounding 100 up to 104 would sweep coarser than the operator asked while
+96 only costs an extra sample. The existing `_snap_8ns()` delay helper now uses the same constant.
+
+**No effect on the current bench setup** — the persisted `step_ns` is **40**, already on-grid and
+the value DESIGN §10 records for the `cal_63_air_bat_v3` sweep. This only bit a fresh install or
+a cleared settings file. (2026-07-31)
+
+---
+
 ### DESIGN.md — 1.13 — consolidation pass (§18)
 
 Human-directed, read-only rule suspended per §18. Consolidates the 13 entries above the previous

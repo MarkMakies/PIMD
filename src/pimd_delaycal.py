@@ -21,6 +21,7 @@
 #   G                                      — start Mode 2 streaming
 #
 # History (full detail in CHANGELOG.md):
+#   v1.30 fine step snapped to the 8 ns grid at default, restore and use (was 100 ns)
 #   v1.29 profile save dialog (filename = profile name) + auto-generated notes
 #   v1.28 Compare Profiles tab; measured-voltage cache from thermal/Auto soaks
 #   v1.27 THERMAL auto-starts on sweep completion (checkbox, default on)
@@ -76,7 +77,15 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor  # noqa: E402
 
-APP_VERSION = '1.29'
+APP_VERSION = '1.30'
+
+# The PWM period quantum. Every delay the firmware can actually produce is a
+# multiple of this, so a sweep step that is not is a step the hardware rounds
+# for you -- silently, and not always the same way. v1.26 moved the fine step
+# onto this grid; v1.30 stopped the default and the settings restore from
+# taking it back off (the default shipped at 100 ns, which is 12.5 steps).
+PWM_GRID_NS   = 8
+FINE_STEP_DEFAULT_NS = 96      # nearest on-grid value to the old 100
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_classviz.py
 PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -86,8 +95,19 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 def _snap_8ns(delay_us):
     """Round a delay to the nearest 8 ns RP2040 PWM clock boundary."""
-    ns = round(delay_us * 1000)          # µs → ns, integer
-    return (round(ns / 8) * 8) / 1000   # snap to 8 ns grid, back to µs
+    ns = round(delay_us * 1000)                              # µs → ns, integer
+    return (round(ns / PWM_GRID_NS) * PWM_GRID_NS) / 1000   # snap, back to µs
+
+
+def _snap_step_ns(step_ns):
+    """Snap a fine-sweep step onto the PWM grid, rounding DOWN (min one grid
+    step). Down rather than nearest because a step is a resolution promise:
+    rounding 100 up to 104 sweeps coarser than the operator asked for, while
+    96 only costs an extra sample. The spinbox stepper cannot produce an
+    off-grid value, but typing and a restored settings file both can -- and
+    the migration at _load_settings() is how 100 ns got there in the first
+    place (a stored 0.1 µs from the pre-v1.26 µs spinbox)."""
+    return max(1, int(step_ns) // PWM_GRID_NS) * PWM_GRID_NS
 
 
 # Cell background colours
@@ -279,12 +299,14 @@ class MainWindow(QMainWindow):
         form.addRow('Start delay:', self.sp_start)
 
         self.sp_step = QSpinBox()
-        self.sp_step.setRange(8, 5000)
-        self.sp_step.setSingleStep(8)
-        self.sp_step.setValue(100)
+        self.sp_step.setRange(PWM_GRID_NS, 5000)
+        self.sp_step.setSingleStep(PWM_GRID_NS)
+        self.sp_step.setValue(FINE_STEP_DEFAULT_NS)
         self.sp_step.setSuffix(' ns')
         self.sp_step.setToolTip(
-            'Fine sweep step (ns, multiple of the 8 ns PWM grid).')
+            'Fine sweep step (ns, multiple of the {0} ns PWM grid).\n'
+            'Off-grid values are snapped down when the sweep starts -- the\n'
+            'firmware cannot produce a delay between grid points.'.format(PWM_GRID_NS))
         form.addRow('Fine step:', self.sp_step)
 
         self.sp_coarse_step = QDoubleSpinBox()
@@ -1019,7 +1041,7 @@ class MainWindow(QMainWindow):
         self._pair_idx    = 0
         self._thresh_idx  = 0
         self._start_delay  = self.sp_start.value()
-        self._step_size    = self.sp_step.value() / 1000.0   # ns → µs
+        self._step_size    = _snap_step_ns(self.sp_step.value()) / 1000.0   # ns → µs
         self._coarse_step  = self.sp_coarse_step.value()
         self._signal_uV    = int(round(self.sp_signal_v.value() * 1_000_000))
         self._step_count   = 0
@@ -2156,7 +2178,10 @@ class MainWindow(QMainWindow):
             step_ns = s.get('step_ns')
             if step_ns is None and 'step_size' in s:   # migrate v1.25 µs value → ns
                 step_ns = int(round(float(s['step_size']) * 1000))
-            self.sp_step.setValue(       int(step_ns or self.sp_step.value()))
+            # v1.30: snap on restore. Both the migration above and a hand-edited
+            # settings file can land off-grid, and an off-grid step persists
+            # itself on the next save -- which is how it survived v1.26.
+            self.sp_step.setValue(_snap_step_ns(step_ns or self.sp_step.value()))
             self.sp_coarse_step.setValue(     s.get('coarse_step',       self.sp_coarse_step.value()))
             self.sp_signal_v.setValue(        s.get('signal_v',          self.sp_signal_v.value()))
             self.sp_max.setValue(             s.get('max_delay',         self.sp_max.value()))

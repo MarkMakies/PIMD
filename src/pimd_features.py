@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v13
+# PIMD Feature Extractor (pimd_features.py) v14
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -15,6 +15,7 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v14 TOOL_VERSION constant re-synced with header (was stuck at v11 since v12)
 #   v13 '# capture:' session-dump lines parsed — exact corpus-row -> frame-window join
 #   v12 tilt_deg column — oblique orientation capture; optional, last in the field list
 #   v11 firmware clock exposed as fw_seconds; FIX frame rate measured on it, not arrival time
@@ -128,7 +129,9 @@ import matplotlib.pyplot as plt
 import pimd_target_check
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TOOL_VERSION = 'pimd_features.py v11'
+# Stamped into every corpus row's tool_version, so this is output, not a label:
+# it sat at v11 through the v12/v13 edits and mislabelled anything built by them.
+TOOL_VERSION = 'pimd_features.py v14'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling

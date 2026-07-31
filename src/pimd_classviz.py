@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.68
+# PIMD Signature Visualiser (ClassViz) v1.69
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.69 FIX both Std Dev displays bypassed the glitch filter and the stall guard
 #   v1.68 saving a signature marks the session dump; new '# capture:' frame-window join key
 #   v1.67 Tilt (°) capture input for oblique poses; tilt_deg joins the placement tuple
 #   v1.66 session dump: pack_v carries age_s; new '# soak:' run/idle history lines
@@ -132,7 +133,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.68'
+APP_VERSION = '1.69'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -560,12 +561,35 @@ class MainWindow(QMainWindow):
         # The degree of batching varies -- one 10k-frame stretch of that session
         # ran only 23% batched -- so this is not a fixed factor to correct for.
         self._fw_ms_buf: deque = deque(maxlen=10_000)
+        # Glitch-substituted copy of the same frames, appended in lockstep and
+        # with the same maxlen, so index -k aligns across all three (v1.69).
+        #
+        # _rolling_buf deliberately holds UNFILTERED raw: it feeds the session
+        # dump and the capture path, where a recording must stay faithful. But
+        # the Std Dev displays are not recordings -- they are the instrument an
+        # operator reads to judge the noise floor, and a single 440-880 mV ADC
+        # bit-truncation artifact enters sigma at full weight and stays visible
+        # for a whole window (~7.2 s at N=50), i.e. a glitch reads as a noisy
+        # cell. The Delta/Z/RAW modes never had this because they read
+        # _latest_raw, which is already substituted; only the two sigma paths
+        # went to the buffer directly.
+        #
+        # Stored as substituted frames rather than a mask + median because the
+        # substitution is per-cell and reconstructing it later costs more than
+        # the array. _get_current_baseline()'s rolling mode is left on the raw
+        # buffer on purpose: it reduces with a MEDIAN, which is already immune.
+        self._rolling_disp_buf: deque = deque(maxlen=10_000)
         self._rolling_T   = ROLLING_SECS_DEFAULT
         # v1.64 window-span guard state (see _window_frames). span/reason are
         # written on every window reduction and read only for display; the
         # nominal cache is keyed on _frame_count so it recomputes once a frame.
         self._window_span_s        = None
         self._window_block_reason  = None
+        # v1.69: same two, written on EVERY reduction including record=False,
+        # so a caller can read back its own verdict without publishing it.
+        self._window_last_span_s   = None
+        self._window_last_reason   = None
+        self._stddev_block_reason  = None
         self._nominal_frame_cache  = (-1, None)
         # v1.64 stream-gap detection (see _note_frame_gap). Latched for the run:
         # the Rate readout is instantaneous and clears itself, which is no use
@@ -937,6 +961,7 @@ class MainWindow(QMainWindow):
             self.pb_record.setChecked(False)      # triggers _toggle_record_frames → auto-save
         self._rolling_buf.clear()
         self._fw_ms_buf.clear()      # v1.64: must stay index-aligned with the above
+        self._rolling_disp_buf.clear()   # v1.69: likewise
         self._baseline_mean = None
         self._baseline_std  = None
         self._baseline_age  = None
@@ -3792,7 +3817,7 @@ class MainWindow(QMainWindow):
         self._nominal_frame_cache = (self._frame_count, val)
         return val
 
-    def _window_frames(self, n_win, exact=False):
+    def _window_frames(self, n_win, exact=False, record=True):
         """The last `n_win` buffered frames, or None when the window cannot be
         trusted (v1.64). Every frame-count window in this file goes through
         here, so "how many frames" and "over how long" cannot drift apart again.
@@ -3808,30 +3833,40 @@ class MainWindow(QMainWindow):
         Span is measured on the FIRMWARE clock via the index-aligned _fw_ms_buf.
         Side effect by design: records that span and the refusal reason so the UI
         can say WHY a reading is blank. A blank nobody can explain is what let
-        the 23:03 stall run for 47 minutes."""
-        recent = list(self._rolling_buf)[-n_win:]
-        self._window_span_s = None
-        if len(recent) < 2 or (exact and len(recent) < n_win):
-            self._window_block_reason = 'filling'
-            return None
+        the 23:03 stall run for 47 minutes.
 
-        fw = list(self._fw_ms_buf)[-len(recent):]
-        nominal = self._nominal_frame_s()
-        if len(fw) == len(recent):
-            span = (fw[-1] - fw[0]) / 1000.0
-            # A firmware clock that steps backwards (board reset mid-run) makes
-            # the span meaningless rather than large: refuse on the same footing.
-            if span < 0:
-                self._window_block_reason = 'stalled'
-                return None
-            self._window_span_s = span
-            if nominal:
-                expected = (len(recent) - 1) * nominal
-                if span > expected * WINDOW_SPAN_TOLERANCE:
-                    self._window_block_reason = 'stalled'
-                    return None
-        self._window_block_reason = None
-        return recent
+        `record=False` runs the identical test but leaves that published state
+        alone (v1.69). The Std Dev displays need the verdict, not the status
+        line: they redraw on the 30 Hz timer ahead of the gauges, and
+        _window_status_text() reads whatever the LAST call wrote, so a recording
+        call from the heatmap would describe the heatmap's window under the
+        gauges' number. _window_last_span_s / _window_last_reason are written
+        either way, for callers that want their own result back."""
+        recent = list(self._rolling_buf)[-n_win:]
+        span   = None
+        reason = None
+        if len(recent) < 2 or (exact and len(recent) < n_win):
+            reason = 'filling'
+        else:
+            fw = list(self._fw_ms_buf)[-len(recent):]
+            nominal = self._nominal_frame_s()
+            if len(fw) == len(recent):
+                s = (fw[-1] - fw[0]) / 1000.0
+                # A firmware clock that steps backwards (board reset mid-run)
+                # makes the span meaningless rather than large: refuse on the
+                # same footing, and leave span None so the UI says just STALLED.
+                if s < 0:
+                    reason = 'stalled'
+                else:
+                    span = s
+                    if nominal and s > (len(recent) - 1) * nominal * WINDOW_SPAN_TOLERANCE:
+                        reason = 'stalled'
+        self._window_last_span_s = span
+        self._window_last_reason = reason
+        if record:
+            self._window_span_s       = span
+            self._window_block_reason = reason
+        return None if reason else recent
 
     def _current_settle_mv(self, n_win=None):
         """Mean per-channel rolling std in mV over a window of frames -- the
@@ -7165,6 +7200,7 @@ class MainWindow(QMainWindow):
         self._frame_count += 1
         self._rolling_buf.append((now, raw))
         self._fw_ms_buf.append(fw_time_ms)
+        self._rolling_disp_buf.append(raw_display)   # v1.69, display sigma only
         # v1.64: gap detection on the FIRMWARE clock, before the row is written,
         # so the '# stall:' line lands immediately above the frame that closed
         # the gap. See _note_frame_gap for why firmware time is the right clock.
@@ -7244,19 +7280,53 @@ class MainWindow(QMainWindow):
         std  = mat.std(axis=0).reshape(self._n_bands, self._n_cells)
         return mean, std
 
+    def _stddev_window(self):
+        """(mean_per_channel, std_per_channel, reason) over the last N frames,
+        or (None, None, reason) when the window must not be reduced.
+
+        The single source for BOTH sigma displays -- the Std Dev heatmap mode
+        and the Stats table's Mean/Std columns -- which is the point: their
+        agreeing for the same N is a stated property, and it can only hold if
+        there is one computation. v1.69 fixed two bypasses they shared, both
+        display-path only (no recorded data was ever affected):
+
+        1. Glitch substitution. Both read _rolling_buf, which holds unfiltered
+           raw, while Delta/Z/RAW read the already-substituted _latest_raw. A
+           single 440-880 mV ADC artifact therefore entered sigma at full weight
+           and stayed for a whole window (~7.2 s at N=50) -- a glitch drawn as a
+           noisy cell, in the display used to judge noise. Now reads the
+           glitch-substituted _rolling_disp_buf.
+        2. The window-span guard. Both sliced the buffer directly, so under a
+           host stall (DESIGN §14.10) they reduced across the gap and drew
+           accumulated DRIFT as noise, while the gauges next to them correctly
+           refused. That is the exact failure that manufactured the phantom
+           2026-07-29 "noise relapse". Now goes through _window_frames().
+
+        Reduces the same frames the guard approved: _rolling_disp_buf is
+        appended in lockstep, so the last len(recent) of it are those frames."""
+        recent = self._window_frames(self.sp_stats_window.value(), record=False)
+        if recent is None:
+            # 'filling' is the ordinary startup case; 'stalled' is the finding.
+            return None, None, self._window_last_reason
+        disp = list(self._rolling_disp_buf)[-len(recent):]
+        if len(disp) != len(recent):
+            return None, None, 'filling'    # only before the buffers align
+        mat = np.array(disp, dtype=float)
+        return mat.mean(0), mat.std(0), None
+
     def _compute_rolling_stddev_nxn(self):
         """Per-cell std dev of the raw (unfiltered-by-baseline) signal over the
         last N samples -- a live noise/jitter monitor, independent of any
-        baseline capture. N is the Stats tab's 'Std dev N' spinbox, reusing
-        _update_stats_table's exact rolling-window computation so the heatmap
-        and stats-table std dev always agree for the same N."""
-        n = self.sp_stats_window.value()
-        recent = list(self._rolling_buf)[-n:]
-        if len(recent) < 2:
+        baseline capture. N is the Stats tab's 'Std dev N' spinbox.
+
+        Returns zeros when the window is refused, and stashes the reason so
+        _update_heatmap() can say so on the scale label: a stalled stream must
+        not be drawn as a quiet grid any more than as a noisy one."""
+        _, stds, reason = self._stddev_window()
+        self._stddev_block_reason = reason
+        if stds is None:
             return np.zeros((self._n_bands, self._n_cells))
-        mat  = np.array([arr for _, arr in recent], dtype=float)
-        stds = mat.std(0).reshape(self._n_bands, self._n_cells)
-        return stds[self._band_display_order]
+        return stds.reshape(self._n_bands, self._n_cells)[self._band_display_order]
 
     # ------------------------------------------------------------------
     # Display computation (heatmap)
@@ -7288,6 +7358,17 @@ class MainWindow(QMainWindow):
             levels = (0.0, float(matrix.max()) * 1.05 + 1.0)
             if self._display_mode == 'raw':
                 self.lbl_scale.setText('Scale: 0…{0:.3f} mV'.format(matrix.max() / 1000))
+            elif self._stddev_block_reason == 'stalled':
+                # v1.69: the grid is zeros because the window was refused, not
+                # because the rig went quiet. Say which -- an unexplained blank
+                # is what let the 47-minute stall run unnoticed (DESIGN §14.10).
+                span = self._window_last_span_s
+                self.lbl_scale.setText('Std Dev (N={0}): STALLED{1} — not reduced'.format(
+                    self.sp_stats_window.value(),
+                    ' {0:.0f} s window'.format(span) if span else ''))
+            elif self._stddev_block_reason == 'filling':
+                self.lbl_scale.setText('Std Dev (N={0}): filling…'.format(
+                    self.sp_stats_window.value()))
             else:
                 self.lbl_scale.setText('Std Dev (N={0}): 0…{1:.3f} mV'.format(
                     self.sp_stats_window.value(), matrix.max() / 1000))
@@ -7322,17 +7403,18 @@ class MainWindow(QMainWindow):
         if self._freeze_stats or self._latest_raw is None:
             return
 
-        raw    = self._latest_raw   # (n_channels,)
-        n      = self.sp_stats_window.value()
-        recent = list(self._rolling_buf)[-n:]
-
-        if len(recent) >= 2:
-            mat   = np.array([arr for _, arr in recent], dtype=float)
-            means = mat.mean(0)
-            stds  = mat.std(0)
-        else:
-            means = raw.copy()
-            stds  = np.zeros(self._n_channels)
+        raw = self._latest_raw   # (n_channels,)
+        # v1.69: one computation shared with the Std Dev heatmap -- see
+        # _stddev_window() for the two bypasses this closed. `blocked` means the
+        # window was refused (stalled stream); Mean/Std then show '—' rather
+        # than a number reduced across a gap, and lose their quality colouring,
+        # because a green cell over a stall is worse than no cell at all.
+        means, stds, reason = self._stddev_window()
+        blocked = stds is None
+        if blocked:
+            means = raw
+        lo = self.sp_std_lower.value()
+        hi = self.sp_std_upper.value()
 
         for d in range(self._n_bands):
             b = self._band_stats_order[d]
@@ -7340,12 +7422,16 @@ class MainWindow(QMainWindow):
                 row      = d * self._n_cells + c
                 proto_ch = b * self._n_cells + c
                 self.tbl_stats.item(row, 3).setText(_fmt(raw[proto_ch]))
-                self.tbl_stats.item(row, 4).setText(_fmt(means[proto_ch]))
-                std_mv = stds[proto_ch] / 1000.0
+                item4 = self.tbl_stats.item(row, 4)
                 item5 = self.tbl_stats.item(row, 5)
+                if blocked:
+                    item4.setText('—' if reason == 'stalled' else _fmt(means[proto_ch]))
+                    item5.setText('—')
+                    item5.setBackground(QBrush(QColor(210, 210, 210)))
+                    continue
+                item4.setText(_fmt(means[proto_ch]))
+                std_mv = stds[proto_ch] / 1000.0
                 item5.setText('{0:.3f}'.format(std_mv))
-                lo = self.sp_std_lower.value()
-                hi = self.sp_std_upper.value()
                 if std_mv < lo:
                     item5.setBackground(QBrush(QColor(143, 240, 164)))
                 elif std_mv > hi:
