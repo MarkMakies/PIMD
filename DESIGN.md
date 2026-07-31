@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S LiPo supply (2026-07-24) · **Firmware:** v4.27 · **PC tools:** gui v4.13 · classviz v1.66 · delaycal v1.29 · features v11 · shape v1 · target_check v4 · corpus_check v1.8 · **Coil:** v4 · **Operating profile:** cal_63_air_bat_v3 (locked 2026-07-26, sha `4a2352d2`)
-**Last bench update:** 2026-07-30 (pack-voltage operating window established, 21.5–23.3 V; nine-session campaign over packs A and B)
-**Doc rev:** 1.12 (2026-07-31) — **audit pass, not a consolidation.** No new tooling, hardware or bench campaign is folded in; this pass fixes defects found by a full contradiction / unit-error / non-sequitur audit of 1.11 and every `CHANGELOG.md` archive, applying the rule **latest bench data wins** (later measurement kept, earlier scoped rather than deleted; flagged rather than asserted where data cannot settle it). **Three substantive corrections.** (1) **Frame rate:** the "≈ 289 → ≈ 301 ms full-sweep refresh" was modelled, never measured, and is ~2× wrong — the firmware takes one period per cell per sweep and emits one W record per sweep, and the firmware clock reads **6.88–6.92 Hz (0.1445–0.1455 s)**; the "32-deep ≈ 9.2 s rolling average" fell out of the same bad model and is ~4.6 s (§8, §9, §10, §17.7). (2) **Pack-voltage window edges** were used interchangeably and contradicted three of the result's own anchor observations; now stated once — **≈ 24.0 V always-bad edge · 22.5–24.0 V transition where soak is worth ~2.5–3× · 21.5–23.3 V operating window · ≈ 23.5 V shorthand for the transition's onset** — and the v3 lock (23.5→23.35 V), the 07-28 corpus day (opened 23.77 V) and §17.11's "drained into the good window" are re-described as the transition-band observations they were (§1, §10, §12, §17.11, §17.12, §17.13). (3) **§14.10's post-stall step** was carrying superseded first-pass numbers (+10…+78 mV, one sign) from the same pass that manufactured the phantom "noise relapse"; it now carries §17.13's stall-guard-cleaned **−8.3…+23.8 mV, sign-changing** row. **New bench evidence:** the pack-voltage result was **independently re-measured** by a drift-immune estimator and **reproduces** — 3.80/4.40 V bad with 4.20 V clean between them on a fresh pack, one floor mid-window, and the trouble moved to 4.20 V at 21.08 V; the zone-migration model is now confirmed by two methods (§14.7, §17.13). It also softens one rule: "below 22.5 V *always* acceptable" → *usually*, since the 15:01 cold start (voltage corrected **≈ 22.67 → ≈ 22.45 V**) reads ~5× its floor. **Unit/value fixes:** RX coil wire **30.8 → ≈ 69.5 m** (2.3× error, wrong against both its own geometry and its own resistance, §5); §17.1's power table de-garbled (the "10.6" cell is 10601 Hz; the "Freq (actual)" column is **current in mA**); §17.5 freeze cal **1 → 13 delays**; registry **26 → 27 objects**; §7 single-cell σ matches **M=16**, not M=32; §3 raw noise **±400 → ±1400 µV**; §14.11's "3–10×" scoped to the two cells it holds for; §17.9's decay-persistence claim reworded off "iron-bearing vs non-ferrous", which its own ferrite toroid at 1.37 falsifies. **Flagged, not resolved** (need bench data): §3-vs-§7 filtered noise, R9's clamp current against the +135 V RX flyback, and the stall's mutually inconsistent delivery figures. Corpus/campaign counts are now labelled as snapshots (the corpus is **170 captures / 82 with `pack_v`** today; the nine dumps hold 373 325 frames against the 332 957 analysed). Full detail, plus errata for changelog-internal contradictions left standing in the archives, in `CHANGELOG.md`. (Previous: 1.11 (2026-07-30) — consolidation pass. **The pack-voltage result.** Nine session dumps over 2026-07-29/30 (333k frames, packs A and B, spanning 21.0 → 25.0 V) establish that the elevated **3.80 V and 4.40 V threshold columns track pack voltage, not soak time** — 43–51 mV/V with **one sign across all seven bands**, against the sign-*changing* fingerprint a thermal shift produces. This **corrects §12**: the "state of charge does not reach the operating point" result is true only over the 0.55 V interval it was measured on (§17.10), and is false over 21–25 V. It **resolves §14.7**: a noise zone fixed on the *decay waveform* while pack voltage scales the decay explains both the operating-point tracking and the noisy–clean–noisy reading, so both follow-ups must now be specified at a stated pack voltage. **New operating constraint — run the pack at 21.5 – 23.3 V**; a ≈ 23.5 V **data-quality ceiling** now sits beside the 21.0 V **regulation floor** and they are different kinds of limit (§12, §17.13). Pack A measures **620 streaming-min (10.3 h, ≈ 5.2 Ah)** full to empty, of which the clean window is **4.55 h (44 %)** and the unusable top **1.78 h (17 %)**; idle drain is ~15× below streaming drain, so a fresh pack **cannot be idled** into the window — it has to be streamed down (§12). The "≈ 3 h warm-up" is largely **pack discharge, not thermal soak**; thermal drift remains a genuine open problem and is the smaller of the two effects (§3, §14.1). **New locked profile `cal_63_air_bat_v3`** (2026-07-26, sha `4a2352d2`): `cal_63_air_v2`'s band plan with the third threshold moved **4.70 → 4.75 V** and delays re-anchored **+40…+144 ns** for the battery supply — both a new calibration epoch *and* a threshold-geometry change, so the §13 feature-portability question the 1.10 pass deferred is now live rather than hypothetical, and the **state-of-charge window** it also deferred is now a term of the §10 profile contract. Battery supply lowered the achievable autonudge convergence threshold to **0.3 mV**, never reachable under the bench PSU, and a thermal **convergence** criterion replaces the retired thermistor check (§17.11). Registry → **`targets_v3.csv`** (26 objects), `targets_v1.csv` superseded. fw v4.27 adds emit-block counters on `B` after the host was found **blocking the MCU for 47 minutes** (new §14.10); the `(9 µs, 4.9 V)` noise corner is **3 cells of 63** and a *static* cell exclusion cannot fix it, because which cells are bad is a function of pack state (new §14.11). Tooling: classviz v1.42→v1.66 (session dumps auto-log with the stream, pack-voltage and soak tracks, window span guard + stall detection, Trigger Levels gauges, Family Plane per-axis scales), delaycal v1.25→v1.29 (Compare Profiles tab, fine step in ns, named profile export with generated notes), features v7→v11 (firmware clock exposed, frame-rate measurement fixed), target_check v3→v4, corpus_check v1.6→v1.8, and new tracked `/utilities/` analysis tools (§15). **Highest-value measurement outstanding**, unchanged in kind but now sharper: the **+15 V rail under scope during a TX pulse**, fresh pack vs near-flat (§12). (Previous: 1.10 (2026-07-24) — consolidation pass. **Supply epoch:** the 1990s bench supply failed and the detector moved to a 6S LiPo pack (19.8–25.2 V, working floor 21.0 V), roughly doubling L7815 dissipation and lengthening warm-up (§4, §12, §14.1). Measured result that the regulator holds the operating point across the regulated window, so this is **not** a measurement-epoch reset — no §3/§17 value is voided by it (§17.10). classviz v1.39→v1.42: new **Shape Space** tab (a fourth tab) and scratch captures, built on the new shared feature module **`pimd_shape.py` v1** (§15). First post-enclosure corpus captured 2026-07-23 — 66 captures under `cal_63_air_v2`, analysed into the family-plane / crossing-axis / decay-persistence geometry, with the five analysis figures now cited in §15 (§17.9). New findings: the §14.7 threshold noise zone tracks the **operating point** rather than a fixed voltage, and reads noisy–clean–noisy (§14.7); **reference age** sets a hard ceiling on any frozen-reference measurement (§14.1, §17.10); the family-plane early-band axis needs a confidence band, not a sign test (new §14.9). Deferred to the next pass for want of bench facts: the new locked profile and the state-of-charge window it adds to the §10 profile contract; feature-level portability across that threshold-geometry change (§13); the delaycal settings-persistence fix-or-procedure decision (§15). 1.9.2 (2026-07-23) — §15 `src/data/profiles/` row: the superseded locks are now listed file-by-file in `.gitignore` rather than excluded by a `dir/*` + negation pair (git handled the wildcard form correctly, but that idiom renders unreliably in some editors' ignore decorations). Net tracking is unchanged — only `cal_63_air_v2.json` is tracked — but new delaycal candidates now stay visible as untracked instead of being ignored by default; 1.9.1 (2026-07-23) — post-consolidation corrections (human-directed): `pimd_targets.py` renamed **`pimd_target_check.py`** (v2→v3; import-contract change only, no functional change) — §15 row and the classviz row's reference follow. Repo hygiene, all files kept on disk: `src/data/profiles/` is now gitignored except the operating `cal_63_air_v2.json` (superseded locks untracked), the three previous-epoch `References/profile8b-*` captures untracked, and the stray `src/data/delaycal_1706-104844.csv` deleted; §15 profiles row records the new tracking policy; 1.9 (2026-07-23) — consolidation pass, **PC-tooling only**: no hardware, firmware, profile or measured-value change, and no new bench observations (§3 and §17 untouched — every entry consolidated here is tooling work). classviz v1.32→v1.39: the **Training Session tab is gone**, all corpus capture is now the Analysis tab's automated Training cycle, plus capture ergonomics (shrinkable heatmap split, auto-visible new captures, per-parameter quality colouring) and two latent-bug fixes. features v6→v7 (doc-only); targets v1→v2 — registry relocated to `src/data/targets/targets_v1.csv`; corpus_check v1.4→v1.6 — migrated onto the `target_id`/`distance_mm` schema and fixed so an air capture no longer aborts the run (§15). §15 corrections: registry path and object count (22, not 23). Next phase: systematic target signature/profile capture under the existing `cal_63_air_v2` profile and `targets_v1` registry, both deliberately left untouched; 1.8.2 (2026-07-15) — §15: added rows for the seven previously uncited `References/` images (pcb-coil-baseline, warmup-with-8ns-steps, new-training-data, training-targets-v3, training-results-v1a/b/c — the last three flagged previous-epoch), captions written from the images; 1.8.1 (2026-07-15) — post-consolidation corrections: delaycal v1.25 (`APP_VERSION` constant re-synced with its header — no functional change); `pimd_corpus_check.py` re-tracked and its §15 row restored (v1.4 is maintained against the current schema regime; `pimd_classify.py`/`pimd_v2_findings.py` remain local-only); 1.8 (2026-07-15) — consolidation pass: fw v4.25 outlier-gate latch fix + v4.26 post-emit CC-write race fix, both bench-verified (§8, §17.8); 6 µs band dropped → 63-cell profiles, soaked recal locked as **cal_63_air_v2** (§10); threshold-noise-zone upper edge located ≈ 4.67 V on the 100 µs band, thermal operating-point drift mapped (§14.7, §17.8); structured target-metadata capture regime landed — `targets.csv` registry + `pimd_targets.py` v1, classviz v1.31→v1.32, features v6 (§15); `USAGE.md` added, `docs/` removed; §15 asset rows: scope baseline renamed `scope-pulse-baseline.jpeg`, four previous-epoch profile8b rows dropped; 1.7.1 (2026-07-13) — §15: removed `pimd_corpus_check.py` row (untracked from the repo along with `pimd_classify.py`/`pimd_v2_findings.py` — previous-epoch ML tools kept local-only); 1.7 (2026-07-13) — consolidation pass: **measurement epoch reset** — electronics moved into a new shielded enclosure and fw v4.24 changed Mode 2 acquisition timing, so pre-2026-07-13 quantitative findings are historical until re-measured (§3, §17); first-column noise root-caused to period-scaled boundary settling, fixed in fw v4.24 (§8, §17.7); threshold noise zone ~4.45–4.65 V mapped (§10, §14, §17.7); cal_72_air_v3 locked with top-dense threshold ladder (§10); classviz v1.17→v1.30 (Analysis tab, Training Session tab, Std Dev heatmap mode, top-bar Load & Run — §15); delaycal v1.20→v1.24 (§15); ML/corpus findings from the previous epoch dropped from this document — corpus to be rebuilt.)) Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S LiPo supply (2026-07-24) · **Firmware:** v4.27 · **PC tools:** gui v4.13 · classviz v1.68 · delaycal v1.29 · features v13 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** cal_63_air_bat_v3 (locked 2026-07-26, sha `4a2352d2`).  Bump this line on every edit.
+**Last bench update:** 2026-07-31 (v3 corpus at 188 captures; oblique-orientation study)
+**Doc rev:** 1.13 (2026-07-31) — consolidation pass. **The orientation reframe:** the early-band sign that separates `ferrous` from `crossover` is an *orientation* coordinate, not a material one — it measures presented eddy-loop area, and the same object walks between families as it is tipped. The Pasion–Oldenburg two-basis mixing law is confirmed on this instrument, so orientation becomes a fitted parameter rather than a confound. What survives is stronger than the old family verdict: the **late**-band sign reads iron-bearing vs non-ferrous at **97.2 % ungated**. Full detail in `CHANGELOG.md`.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick
 > up the project cold from here alone. Empirically measured operating values are marked
@@ -49,7 +49,8 @@ reads decay behaviour independently of sign — a second opinion to the family v
 than a class test, since the ferrite toroid reads ferrous by sign and non-ferrous by decay
 (§17.9). That geometry is now
 live in the tooling — `pimd_shape.py` v1 holds the maths, classviz's **Family Plane Analysis**
-tab (named Shape Space before v1.43) displays it (§15).
+tab (named Shape Space before v1.43) displays it (§15). *(The second, 2.6× larger corpus
+re-scopes one of those three coordinates — see the orientation paragraph below and §17.14.)*
 
 **Supply epoch (2026-07-24):** the bench supply failed and the detector moved to a **6S Li-ion
 pack** (18650 cells; called "6S LiPo" in earlier entries — §12). Unlike the enclosure change this is *not* a measurement-epoch reset — no §3 or
@@ -75,6 +76,21 @@ wider
 off rather than waited out (§12, §14.7, §17.13). It also reattributes the "≈ 3 h warm-up",
 which is largely this discharge rather than thermal soak; thermal drift is real but smaller
 (§3, §14.1).
+
+**Family is an orientation coordinate, not a material one (2026-07-31).** The v3-epoch corpus
+— **188 captures over 25 targets**, 2.6× the first one and deliberately spanning orientation —
+overturns how the three-family split has been read since §17.9. The **early**-band sign that
+separates `ferrous` from `crossover` splits by *placement*, not by target: 90.9 % accurate on
+transverse captures, **53.8 % axial**, and every miss in the corpus is an axial one. A cast-iron
+trivet reads `crossover` lying flat and `ferrous` stood on edge, because the early axis measures
+**presented eddy-loop area = geometry × orientation**. What survives is stronger than the old
+verdict: the **late**-band sign — iron-bearing vs non-ferrous — reads **97.2 % ungated**, with
+decay persistence a clean independent second opinion on it. Alongside this, the
+**Pasion–Oldenburg two-basis mixing law is confirmed** on oblique captures, so orientation stops
+being a confound and becomes a *fitted parameter*, and an orientation-invariant descriptor (the
+2-D subspace itself) becomes well-defined — the foundation the τ-class + size tier needs. The
+practical consequence is that tier 2 should be **renamed and re-scoped rather than its accuracy
+chased** (§14.9, §17.14).
 
 ---
 
@@ -151,6 +167,20 @@ eddy currents weaken it).
   mechanism in all of it
   is the pack draining into the 21.5–23.3 V window — **1.78 h of unavoidable streaming from
   full** — not thermal settling.
+
+- **`splithalf_floor` understates reproducibility noise by roughly 2×** *(measured 2026-07-31,
+  §17.14)*. It is a within-capture short-timescale statistic, so it does not see everything that
+  moves between two captures of the same thing. Measured two ways that agree: shape scatter
+  between repeats runs **2.4× the isotropic-additive-noise prediction** built from it in 90 % of
+  pairs, and the corpus's air captures show it directly — across-capture L2 **4.03 mV** against a
+  median `splithalf_floor` of **1.82 mV** (×2.2). Practical consequence: **the SNR ≥ 5 gate is
+  really a reproducibility gate of ≈ 2.5–3.5**, which is why raising it keeps paying.
+
+- **The between-session noise component measures zero** *(measured 2026-07-31, §17.14)*. Pooling
+  within-session per-cell σ over the corpus's 19 air captures against the all-captures σ gives
+  **4.24 mV vs 4.03 mV** across three days and eight sessions — no measurable session-to-session
+  offset. Captures made on different days are directly comparable, which is what a training
+  corpus needs and was not previously established.
 
 ---
 
@@ -436,11 +466,27 @@ bench PSU to the 6S pack. Two changes from `cal_63_air_v2`:
 
 **This is both a new calibration epoch and a threshold-geometry change**, which is weaker than
 a clean epoch change and makes the feature-portability question live (raised in §17.10's closing
-bench observation, still unsettled). Cross-epoch
+bench observation). Cross-epoch
 comparison is interpretable for the eight columns whose target voltage is unchanged; **the
 third column is not comparable to v2's even feature-wise.** An identical cell count does *not*
 imply comparability — a cell-count sanity check passes here — so comparability rests entirely
 on the `(profile_name, profile_sha8)` guard in `pimd_features`, **which must not be relaxed.**
+
+**Feature portability across the v2→v3 change — answered 2026-07-31 (§17.14), and it is
+benign.** Measured across every target held in both corpora, the shift is **coherent and
+one-parameter**, exactly as v3's later delay anchoring predicts: both the early and late
+band-range means move **+5.2 ×10⁻³ (median, positive)**, and every crossing width interior to the
+ladder in both epochs moves **shorter, ratio 0.76 median** (trivet 34 → 24 µs, SS disc 31 → 18,
+gal RHS 21 → 19, gal pipe 17 → 13). v3 samples 40–144 ns later, so the fast negative eddy term
+has decayed further by the sample instant — every band mean moves positive and the
+negative→positive crossing arrives at a shorter pulse width. Amplitude moves **by family, not by
+gain** (non-ferrous ×0.67–0.89, iron-bearing ×1.28–1.79), which is the same explanation and
+rules out a supply effect, which would scale everything one way. **No target changed its
+majority family verdict, and nothing needs re-labelling.** Two consequences that do bite:
+the shift lands hardest on the crossover family, because that is where |early| is smallest; and
+**crossing widths are per-epoch quantities** — §17.6's ladder values are v2-era and must be
+restated against v3 before reuse. The `(profile_name, profile_sha8)` guard still stands: this
+result says the two epochs are *relatable*, not interchangeable.
 
 **Calibration conditions:** pack **23.5 → 23.35 V** across the sweep; thermal state at lock
 not recorded. Noted for any future re-lock: that span sits **above** the 21.5–23.3 V window,
@@ -675,7 +721,15 @@ flash raises the noise floor ~10×.
 - **Geometric pulse ladder (×1.5) + top-dense amplitude thresholds** — every band
   interrogates a distinct, evenly spaced slice of log target-τ; the threshold ladder is
   densest where the decay carries the most information (§10). Amplitude-anchored delays
-  make the matrix self-normalising across bands.
+  make the matrix self-normalising across bands. *(The feature-portability worry this raised
+  across a threshold-geometry change is now measured and benign — the v2→v3 shift is coherent
+  and one-parameter, and no target changed family. §10, §17.14.)*
+- **The signature is a two-basis object, and that is now measured rather than assumed.** Each
+  target's orientation set is **rank 2** — one axial and one transverse basis shape — and an
+  oblique pose is a positive convex combination of them landing on the arc between, with weights
+  on the dipole prediction `cos²θ / sin²θ`. So the 63-cell matrix carries enough structure to
+  *solve for* orientation instead of being confounded by it, and an orientation-invariant
+  descriptor is the 2-D subspace rather than any signature in it (§17.14, §14.9).
 
 ---
 
@@ -706,6 +760,12 @@ flash raises the noise floor ~10×.
    one minute exceeds a strong target at close range. Removing a target can make |Δ| go *up*
    (§17.10). Any procedure that does not bracket air on both sides is unreliable beyond ~10 s;
    this is the quantitative justification for the air-bracketed Training cycle (§17.5).
+   **Independently confirmed offline** *(2026-07-31, §15 `session_relabel`)*: matching plateaus
+   in the raw dumps against corpus signatures, a single earlier air reference carries the full
+   drift to the capture — tens of mV over a ~400 s plateau gap — and cost ~0.05 of cosine, while
+   **interpolating between a reference before and one after** took the correct pairings to
+   0.996–1.000. Bracketing is not just good practice; without it the drift is large enough to
+   degrade target *identity*, not merely amplitude.
 2. **7805-vs-USB supply-noise mystery.** Onboard 7805 path ~50 % noisier than USB;
    unresolved. *(Re-measure post-enclosure — shielding may have changed the picture.)*
 3. **General supply noise floor** (battery vs USB, flash penalty — partially mitigated).
@@ -768,6 +828,16 @@ flash raises the noise floor ~10×.
    columns read 749/277 µV against 83 µV at 4.20 V between them, the whole grid sits at one
    57–72 µV floor mid-window, and at 21.08 V the trouble has left 3.80/4.40 V (64/70 µV) and
    appeared at 4.20 V (173 µV). The migration is confirmed on the raw dumps, not only inferred.
+   **Seen a third time, in target-free data** *(2026-07-31, §17.14)*: per-cell σ over the v3
+   corpus's own 19 air captures puts **46 % of all noise energy in the 3.80 V column alone**
+   (column L2 2.85 mV against 0.37–1.48 for the other eight), and that excess is **entirely
+   confined to the fresh-pack and cold-start captures** — 24.40 V reads 5.55 mV on that column,
+   23.69 V reads 4.39, the cold pair 4.85/6.15, while every settled capture inside the
+   21.1–23.4 V window reads 0.64–2.06. Air captures at 23.36 V *after* a long soak read clean
+   (0.64, 1.56), consistent with the transition band being soak-sensitive rather than
+   voltage-fatal. **The 46 % is therefore a pack-state artefact that operator discipline already
+   removes, not a property of the profile** — which is worth stating plainly, because a naive
+   read of the corpus noise census would condemn the column.
    **Unresolved tension, flagged rather than resolved:** the 2026-07-24 survey above found the
    columns elevated **at 22.4 V**, which the 07-30 rule would call clean. That survey ran
    `cal_63_air_v2`, whose delays are 40–144 ns *earlier* than v3's. Since the zone sits at a
@@ -789,17 +859,47 @@ flash raises the noise floor ~10×.
    top-of-decay level (~4.87–4.89 V observed on heavy bands — bears on the delaycal
    signal-detect ceiling, now 5.0 V), and the §17.4 delay-zone map all predate the
    enclosure and need redoing on the new hardware state.
-9. **Classification layer: the family verdict must not be a hard sign test.** Solid ferrous
-   targets sit knife-edge on the family plane's early-band axis, and two independent lines of
-   evidence agree on the mechanism (§17.9, §17.10): offline, family classification held at
-   97.8 % under an SNR ≥ 5 gate but every misclassification was directional — solid ferrous
-   drifting toward *crossover* as SNR falls, because the early-pulse cells are a ferrous
-   target's smallest signal and lose their sign first; live, `Fe_spanner_01` was measured
-   flipping ferrous → crossover at a ~15 s hold on an early-band mean of just **+0.045 mV**.
-   A "too close to call" band around zero, scaled to the capture's own noise floor, is
-   required — and the same band is what a live cursor should display rather than asserting a
-   family. Recorded before the classifier exists so it inherits this rather than
-   rediscovering it a third time.
+9. **Classification layer: the early-band axis is an orientation coordinate, and tier 2 needs
+   re-scoping rather than a better threshold.** *(Substantially revised 2026-07-31 against the
+   v3 corpus, §17.14.)* This was recorded as a **noise** problem — solid ferrous sitting
+   knife-edge on the family plane's early-band axis, losing its sign as SNR falls (§17.9's
+   directional misclassifications; `Fe_spanner_01` measured flipping ferrous → crossover on an
+   early-band mean of just **+0.045 mV**, §17.10). That much is real and still stands. But it is
+   the second-order effect. The **first**-order effect is that the axis is not measuring what the
+   family names claim:
+
+   | orientation | ferrous-vs-crossover accuracy (gated) |
+   |---|---|
+   | ax = y (transverse) | 90.9 % (n = 22) |
+   | ax = x (transverse) | 75.0 % (n = 16) |
+   | ax = z (**axial**) | **53.8 %** (n = 13) — chance |
+
+   **Every crossover→ferrous miss in the corpus is an axial capture.** The early axis measures
+   **presented eddy-loop area = geometry × orientation**, so the same object changes family as it
+   is tipped: `Fe_Cast_iron_trivet_01` lying flat reads `crossover` (crossing 29–36 µs, early
+   −50…−102 ×10⁻³); stood on edge it reads `ferrous` (crossing pinned at the 8 µs rail, early
+   +7…+47) and is 2.4× louder. That is what a 3 mm-thick 75 mm disc must do — face-on the eddy
+   loop has the full 75 mm of area and the fast negative term dominates the early bands; edge-on
+   the loop area collapses to the 3 mm thickness and the magnetic term is left exposed. The
+   spanner fails the other way, reading `crossover` broadside. Decay persistence does **not**
+   rescue the split (ferrous median 4.20, crossover 4.82, fully overlapping).
+
+   **Consequences, in order.** (a) A noise-scaled dead band around zero is still worth having and
+   works as anticipated — 1.5σ → 90.7 % on 92 % decided, 3σ → 95.7 % on 80 % decided — but it is
+   a **coverage trade, not a fix**, because the misses are *physical* rather than marginal. A
+   live cursor should still show the band rather than assert a family. (b) The tier should be
+   **renamed and re-scoped** to what it measures; "ferrous vs crossover" is a material-sounding
+   name for an orientation reading. (c) The real path forward is §17.14's two-basis result:
+   with a target's axial and transverse basis shapes, orientation is *solvable* and the
+   orientation-invariant descriptor is the 2-D subspace itself. (d) **Tier 1 — the late-band
+   sign, iron-bearing vs non-ferrous — is the robust axis** at 97.2 % ungated / 98.3 % gated,
+   and does not need the gate at all. Build on that.
+
+   **Do not read §17.9's 97.8 % / §17.12's 100 % gated three-class figures as a regression
+   against v3's 88.1 %.** The v1 corpus held **no axial captures of any crossover target** — it
+   sampled only the orientation where the early sign happens to work. The v3 corpus is 2.6×
+   larger and deliberately spans orientation, so it exposes a failure mode the earlier number
+   could not see.
 10. **The host can block the MCU, and did — for 47 minutes.** *(2026-07-29, §17.13.)* The Mode 2
     emit is a blocking `print()` to USB CDC (§8); when the host stopped draining the pipe the MCU
     stalled inside it and frame delivery collapsed from **414 per minute to ~20–35** *(the
@@ -844,6 +944,49 @@ flash raises the noise floor ~10×.
     unreachable for a 9 µs flyback (the crossing landing at or past the clamp, making the sample
     time ill-defined), in which case the ladder's top step is the thing to reconsider, not the
     band?
+    **Scoped 2026-07-31 (§17.14): the corner is not the dominant floor feature.** Per-cell σ over
+    the corpus's 19 air captures puts **46 % of all noise energy in the 3.80 V column** and only
+    **7 % in the three corner cells**. The two findings are not in conflict — the 07-28 corner
+    came from matched target pairs within one afternoon, while this is across-capture σ spanning
+    the whole campaign, and the 3.80 V excess is a pack-state artefact (§14.7). But it does
+    reorder the priority: **the corner is a genuine but second-rank floor contributor**, and the
+    29 %/32 % paired-difference improvement from excluding it should be read against a floor whose
+    largest single term is something operator discipline already removes.
+12. **The Std Dev heatmap displays known artefacts as noise.** *(2026-07-31, §17.15.)* It is the
+    only heatmap mode that **bypasses both the 64-frame glitch substitution and the v1.64
+    window-span stall guard**, so a glitch renders as noise and post-stall accumulated drift
+    renders as noise — in the one display an operator uses specifically to judge the noise floor.
+    Found while explaining the placement transient, recorded there and not fixed. Low risk, and
+    the fix is to route the mode through the same reductions the other modes already use.
+13. **Neither quality gate catches a rogue capture, and a within-placement check would.**
+    *(2026-07-31, §17.14.)* `Fe_Cast_iron_trivet_01` @ 120 mm, ax = x, r1 is stamped `ok` at
+    **SNR 16.5** and passes everything, while sitting at cosine 0.33–0.68 to every other trivet
+    capture *including its own r2 sibling at 0.577* (persistence 1.15 against 2.6–4.4; late-band
+    mean +70 against +116…+155). One capture single-handedly sets the corpus's worst within-target
+    cross-distance cosine (0.591 against a 0.985 median) and inflates the trivet's noise reference
+    from ~0.13 to 0.320. Air-reference staleness is the leading suspect (§14.1) but **the corpus
+    carries no air age**, so it cannot be settled from the file. Two things follow: add a
+    **within-placement consistency check between repeats** to `pimd_corpus_check`, and consider
+    recording air-reference age as a corpus column so this class of defect is diagnosable
+    afterwards rather than only detectable.
+14. **`Sn_Pb_solder_spool_01` is two physical objects under one `target_id`, and the second one
+    is a tier-1 false-positive mode.** *(2026-07-31, §17.14.)* `targets_v3.csv`'s own header
+    records "changed solder roll", and the data agrees emphatically — cross-epoch cosine of the
+    mean shapes is **+0.143**, against ≥ 0.95 for every other matched target. **All cross-epoch
+    comparison for this id is invalid until it is split**; since the registry's own rule is that
+    an id is never reused, the new object needs its own id with the v1 captures left pointing at
+    the old one. That is an operator decision, not a tooling one. The physics is the more
+    interesting half: the new roll is **not magnetic** (operator-verified, so the registry row is
+    correct and an earlier "steel spool core" speculation is withdrawn), yet broadside it reads
+    ferrous on *both* tier-1 discriminators — late +178 ×10⁻³, decay persistence 4.28–5.70,
+    crossing pinned at the 8 µs rail — while end-on it reads non-ferrous (1.07–1.20). The
+    surviving explanation is a **shorted multi-turn coil**: a spool whose wire ends touch is a
+    closed loop of high inductance and very low resistance, i.e. a long L/R time constant, and a
+    slowly-decaying induced current is indistinguishable from ferrous by both sign and decay. It
+    is the one non-ferrous target in the corpus that breaks the 97.2 % late-sign rule, and **a
+    shorted loop is a shape a real buried target can take**. *Flagged, not asserted* — the corpus
+    cannot settle it. The decisive test takes seconds: **a continuity measurement across the
+    spool's two wire ends.**
 
 ---
 
@@ -854,22 +997,23 @@ flash raises the noise floor ~10×.
 | `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.27**) — both modes, all profiles; BUSY edge sync (v4.19); IRQ critical section + 10 % plausibility gate on raw reads (v4.21); SAMPLE_PULSE_CORRECTION 0.904 µs (v4.22); protocol: freq in Hz, pulse/delay in ns (v4.23); time-floored Mode 2 boundary settling, SETTLE_FLOOR_US 3000 (v4.24); outlier gate on abs(mean) with OUTLIER_GATE_MIN floor — no more latched cells (v4.25); IRQ hold through freq/CC writes via `read_raw_bytes_hold()` — CC-write race closed (v4.26); **emit-block counters on `B`** (v4.27) — diagnostic only, the emit path and all PWM/CC sequencing untouched, for the host-stall defect §14.10 |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | PC PyQt6 GUI **v4.13** — Mode 1 filtered telemetry display; boxcar toggle; 8 ns grid snapping with orange-highlight warnings; no auto-connect; sub-200 µV V/div removed; settings persistence |
-| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.66**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Std Dev (rolling N) heatmap mode** (live noise monitor); settledness-gated, glitch-excluding signature captures (v1.31); **registry-backed structured target-metadata capture** — target combo + placement fields from `pimd_target_check.py`, `# mark_target:` session-dump lines, capture provenance (profile_sha8 / fw_version / supply), corpus CSVs to `src/data/corpora/` (v1.32); settings persistence. **Four tabs: Heatmap / Stats / Analysis / Family Plane Analysis** (the fourth was named **Shape Space** before v1.43; internal names stay `shape`/`_shape_*` and `pimd_shape.py` is unchanged — §17.9 and older §15/USAGE text describing "Shape Space" mean this tab) — the Analysis tab is the sole corpus-capture workbench (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale) and carries the **automated Training cycle** (v1.34–v1.35: one Space press per cycle, auto place/remove detection, 30 s guard countdowns, Save/Ignore) plus capture ergonomics (v1.38: splitter-resizable heatmap vs signature list, new captures auto-checked onto the charts, black live traces, per-parameter green/amber/red quality colouring against editable thresholds). The separate guided **Training Session tab was removed at v1.39** — all corpus capture goes through Analysis. **Shape Space (v1.42)** plots every loaded signature as a point in a selectable 2-D feature space with the live frame moving through it — five movable/floatable docks (Scatter, Band Curves, Crossing Ladder, Tile Inspector, Gauges), all feature maths from `pimd_shape.py`. It is the one place in the app that plots **mixed profile geometries** together, and marks every foreign capture on sight (marker shape, standing banner, tooltip, tile title) because they are comparable in kind but not calibrated against each other; the Analysis tab's raw cell-by-cell overlays still refuse. Carries its **own two-mode rolling air reference** (air / measure, Space toggles) rather than the shared static baseline — a frozen baseline made the tab meaningless under drift (§14.1) — and **scratch captures** of unregistered objects to `src/data/scratch/`, never to `src/data/corpora/`. **v1.43–v1.66 in four groups.** *(a) Session provenance — the group the 2026-07-30 result rests on:* dumps now **auto-log with the stream** (v1.63, default on, so the warm-up window nobody presses Record for is captured; an explicit Stop stays stopped only until the next start); a **pack-voltage track** written as `# pack_v: <iso>, <volts>, age_s=<n>` on a `Log V` press, where *age* is seconds since the value was last **typed**, so a restored spinbox reports `age_s=unknown` rather than a confident lie (v1.64, v1.66); **`# soak:` run-history lines** carrying `streamed_s` / `stalled_s` / `idle_before_s` (v1.66 — note `streamed_s` banks per process, not across restarts, and `idle_before_s` is classviz-observed idle, **not** guaranteed rig idle). *(b) Stall safety (§14.10):* a **window span guard** — all four window reductions go through `_window_frames()` and return `None` when the window spans > 3× its expected duration, so a stall fails safe to "not settled" instead of to a plausible number; span is measured on the **firmware clock**, never on PC arrival time, which is burst-batched (median arrival interval 0.0035 s against a uniform 0.1440 s — the two share a *mean*, which is the trap); plus ingest-side gap detection writing `# stall:` lines with a latched Rate warning, and a per-chart draw **Pause** (v1.64, draw only — never "don't record"). *(c) Live gates made visible:* the Analysis **Trigger Levels** gauge column, thresholds draggable (v1.51); a stale-air-reference fix — the Detect gauge was showing an ageing frozen reference as a live deviation (v1.52, with a new **Air age** gauge); **launch auto-start** (v1.53); removal auto-detect reworked to require a settle-loss *transient* **and** departure from a fresh target snapshot, because §17.10 proves no magnitude test against a frozen reference can detect removal (v1.54–v1.55); Training A/B labels that name the gate holding each phase up (v1.56); live **central-frame count** with Frames default 60 → **100**, since 60 trims to 36 central and was stamping every default capture `short` (v1.57). *(d) Capture schema and the Family Plane:* the unused `face_normal` / offset X / offset Y inputs removed while the **schema keeps all eight keys** as `na`/0/0 so the checker's placement tuple is unbroken (v1.60); signature rows carry long axis + repeat and colour is per **target** via `zlib.crc32` — not the salted builtin `hash()` (v1.61); `repeat_idx` no longer sticks at r1 (v1.62); corpus append writes **the file's own header columns**, not the tool's, so adding a column can never again produce a ragged CSV (v1.65). Family Plane: renamed, material tags, per-axis custom bands, clickable ladder (v1.43); explicit Min/Max heatmap scale (v1.44); the colorbar rebuilt as a true absolute range slider (v1.45); scratch saves plot immediately as triangles (v1.46); per-axis **Scale** curves — cube / atanh / rank, all range-preserving, with a log axis deliberately **not** offered because nothing lives near zero (v1.47); no gridlines on a rank axis and zero rails that follow the spacing curve (v1.48); custom band pair no longer lost to startup-profile clamping (v1.49); below-gate frames leave no trail at all (v1.50) |
-| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.29**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); 3-d.p. voltage headers; profile export/import; thermal monitoring; zigzag auto-nudge (parallel or sequential) with ceiling latch + lock-on-pass; activity log; settings persistence. **v1.26–v1.29:** fine sweep step is now set in **ns down to the 8 ns PWM grid** (was a µs spinbox with a 10 ns floor — off-grid and unable to reach one step; a stored `step_size` in µs migrates ×1000); **THERMAL auto-starts on sweep completion** (v1.27), which also means every fresh profile arrives measured; a **Compare Profiles tab** (v1.28) answering the question that actually matters after a re-sweep — for every cell two profiles share, how far apart are the delays and does that gap move the measured voltage — matching cells on `(freq_hz, pulse_us, threshold_v)` so every row is like-for-like at the same intended target voltage, Δ coloured against the 8 ns grid, with a `<current calibration table>` entry so a sweep can be compared without exporting first; and **profile export via a save dialog whose basename becomes the profile's `name`** plus auto-generated `notes` recording the sweep that produced it (v1.29). That last one closed a real trap: exports were named after the sweep timestamp and `name` — **not** the filename — is what `pimd_features` records as `profile_name` in every corpus row and what the cross-epoch guard reports, so every lock needed correcting by hand (and `cal_63_air_bat_v3` did, §10). Imports carry the source profile's notes forward attributed, so derivation rationale survives an epoch change. **Operational note:** signal-detect ceiling must be 5.0 V post-enclosure (§3 epoch note). **Settings-persistence trap (2026-07-24):** the persisted `delaycal_settings.json` is *not* anchored to the currently locked profile, so an operator who edits two fields and presses run inherits a stale baseline for everything else — one recal run silently reintroduced the excluded 6 µs band and an 8-value threshold ladder, and looked plausible enough to nearly lock. Nothing in the export path enforces or flags a departure from the §10 band plan. Standard procedure is therefore **Import Profile first** (USAGE §4) — load the locked profile, edit, then sweep. Open: accept as procedure, or add a warning on band-plan/threshold-count mismatch |
+| `src/pimd_classviz.py` | PC PyQt6 Mode 2 signature visualiser (**v1.68**) — real-time heatmap + stats table + 64-frame glitch filter; top-bar saved-profile **Load & Run** (sends RAM-only dynamic profile via `D`, replaces the old Profile Builder tab — profile authoring lives in delaycal); session-dump recorder (self-describing per-session CSV to `src/data/sessions/`, embedded profile JSON + per-column map + marks); **Std Dev (rolling N) heatmap mode** (live noise monitor); settledness-gated, glitch-excluding signature captures (v1.31); **registry-backed structured target-metadata capture** — target combo + placement fields from `pimd_target_check.py`, `# mark_target:` session-dump lines, capture provenance (profile_sha8 / fw_version / supply), corpus CSVs to `src/data/corpora/` (v1.32); settings persistence. **Four tabs: Heatmap / Stats / Analysis / Family Plane Analysis** (the fourth was named **Shape Space** before v1.43; internal names stay `shape`/`_shape_*` and `pimd_shape.py` is unchanged — §17.9 and older §15/USAGE text describing "Shape Space" mean this tab) — the Analysis tab is the sole corpus-capture workbench (live comparison charts, decoupled heatmap + colorbar range control, per-group normalize/scale) and carries the **automated Training cycle** (v1.34–v1.35: one Space press per cycle, auto place/remove detection, 30 s guard countdowns, Save/Ignore) plus capture ergonomics (v1.38: splitter-resizable heatmap vs signature list, new captures auto-checked onto the charts, black live traces, per-parameter green/amber/red quality colouring against editable thresholds). The separate guided **Training Session tab was removed at v1.39** — all corpus capture goes through Analysis. **Shape Space (v1.42)** plots every loaded signature as a point in a selectable 2-D feature space with the live frame moving through it — five movable/floatable docks (Scatter, Band Curves, Crossing Ladder, Tile Inspector, Gauges), all feature maths from `pimd_shape.py`. It is the one place in the app that plots **mixed profile geometries** together, and marks every foreign capture on sight (marker shape, standing banner, tooltip, tile title) because they are comparable in kind but not calibrated against each other; the Analysis tab's raw cell-by-cell overlays still refuse. Carries its **own two-mode rolling air reference** (air / measure, Space toggles) rather than the shared static baseline — a frozen baseline made the tab meaningless under drift (§14.1) — and **scratch captures** of unregistered objects to `src/data/scratch/`, never to `src/data/corpora/`. **v1.43–v1.66 in four groups.** *(a) Session provenance — the group the 2026-07-30 result rests on:* dumps now **auto-log with the stream** (v1.63, default on, so the warm-up window nobody presses Record for is captured; an explicit Stop stays stopped only until the next start); a **pack-voltage track** written as `# pack_v: <iso>, <volts>, age_s=<n>` on a `Log V` press, where *age* is seconds since the value was last **typed**, so a restored spinbox reports `age_s=unknown` rather than a confident lie (v1.64, v1.66); **`# soak:` run-history lines** carrying `streamed_s` / `stalled_s` / `idle_before_s` (v1.66 — note `streamed_s` banks per process, not across restarts, and `idle_before_s` is classviz-observed idle, **not** guaranteed rig idle). *(b) Stall safety (§14.10):* a **window span guard** — all four window reductions go through `_window_frames()` and return `None` when the window spans > 3× its expected duration, so a stall fails safe to "not settled" instead of to a plausible number; span is measured on the **firmware clock**, never on PC arrival time, which is burst-batched (median arrival interval 0.0035 s against a uniform 0.1440 s — the two share a *mean*, which is the trap); plus ingest-side gap detection writing `# stall:` lines with a latched Rate warning, and a per-chart draw **Pause** (v1.64, draw only — never "don't record"). *(c) Live gates made visible:* the Analysis **Trigger Levels** gauge column, thresholds draggable (v1.51); a stale-air-reference fix — the Detect gauge was showing an ageing frozen reference as a live deviation (v1.52, with a new **Air age** gauge); **launch auto-start** (v1.53); removal auto-detect reworked to require a settle-loss *transient* **and** departure from a fresh target snapshot, because §17.10 proves no magnitude test against a frozen reference can detect removal (v1.54–v1.55); Training A/B labels that name the gate holding each phase up (v1.56); live **central-frame count** with Frames default 60 → **100**, since 60 trims to 36 central and was stamping every default capture `short` (v1.57). *(d) Capture schema and the Family Plane:* the unused `face_normal` / offset X / offset Y inputs removed while the **schema keeps all eight keys** as `na`/0/0 so the checker's placement tuple is unbroken (v1.60); signature rows carry long axis + repeat and colour is per **target** via `zlib.crc32` — not the salted builtin `hash()` (v1.61); `repeat_idx` no longer sticks at r1 (v1.62); corpus append writes **the file's own header columns**, not the tool's, so adding a column can never again produce a ragged CSV (v1.65). Family Plane: renamed, material tags, per-axis custom bands, clickable ladder (v1.43); explicit Min/Max heatmap scale (v1.44); the colorbar rebuilt as a true absolute range slider (v1.45); scratch saves plot immediately as triangles (v1.46); per-axis **Scale** curves — cube / atanh / rank, all range-preserving, with a log axis deliberately **not** offered because nothing lives near zero (v1.47); no gridlines on a rank axis and zero rails that follow the spacing curve (v1.48); custom band pair no longer lost to startup-profile clamping (v1.49); below-gate frames leave no trail at all (v1.50). **v1.67–v1.68 — orientation capture, and the dumps stop being unlabelled.** *(v1.67)* A **Tilt (°)** spinbox (0–90, step 5) in the Analysis placement row: `long_axis` can only express 0° or 90° to the coil axis, so every capture in every corpus on disk sat at one of the two extremes and the two-basis model's actual content could not be tested (§17.14). Enabled only when **Long axis is `z`** *and* a signature file is open — a tilt is defined against the coil normal, so `_placement_from_widgets()` is the single place the rule lives and emits `''` for x/y, meaning a 30° left over from an oblique run cannot reach an x/y row. **Deliberately not persisted to settings** (reopens at 0 every launch): a persisted placement combo riding silently along on every later capture is exactly what got `face_normal` removed at v1.60. `tilt_deg` joins the placement tuple, so Repeat # re-wires to the spinbox — otherwise a 30° capture inherits the 0° count and the two poses collide as repeats of one placement. *(v1.68)* **Saving a signature now marks the dump.** `_append_mark()`/`_append_mark_target()` had existed since v1.32 but were only ever called from the manual Mark button, which nobody pressed — so all eleven dumps then on disk carried **zero `# mark:` lines**: ~380 000 frames of raw per-cell data with the ground truth sitting in a separate CSV and no key between them. `_on_sig_save_clicked()` now stamps the running dump with the same `placement` dict the corpus row was built from. **The new `# capture:` line is the part that matters** — a mark says *what* was in the field, not *which frames*, and the two were not recoverable from each other (the corpus `session` id and the dump filename are independent stamps, and `captured_at` is stamped at **save** time, tens of seconds after the frames). `_append_capture()` writes `capture_id`, the corpus `session` id, `n_central` and the target / air-before / air-after windows as epoch seconds, taken **straight off the capture buffers** rather than re-derived, on the same PC clock that stamps every frame's `pc_wallclock` — so the join is exact and lossless. Guarding is in the caller by necessity and the write is wrapped: the corpus row is the product and is already on disk, so a dump-annotation failure reports to the status bar rather than taking the capture down |
+| `src/pimd_delaycal.py` | PC PyQt6 delay-calibration sweeper (**v1.29**). Coarse+fine two-phase sweep per freq/pulse pair via `*`+`A<n>`; records threshold-crossing delays (clip-release / earliest-valid-sample); 3-d.p. voltage headers; profile export/import; thermal monitoring; zigzag auto-nudge (parallel or sequential) with ceiling latch + lock-on-pass; activity log; settings persistence. **v1.26–v1.29:** fine sweep step is now set in **ns down to the 8 ns PWM grid** (was a µs spinbox with a 10 ns floor — off-grid and unable to reach one step; a stored `step_size` in µs migrates ×1000); **THERMAL auto-starts on sweep completion** (v1.27), which also means every fresh profile arrives measured; a **Compare Profiles tab** (v1.28) answering the question that actually matters after a re-sweep — for every cell two profiles share, how far apart are the delays and does that gap move the measured voltage — matching cells on `(freq_hz, pulse_us, threshold_v)` so every row is like-for-like at the same intended target voltage, Δ coloured against the 8 ns grid, with a `<current calibration table>` entry so a sweep can be compared without exporting first; and **profile export via a save dialog whose basename becomes the profile's `name`** plus auto-generated `notes` recording the sweep that produced it (v1.29). That last one closed a real trap: exports were named after the sweep timestamp and `name` — **not** the filename — is what `pimd_features` records as `profile_name` in every corpus row and what the cross-epoch guard reports, so every lock needed correcting by hand (and `cal_63_air_bat_v3` did, §10). Imports carry the source profile's notes forward attributed, so derivation rationale survives an epoch change. **Operational note:** signal-detect ceiling must be 5.0 V post-enclosure (§3 epoch note). **Settings-persistence trap (2026-07-24):** the persisted `delaycal_settings.json` is *not* anchored to the currently locked profile, so an operator who edits two fields and presses run inherits a stale baseline for everything else — one recal run silently reintroduced the excluded 6 µs band and an 8-value threshold ladder, and looked plausible enough to nearly lock. Nothing in the export path enforces or flags a departure from the §10 band plan. Standard procedure is therefore **Import Profile first** (USAGE §4) — load the locked profile, edit, then sweep. Open: accept as procedure, or add a warning on band-plan/threshold-count mismatch. **Known defect (2026-07-31, not fixed):** the fine-step spinbox default is **100 ns**, which is not a multiple of 8 and is unreachable by the widget's own 8 ns steps — reintroducing, *as a default*, the off-grid condition v1.26 existed to remove. Left for a deliberate code pass |
 | `src/pimd_shape.py` | Shared signature-geometry feature maths (**v1**, pure NumPy + stdlib, **no Qt imports** — the same functions serve the Shape Space tab and a future classifier). Turns a baseline-corrected `delta_mV` signature into the scalars the 2026-07-23 corpus analysis found to separate targets: `unit_shape`/`amp_l2`/`snr`, `band_means`, `band_range_mean`, `crossing_us`, `decay_persistence`, `family`/`family_gated`. Geometry is always passed explicitly (`pulses_us`, `n_delays`) — nothing assumes 63 cells, and bands/thresholds are resolved by **value** (rows sorted pulse-ascending, threshold high→low) rather than by stored index, which is what makes a live frame and a stored capture comparable. `family` (sign) and `decay_persistence` (magnitude) are meant to be read together and neither may overrule the other: a ferrite toroid reads ferrous by sign and non-ferrous by decay, and both are true of it. `--selftest <corpus csv>` runs four acceptance groups against a known corpus |
-| `src/pimd_features.py` | Session-CSV / gui_signatures-CSV → training-corpus builder (**v11**, offline CLI). Registry join (`target_id` + structured placement replace free text), hard geometry guard — one `(profile_name, profile_sha8)` per corpus build; direct-ingest path for classviz corpus CSVs; pre-v1.32 free-text inputs loudly rejected, no migration by design. **v8–v11:** parses mid-stream `# session_notes:` (v8, needed once classviz auto-started sessions and the operator's notes began arriving *after* the header); a **`pack_v` track** — `list[(datetime, volts, age_s)]`, a track and not a scalar because a 6S pack falls volts over a multi-hour run, with `pack_v_at()` interpolating per capture and refusing to guess at malformed lines — plus parsed `# stall:` and `# soak:` lines, and `pack_v` appended to `CORPUS_HEADER_FIELDS` (v9–v10). **v11 exposes `SessionData.fw_seconds`, the firmware clock**, which `parse_session_file()` had always read and then discarded, and **fixes `measure_frame_rate_hz()`**, which was being fed PC arrival timestamps: USB delivery is burst-batched, so the measured rate came out **73–290 Hz against a true 6.94 Hz**, and its consumers size segmentation windows in frames from it. It hid because the two clocks share the same *mean* — only the median is wrong, and the median is used deliberately since it survives stalls. **No corpus row on disk was ever built through that path** (all 166 captures come from classviz directly), so no rebuild was required — verified, not assumed. The `pack_v` **corpus column carries no staleness information** while the session track does: it stamps the field's current value, so a stale entry reads as confident |
+| `src/pimd_features.py` | Session-CSV / gui_signatures-CSV → training-corpus builder (**v13**, offline CLI). Registry join (`target_id` + structured placement replace free text), hard geometry guard — one `(profile_name, profile_sha8)` per corpus build; direct-ingest path for classviz corpus CSVs; pre-v1.32 free-text inputs loudly rejected, no migration by design. **v8–v11:** parses mid-stream `# session_notes:` (v8, needed once classviz auto-started sessions and the operator's notes began arriving *after* the header); a **`pack_v` track** — `list[(datetime, volts, age_s)]`, a track and not a scalar because a 6S pack falls volts over a multi-hour run, with `pack_v_at()` interpolating per capture and refusing to guess at malformed lines — plus parsed `# stall:` and `# soak:` lines, and `pack_v` appended to `CORPUS_HEADER_FIELDS` (v9–v10). **v11 exposes `SessionData.fw_seconds`, the firmware clock**, which `parse_session_file()` had always read and then discarded, and **fixes `measure_frame_rate_hz()`**, which was being fed PC arrival timestamps: USB delivery is burst-batched, so the measured rate came out **73–290 Hz against a true 6.94 Hz**, and its consumers size segmentation windows in frames from it. It hid because the two clocks share the same *mean* — only the median is wrong, and the median is used deliberately since it survives stalls. **No corpus row on disk was ever built through that path** (all 166 captures come from classviz directly), so no rebuild was required — verified, not assumed. The `pack_v` **corpus column carries no staleness information** while the session track does: it stamps the field's current value, so a stale entry reads as confident. **v12–v13:** a `tilt_deg` column — tilt of `dim_a` away from the coil normal in degrees, **0 = down the coil axis** (same pose as `long_axis=z`), **90 = in the coil plane** (same pose as x/y), blank when not recorded; the two ends are deliberately redundant with `long_axis` and the column exists for the angles between. It is appended **last** in `CORPUS_HEADER_FIELDS`, and that is a constraint rather than a preference — `classviz._scan_editable_signature_file()` indexes positionally off this list while reading files that lack the column, so appending is safe and inserting would silently misread every corpus on disk; same reasoning for `_MARK_TARGET_KEYS`, which `parse_mark_target_line()` zips positionally. `format_tilt()` renders `None` and `''` identically as `''` while preserving a recorded **0**, which is the distinction the placement key depends on. v13 reads the `# capture:` line classviz v1.68 writes into `SessionData.captures` — `list[(datetime, dict)]` with the window bounds parsed to `(start, end)` pairs on the same clock as `t_seconds`, so a corpus row resolves to the exact frames it was reduced from; unknown keys are **kept rather than dropped**, because a join key whose reader silently discards a later-added field fails worse than one that carries it. Additive throughout: every pre-v1.68 dump parses as before with `captures=[]`. **Known defect (2026-07-31, not fixed here):** the header reads v13 while the `TOOL_VERSION` constant still reads `pimd_features.py v11` — the same de-sync delaycal v1.25 fixed, and `TOOL_VERSION` is what gets stamped into a corpus row's `tool_version` |
 | `src/pimd_target_check.py` | Shared target-registry loader/validator (**v4**, CLI + library; named `pimd_targets.py` before v3). Reads `src/data/targets/targets_v3.csv`, collects all errors/warnings (ids, enums, numerics, dims order, mass plausibility); never writes the registry. `DEFAULT_REGISTRY_PATH` here is the single source of truth for the registry location — classviz and features both derive from it, so repointing it at v3 moved all three. Used by classviz (capture-time) and features (build-time). **v4:** the CLI's registry path default is **removed** — `-f/--file` is required, because with several registry versions on disk a defaulted path had become a trap (it still named v1 while the live registry was v3, so a clean run said nothing about the file in use), and the run now prints the absolute path it loaded. `wall_thickness_mm` gains an explicit **0 = solid / not applicable** sentinel, replacing v3's `na` (rejected as unparseable) and v1's empty cell; both legacy spellings still normalise to `0.0`, so the column is now always a float |
-| `src/pimd_corpus_check.py` | Corpus-level acceptance checker (**v1.8**, offline CLI) — shape distance-invariance, split-half SNR, repeat consistency, falloff fit, optional `--baseline` cross-campaign comparison; one flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. Reads the v1.32+ `target_id`/`distance_mm` schema only (legacy `target`/`distance_cm` cleanly rejected). Distances are data-driven — a target at ≥2 distances gets shape rows, ≥3 gets a falloff fit; repeats key off the `repeat_idx` column against the physical placement tuple; the old canary-drift check is retired (per-capture air bracketing does that correction in features). Air captures carry no distance: they appear in the SNR check as `@air` and are excluded from every distance-keyed check. **v1.7:** `placement_key()` normalises the three fields classviz v1.60 froze (`face_normal` → `na`, both offsets → 0) through a shared `placement_value()` **that classviz imports**, so the app and the checker cannot drift on what "the same placement" means — without it a corpus straddling that change splits one physical placement into two groups and repeat-consistency compares nothing against nothing (on the live corpus this took the run from 30 checks to 90, and made the distance-falloff fit run at all). **v1.8:** `pack_v` is an **optional** column — `REQUIRED_FIELDS` was the whole field list, so adding any column to `CORPUS_HEADER_FIELDS` would have failed every corpus written before it; additive schema growth belongs here rather than in a migration |
-| `src/data/targets/targets_v3.csv` | Human-authored registry, **current** — **27** physical target objects *(verified against the file 2026-07-31; the "26" recorded previously was the count at the 2026-07-26 validation run, before the solder stick was added on 07-28)*, single source of target physical metadata (id, material, shape, dims, mass, …). Human-owned data: tooling reads and validates only. Revision v3 added rocks, quartz and a water bottle, changed the solder roll, and later a weighed 56 g solder stick. Loads with **0 errors**; the one remaining warning is deliberate (see below). Two provenance notes worth keeping: the LibreOffice export had been written as **UTF-7**, arriving with every `_`/`-`/`#` as a `+AF8-`-style escape (decoded in place with `iconv`; the export dialog remembers the charset, so it needs setting back to UTF-8 or this recurs), and `Fe_heavy_pully` was reclassified `disc` → **`ring`** — its 66 mm wall was flagged as set on a solid shape, but the measurement is right (a real bore, 66 = (150−18)/2), so the row was a shape misclassification, not a bad number. Flagged, not changed: that id misspells "pulley" and ids are stable by the registry's own rule (renaming would orphan captures), and its `closed_loop=y` reads the flag as "supports a large circulating eddy path" rather than the header's stricter written rule — a registry-wide semantics decision left open |
+| `src/pimd_corpus_check.py` | Corpus-level acceptance checker (**v1.9**, offline CLI) — shape distance-invariance, split-half SNR, repeat consistency, falloff fit, optional `--baseline` cross-campaign comparison; one flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. Reads the v1.32+ `target_id`/`distance_mm` schema only (legacy `target`/`distance_cm` cleanly rejected). Distances are data-driven — a target at ≥2 distances gets shape rows, ≥3 gets a falloff fit; repeats key off the `repeat_idx` column against the physical placement tuple; the old canary-drift check is retired (per-capture air bracketing does that correction in features). Air captures carry no distance: they appear in the SNR check as `@air` and are excluded from every distance-keyed check. **v1.7:** `placement_key()` normalises the three fields classviz v1.60 froze (`face_normal` → `na`, both offsets → 0) through a shared `placement_value()` **that classviz imports**, so the app and the checker cannot drift on what "the same placement" means — without it a corpus straddling that change splits one physical placement into two groups and repeat-consistency compares nothing against nothing (on the live corpus this took the run from 30 checks to 90, and made the distance-falloff fit run at all). **v1.8:** `pack_v` is an **optional** column — `REQUIRED_FIELDS` was the whole field list, so adding any column to `CORPUS_HEADER_FIELDS` would have failed every corpus written before it; additive schema growth belongs here rather than in a migration. **v1.9:** `tilt_deg` joins `PLACEMENT_FIELDS`, so 0°/30°/60° at one distance are three distinct placements with independent `repeat_idx` sequences rather than three repeats of one — the whole point of recording the angle. The delicate part is that an optional field *inside the placement key* can present as an absent column, a missing dict key, `None` or `''`, and all four are the same physical statement: new `PLACEMENT_BLANK_FIELDS` collapses them to `''`, and the key builders moved to `.get()`. This is the same failure `PLACEMENT_CONSTANT_FIELDS` was created to prevent, arriving by a different route — without it every historical placement would split in two and every `repeat_idx` restart. **A recorded `0` is not blank**: 0° is a real axial capture, and conflating it with "no angle recorded" would merge the oblique study's 0° base with every `long_axis=x/y` capture of the same target. Verified rather than argued — output on both corpora is byte-identical to the pre-change baseline across all 377 checks and 134 repeat-consistency rows |
+| `src/data/targets/targets_v3.csv` | Human-authored registry, **current** — **27** physical target objects *(verified against the file 2026-07-31; the "26" recorded previously was the count at the 2026-07-26 validation run, before the solder stick was added on 07-28)*, single source of target physical metadata (id, material, shape, dims, mass, …). Human-owned data: tooling reads and validates only. Revision v3 added rocks, quartz and a water bottle, changed the solder roll, and later a weighed 56 g solder stick. Loads with **0 errors**; the one remaining warning is deliberate (see below). Two provenance notes worth keeping: the LibreOffice export had been written as **UTF-7**, arriving with every `_`/`-`/`#` as a `+AF8-`-style escape (decoded in place with `iconv`; the export dialog remembers the charset, so it needs setting back to UTF-8 or this recurs), and `Fe_heavy_pully` was reclassified `disc` → **`ring`** — its 66 mm wall was flagged as set on a solid shape, but the measurement is right (a real bore, 66 = (150−18)/2), so the row was a shape misclassification, not a bad number. Flagged, not changed: that id misspells "pulley" and ids are stable by the registry's own rule (renaming would orphan captures), and its `closed_loop=y` reads the flag as "supports a large circulating eddy path" rather than the header's stricter written rule — a registry-wide semantics decision left open. **Open data-integrity item (§14.14):** `Sn_Pb_solder_spool_01` names **two different physical objects** across the epoch boundary — the header's own "changed solder roll", confirmed by a cross-epoch mean-shape cosine of +0.143 against ≥ 0.95 for every other matched target. The new roll needs its own id (ids are never reused) with the v1 captures left on the old one; until then all cross-epoch comparison for that id is invalid. Its `magnet_test = none` is **correct** — operator-verified; the ferrous-looking broadside signature is a shorted-loop effect, not a registry error |
 | `src/data/targets/targets_v1.csv` | **Superseded** registry of 22 objects, retained on disk and tracked. The 2026-07-23 corpus (§17.9) references it, so it is the registry that corpus must be read against |
 | `src/data/profiles/` | Locked calibration profiles (firmware↔ML contract, §10). Only the **operating** profile is tracked in git — **`cal_63_air_bat_v3.json`**; the superseded `cal_63_air_v2.json`, `cal_63_air_v1.json`, `cal_72_air_v3.json`, `cal_72_air_v2.json` are retained on disk but untracked — each is listed individually in `.gitignore` as it is retired. delaycal writes candidate profiles here routinely; those stay visible as untracked until they are either locked (tracked) or retired (ignored). Nothing in the code loads a profile by name, and both Import Profile and Compare Profiles scan the directory off disk, so a retired profile stays usable as a comparison reference for as long as the file is kept |
-| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema). `gui_signatures_targets_v1_20260723.csv` — 66 captures, 22 targets, 60–420 mm, under `cal_63_air_v2` (§17.9). `gui_signatures_targets_v3_20260728_142316.csv` — the v3-epoch corpus under `cal_63_air_bat_v3`, **170 captures / 10 710 rows as at 2026-07-31**, of which **82 carry a `pack_v`** spanning 21.08–24.4 V (the 88 without it are the 07-28 captures, which predate voltage logging). *(§17.12/§17.13 quote 166 captures with `pack_v` on 10 — that was the state at analysis time on 07-30, and the figures its null result was computed from. This file grows with each capture day, so any count in this document is a snapshot: check the file.)* Untracked in git while capture is underway (working data until a corpus is accepted), which means **git cannot restore a damaged corpus** — the two 2026-07-30 repairs each took a timestamped `.bak-` copy first and proved the write against it. One lesson from those: comparing a file against its own backup cannot detect damage that predates the backup, so row width is now asserted against the **header** |
-| `src/data/sessions/` | Raw Mode 2 session dumps (`session_<ts>.csv`) — self-describing per-session CSV with embedded profile JSON, per-column map, marks, and the `# pack_v:` / `# soak:` / `# stall:` comment tracks. Written automatically whenever the stream runs (classviz v1.63), ~220 KB/min. Untracked, and **not reconstructable after the fact** — the 2026-07-29/30 pack-voltage result (§17.13) exists only because auto-logging captured windows nobody would have pressed Record for |
+| `src/data/corpora/` | Signature-corpus captures from classviz's Analysis tab (`gui_signatures_*.csv`, CORPUS_HEADER schema). `gui_signatures_targets_v1_20260723.csv` — 66 captures, 22 targets, 60–420 mm, under `cal_63_air_v2` (§17.9). `gui_signatures_targets_v3_20260728_142316.csv` — the v3-epoch corpus under `cal_63_air_bat_v3`, **188 captures / 11 844 rows / 25 targets, verified against the file 2026-07-31**, of which **100 carry a `pack_v`** spanning 21.08–24.4 V (those without it are the 07-28 captures, which predate voltage logging) and **13 carry a `tilt_deg`** (the oblique-orientation study, §17.14). *(§17.12/§17.13 quote 166 captures with `pack_v` on 10, and §17.14's main analysis 170 — those are the states at their own analysis times, and are the figures those results were computed from. This file grows with each capture day, so **any count in this document is a snapshot: check the file.**)* **Migrated in place 2026-07-31 for `tilt_deg`** — corpus append writes *the file's own* header columns, not the tool's (classviz v1.65), so appending an oblique capture to a file lacking the column would have silently dropped the angle and the feature would have appeared to work while recording nothing. Migrating rather than starting a fresh file keeps the corpus in one piece, which §17.14 supports directly: the between-session noise component measures **zero**, so captures either side of the line are comparable. Verified — every pre-existing column byte-identical across all rows, checker output identical to the pre-migration baseline; the v1 corpus and the scratch file are left unmigrated and read blank. Untracked in git while capture is underway (working data until a corpus is accepted), which means **git cannot restore a damaged corpus** — the two 2026-07-30 repairs each took a timestamped `.bak-` copy first and proved the write against it. One lesson from those: comparing a file against its own backup cannot detect damage that predates the backup, so row width is now asserted against the **header** |
+| `src/data/sessions/` | Raw Mode 2 session dumps (`session_<ts>.csv`) — self-describing per-session CSV with embedded profile JSON, per-column map, marks, and the `# pack_v:` / `# soak:` / `# stall:` comment tracks. Written automatically whenever the stream runs (classviz v1.63), ~220 KB/min. Untracked, and **not reconstructable after the fact** — the 2026-07-29/30 pack-voltage result (§17.13) exists only because auto-logging captured windows nobody would have pressed Record for. **Every dump written before classviz v1.68 carries zero `# mark:` lines** (logging auto-started at v1.63 but marks only ever came from a button nobody pressed), so ~380 000 frames sat with no ground truth and no key to the corpus. Two things fixed that: v1.68's **`# capture:` line**, which stamps the exact frame window a corpus row was reduced from and is the lossless join key going forward; and `utilities/session_relabel/` (below), which recovered what it could from the dumps already on disk. **Five of those dumps now carry reconstructed marks**, each stamped `reconstructed cos=… src=…` in its notes — treat them as labelled by *shape match to a corpus capture*, not by observation, and note the match identifies the **target**, not the individual capture |
 | `src/data/scratch/` | Scratch captures of **unregistered** objects from the Shape Space tab (`gui_scratch_<date>.csv`, same CORPUS_HEADER schema, `scratch_<slug>` ids). Deliberately never written into `src/data/corpora/`: a corpus build hard-errors on an unregistered `target_id` and that guard stays — promotion means registering the object in the current registry (`targets_v3.csv`) and recapturing properly. The air-anchor mode (`[anchor=flat]` / `[anchor=air2]`) is recorded in the notes, because a flat single-anchor capture is not drift-corrected and that must stay visible afterwards. Untracked |
 | `src/pimd111.ui` | Qt Designer UI source for `pimd_gui.py` (sliders/QLineEdit fixed to match code, 2026-07-02) |
 | `utilities/` | Local analysis tools that are **not** part of the PIMD toolset — one directory each, ordinary tools by convention (`TOOL_VERSION`, terse `# History:` header lineage, read-only with respect to the repo), with their history in `CHANGELOG.md` under a `### utilities/<name>/` heading like anything else. **The rule: a utility cited from `CHANGELOG.md` has to be tracked** — the 2026-07-30 result names `soakvolt.py` as the tool behind it, and had that file stayed local the project's headline finding would not have been reproducible from a clone. (A separate untracked `CHANGELOG.local.md` was tried and abandoned: two places to look, two formats to keep in step, and detail behind a tracked finding living where no clone would see it.) |
 | `└─ soak_vs_voltage/soakvolt.py` | **v1** — reads every classviz session dump for a campaign and separates pack voltage from soak time, the two variables every session before 2026-07-30 confounded in the same direction (ρ 0.80–0.91 against either, identical magnitude, so no *within*-session correlation could have settled it). The tool behind §17.13. Four things it does that a one-off script would not: window hygiene as a **span test on the firmware clock** mirroring classviz's own guard, so it caught the §14.10 host stall without being told about it; **three provenance grades** on every voltage figure (`typed` / `held` / `note`, degrading to `interp` / `extrap`), never mixed silently, with a header `pack_v` of unknown age **dropped** as a settings restore rather than a reading; **loaded readings only**, never interpolating across a rest, because a rested pack rebounds; and the stream-start transient removed **by test** (every column above 5× its own session floor) rather than by duration, so it cannot silently eat real warm-up. Emits JSON |
 | `└─ pack_discharge/` | **v3** (`packv.py` + `build_page.py`) — derives pack discharge rate, state of charge and remaining streaming runway from the `# pack_v:` lines a dump already carries, fitting in *streaming* minutes because the profile loop draws a fixed duty. Source of the §12 capacity figures. Three corrections the raw log requires, each of which changes the answer: `age_s` must be applied (a header `pack_v` is the spinbox value restored at session open — one was measured 95 min before the session existed); the axis must be **accumulated streaming time**, not wall clock (idle drain is ~15× lower, so wall clock flattens the slope through every gap); and readings within 5 min of load-on are rested, not settled, and sit high. **Two methodological traps recorded rather than buried.** (1) v1 claimed split-half cross-validation as evidence and it was **coincidence** — the split correlated with voltage range, and across too little voltage the two fitted parameters trade off freely; replaced with leave-one-out. Practical upshot: **constraining runtime needs curvature, not more points on the flat.** (2) v1/v2 named the second parameter `sag` and reported it as the pack's IR drop — **wrong by ~3×** against a direct measurement (0.29 V, §12); it is a curve-alignment constant absorbing mismatch between a nominal OCV shape and these cells. Renamed `offset`. The general lesson: a two-parameter fit gives a physically-named parameter a confident value whether or not the name is right, and **the residual does not complain** — RMSE stayed 46 mV throughout, a good fit of the wrong thing. Also v2: refuse to fit **across a recharge** (v1 fitted straight through a pack swap and reported a confident, nonsensical runtime; the only outward sign was a residual it computed and never surfaced) |
+| `└─ session_relabel/relabel.py` | **v1** — retro-labels the mark-free dumps by matching plateaus against the corpus. **The one utility that is NOT read-only with respect to the repo:** `--apply` rewrites session dumps in place (default is a dry run). Plateaus come from the existing change-point approach; each is matched by **cosine on the unit shape**, with time used only to bound the candidate set and **never** to break a tie, because `captured_at` lags the frames by tens of seconds. The load-bearing detail is that the air baseline must be **interpolated between a reference before and one after**, exactly as `compute_plateau_stats()` does — a single earlier reference carries the full drift and was costing ~0.05 of cosine (§14.1); with interpolation the correct pairings score **0.996–1.000**. Applied at a 0.95 floor it recovered **39 mark pairs across 5 dumps**, rejecting 440 plateaus — most of them air, which shape matching cannot identify by construction and which the tool therefore declines to label rather than guess. Every injected mark carries `reconstructed cos=… src=…` provenance and a `# session_notes:` line records tool, date and floor. **Two limits worth knowing:** the match identifies the *target*, not the individual capture (repeated placements of one target at one distance are shape-identical, so two plateaus can cite the same `src=`), and injecting marks changes what `pimd_features --out` would produce from these dumps — it currently emits nothing for them and would now emit rows **duplicating** corpus captures under different ids. *Do not merge without deciding to.* Every file backed up and verified after writing: injection inserts comment lines only, and all 221 754 data lines came back byte-identical |
 | `References/schematic-v604.jpg` | Schematic export, rev 6.04 (current front-end, R12/R13 = 0 Ω, field annotations) |
 | `References/scope-pulse-baseline.jpeg` | Scope baseline, Mode 1, 10 kHz / 20 µs / 10 µs |
 | `References/GUI-target-example.jpg` | App baseline, Mode 1 v4.07, 10 kHz / 20 µs / 10 µs / DS 1024 — positive spike = ferrous, negative spike = non-ferrous, noise < 500 µV |
@@ -1174,6 +1318,11 @@ layer is being built on. At an SNR ≥ 5 gate: **46 of 66 captures gated**, fami
   disc 26.4–30.9, cast-iron trivet latest at 33.9–34.4 µs. Every gated ferrous target crosses
   by ≤ 11 µs (i.e. is already positive at the bottom of the ladder) and every gated
   non-ferrous never crosses — so the two ends need sentinel values, not a crossing.
+  ***Per-epoch, flagged 2026-07-31:** these are `cal_63_air_v2` values. Under v3 every crossing
+  interior to the ladder moves **shorter, ratio 0.76 median** — trivet 34 → 24 µs, SS disc
+  31 → 18, gal RHS 21 → 19, gal pipe 17 → 13 — because v3 samples 40–144 ns later (§10, §17.14).
+  The **ordering is preserved**; the numbers are not portable and must be restated against the
+  epoch in use. (The changelog entry recording this cites §17.6; the ladder lives here.)*
 - **A threshold-axis "decay persistence" ratio is a second, independent readout to sign** —
   mean |Δ| over the two lowest-voltage threshold columns ÷ the two highest. Every gated
   **solid-metal** ferrous/crossover capture ≥ 2.44; every non-ferrous ≤ 1.75. **The ferrite
@@ -1192,7 +1341,11 @@ layer is being built on. At an SNR ≥ 5 gate: **46 of 66 captures gated**, fami
 - **Family classification held at 97.8 %** under the SNR ≥ 5 gate in leave-one-out, but the
   misclassifications were **directional** — solid ferrous drifting toward crossover as SNR
   falls (`Fe_spanner_01` @240 mm). See §14.9: this is a real limit of the sign test, not a
-  fitting artefact.
+  fitting artefact. ***Scope note added 2026-07-31:** this figure is not comparable to the v3
+  corpus's 88.1 %, and the difference is not a regression. This corpus contains **no axial
+  (`long_axis=z`) capture of any crossover target** — it sampled only the orientation in which
+  the early-band sign happens to work, so it could not see the failure mode §17.14 exposes. Read
+  97.8 % as "the sign test is reliable at transverse placements", which is what was measured.*
 - **Corpus integrity:** the capture file was repaired in place after the classviz v1.40
   `capture_id`-reuse defect (three orphaned captures reissued by regrouping on `captured_at`;
   no measurement data lost, original kept as `.bak`). Any corpus captured with classviz
@@ -1505,6 +1658,203 @@ numbers: the disagreement was about **causation, not measurement**.
   (2) Repeat the §17.7 fine threshold sweep at **two stated pack voltages** (say 24.5 and
   22.0 V), which maps the zone's position on the decay and would turn this inference into a model
   (§14.7).
+
+### 17.14 v3-corpus signature geometry — family is orientation, and the two-basis model holds
+
+*2026-07-31 · `gui_signatures_targets_v3_20260728_142316.csv` · results 1–2 and 4–6 computed on
+**170 captures / 25 targets** over eight sessions 07-28 → 07-30; result 3's oblique study was
+captured the same day the Tilt input shipped and took the file to **188** ·
+`cal_63_air_bat_v3` sha `4a2352d2` · fw 4.26 · 6S battery · gate = SNR ≥ 5 on `splithalf_floor`
+unless stated. Compared throughout against the 2026-07-23 `targets_v1` corpus (66 captures,
+`cal_63_air_v2`, bench PSU, §17.9). Tilt-recorded captures today: **13** — trivet at 0/30/60/90°
+×2 reps, SS disc at 30/60/90°, all at 60 mm and `long_axis=z`, plus two axial solder-spool
+captures.*
+
+The corpus is 2.6× the first one and **deliberately spans orientation**, which is the whole
+reason it says something new. Six results, the first two of which reframe §17.9.
+
+- **1. "Ferrous vs crossover" is an orientation coordinate, not a material one.** The early-band
+  sign — what separates the two in `pimd_shape.family()` — splits by *placement*: **90.9 %**
+  accurate at `ax = y` (n = 22), **75.0 %** at `ax = x` (n = 16), **53.8 %** at `ax = z`
+  (n = 13, i.e. chance). Every crossover→ferrous miss in the corpus is an axial capture.
+  `Fe_Cast_iron_trivet_01` is the clean demonstration: flat (`ax = x`) it reads `crossover`,
+  crossing 29–36 µs, early −50…−102 ×10⁻³; on edge (`ax = z`) it reads `ferrous`, crossing pinned
+  at the 8 µs rail, early +7…+47 — and it is **2.4× louder on edge** (50.1 vs 20.9 mV L2 at
+  60 mm). That is what a 3 mm-thick 75 mm disc must do: face-on the eddy loop has the full 75 mm
+  of area and the fast negative term dominates the early bands; edge-on the loop area collapses
+  to the 3 mm thickness and the magnetic term is left exposed. The spanner fails the other way,
+  reading `crossover` broadside. So the early axis measures **presented eddy-loop area =
+  geometry × orientation** and cannot be read as a material subclass. Decay persistence does not
+  rescue the split (ferrous median 4.20, crossover 4.82, fully overlapping). Consequences in
+  §14.9.
+- **2. What survives is stronger than the old family verdict.** The *late*-band sign is the
+  robust axis and does not need the gate:
+
+  | tier | rule | accuracy |
+  |---|---|---|
+  | **1 — iron-bearing vs non-ferrous** | sign of late-band mean | **97.2 %** (141/145) **ungated**; 98.3 % gated |
+  | 2 — ferrous vs crossover | sign of early-band mean | 76.5 % (39/51) gated — see result 1 |
+  | combined 3-class (the v1 comparison) | current `family()` | 88.1 % gated, 85.5 % ungated |
+
+  Decay persistence remains a clean independent second opinion on tier 1 — non-ferrous
+  0.65–1.80, iron-bearing 2.12–9.02, **no overlap** (excluding the two contaminated captures of
+  result 6). The `ferrite_toroid_01` contradiction **reproduces**: positive by sign, 1.51 by
+  persistence — still the mineralised-ground preview, and still a case where both readouts are
+  true (§17.9). A noise-scaled dead band on the early axis behaves as anticipated but is a
+  coverage trade, not a fix: **1.5σ → 90.7 % on 92 % decided; 3σ → 95.7 % on 80 % decided.**
+- **3. The Pasion–Oldenburg two-basis model is confirmed, including its actual content.**
+  Placement records `long_axis` in the coil frame — z = axial, x and y = transverse (both in the
+  coil plane, 90° apart). If a signature is a weighted mix of one axial and one transverse basis
+  shape, x and y must be the *same* mix and every orientation set must be rank 2. Both hold:
+  across the five targets holding both, **cos(x̄, ȳ) = 0.998 median, minimum 0.983** — the two
+  transverse orientations are indistinguishable *even for a 210 mm spanner*, where a 90° in-plane
+  rotation is a large physical change. All variation sits on the transverse↔axial contrast and is
+  graded by geometry:
+
+  | target | cos(transverse, axial) | rank-1 → rank-2 RMS residual | own repeat noise |
+  |---|---|---|---|
+  | Cu_pipe_01 (tube) | 0.991 | 0.137 → 0.109 | 0.114 |
+  | Fe_Zn_gal_rhs_01 (tube) | 0.982 | 0.171 → 0.144 | 0.154 |
+  | Fe_spanner_01 (irregular) | 0.986 | 0.183 → 0.131 | 0.144 |
+  | Al_plate_01 (plate) | 0.950 | 0.153 → 0.099 | 0.042 |
+  | Cu_Zn_brass_block_01 | 0.935 | 0.180 → 0.078 | 0.158 |
+  | Fe_SS_disc_01 (thin disc) | 0.776 | 0.338 → **0.043** | 0.062 |
+  | Fe_Cast_iron_trivet_01 (thin disc) | 0.736 | 0.446 → 0.266 | 0.320 |
+  | Sn_Pb_solder_spool_01 (see result 6) | **−0.298** | 0.602 → 0.127 | 0.201 |
+
+  Every anisotropic target collapses to its own electronics-noise floor at rank 2 and rank 3 buys
+  nothing; rod-like targets are already rank 1, which the model permits. `Al_plate_01` is the
+  only apparent counterexample and is not one — its residual correlates −0.82 with SNR and +0.54
+  with distance, and within its best-sampled orientation (`ax = y`, n = 9) it is rank 1 at 0.048;
+  the excess is marginal 300/360 mm captures sitting on the gate.
+
+  **The model's actual content needed oblique captures, which no corpus had** — `long_axis` only
+  takes x, y or z, so every capture sat at 0° or 90° and rank-2 structure alone is equally a
+  consequence of "there are two placements and they differ". The Tilt input (classviz v1.67)
+  closed that. Fitting each oblique capture as `v(θ) = a·v_axial + b·v_transverse` against the
+  dipole prediction `a = cos²θ`, `b = sin²θ`, at 0/30/60/90° and 60 mm:
+
+  | target | oblique fit error in `a` | in `b` | amplitude meas./pred. |
+  |---|---|---|---|
+  | `Fe_Cast_iron_trivet_01` | **−0.015 ± 0.036** | −0.010 ± 0.075 | 0.982 – 1.006 |
+  | `Fe_SS_disc_01` | **+0.008 ± 0.048** | −0.035 ± 0.006 | 0.927 – 1.042 |
+
+  Both coefficients land on the prediction within their scatter, and the **amplitude** — which
+  the shape fit does not constrain — comes out right to within 2 % on the trivet. Every oblique
+  capture is a **positive convex combination** of the two extremes (a, b ≥ 0 within noise,
+  a + b ≈ 1): no extrapolation, no third component. Residuals run 4–21 % against a repeat-noise
+  RMS of 9.4 % / 6.6 %. Every derived coordinate moves monotonically with tilt — trivet
+  early-band mean **+35 → +17 → −22 → −58** (×10⁻³), crossing width **8.0 → 8.5 → 17.4 →
+  30.8 µs**, amplitude 45.2 → 21.4 mV — so **the same object walks from `ferrous` to `crossover`
+  as it is tipped**, confirming result 1 from a second direction.
+
+  **Method warning, recorded because it is the kind of mistake that gets published: the fit must
+  be done on raw vectors, not unit shapes.** Normalising each capture to unit length destroys the
+  amplitude weighting the model predicts, and the unit-shape version reads *shallower* than
+  cos²θ (0.83 / 0.46 at 30° / 60° against 0.75 / 0.25) — which would have been recorded as a
+  partial failure of the model rather than an error of method.
+
+  **What it changes:** orientation stops being a confound and becomes a *fitted parameter* —
+  given a target's two basis shapes, θ is solvable from one capture, and an orientation-invariant
+  descriptor (the 2-D subspace itself, not any signature in it) becomes well-defined. That is the
+  foundation the τ-class + size tier needs. **Cost: two placements per target**, which were
+  already being captured.
+- **4. Placement variation is below the electronics noise floor — it is not the limiting factor.**
+  Repeats at an identical placement tuple within a session were captured *without moving the
+  target*, so they measure electronics alone; the same tuple recaptured in a later session
+  necessarily involved re-placing it. The two distributions are the same, and the re-placed set
+  is if anything tighter in the tail:
+
+  | | n | median cos | p10 | min | median angle |
+  |---|---|---|---|---|---|
+  | same session (never moved) | 46 | 0.9894 | 0.9550 | 0.577 | 8.3° |
+  | cross session (**re-placed**) | 37 | 0.9899 | 0.9675 | 0.948 | 8.1° |
+
+  Across 11 tuples over four targets, **manual re-placement at a nominal (distance, orientation)
+  contributes nothing measurable** on top of measurement noise. Amplitude repeatability at fixed
+  placement: CV median 2.6 %, p90 9.6 %. Shape scatter does **not** saturate — it tracks SNR all
+  the way down (13.4° at SNR 5–10, 7.8° at 10–20, 4.8° at 20–40, 2.6° at 40–100, 1.2° above 100)
+  — but runs **2.4× the isotropic-additive-noise prediction** in 90 % of pairs. See §3: this is
+  the same ~2× by which `splithalf_floor` understates reproducibility noise.
+- **5. Noise — the 19 air captures are the best floor probe in the record.** The between-session
+  component measures **zero** (within-session pooled per-cell σ 4.24 mV vs all-captures 4.03 mV
+  across three days and eight sessions), so captures from different days are directly comparable
+  (§3). The floor is **not flat**, and its dominant feature is **not** the §14.11 corner: **46 %
+  of all noise energy sits in the 3.80 V column alone** (column L2 2.85 mV against 0.37–1.48 for
+  the other eight), concentrated at long pulse widths, while the three corner cells carry 7 %.
+  That is not a conflict with §17.12 — the corner came from matched target pairs within one
+  afternoon, this is across-capture σ spanning the campaign — and the 3.80 V excess is **entirely
+  confined to fresh-pack and cold-start captures** (24.40 V → 5.55 mV, 23.69 V → 4.39, cold pair
+  4.85/6.15, against 0.64–2.06 for every settled capture in the 21.1–23.4 V window). §17.13's
+  moving zone, showing up in target-free data: **a pack-state artefact operator discipline already
+  removes, not a property of the profile.** The aggregate floor comparison against v1 looks
+  unfavourable at face value (median `splithalf_floor` 1.245 → 1.784 mV, matched SNR ×0.73) but
+  that is composition plus this tail, not a regression in the rebuilt supply — the 07-28 session
+  *opens* at 1.25 median, indistinguishable from v1, and settled air captures close at 0.90–0.97.
+- **6. Two data-integrity items, both isolated, both needing an operator decision.**
+  `Sn_Pb_solder_spool_01` is a **different physical object across the epoch boundary** (§14.14,
+  §15) — cross-epoch mean-shape cosine +0.143 against ≥ 0.95 for every other matched target, and
+  the largest orientation effect in the corpus (cosine **−0.3 between its own two orientations**).
+  Excluded from every aggregate above. And **one rogue capture** — `Fe_Cast_iron_trivet_01` @
+  120 mm, `ax = x`, r1 — passes both quality gates at SNR 16.5 while sitting at cosine 0.33–0.68
+  to every other trivet capture including its own r2 sibling (§14.13).
+
+**The epoch change itself is benign**, and is written up where it is actionable: §10's
+feature-portability paragraph. In short — coherent, one-parameter, predicted in sign and
+direction by v3's later delay anchoring, and **no target changed its majority family verdict.**
+
+### 17.15 The heatmap placement transient — instrumentation, not target physics
+
+*2026-07-31 · answers the operator note at `TODO.md:112-115` · 41 timeable transitions from
+9 targets across three relabelled dumps (`session_20260730_150124`, `_112854`, `_171026`)*
+
+**The question.** Watching the Std Dev (rolling N) heatmap at 500/1000 µV while placing a target,
+the grid "morphs to all yellow and back" — and *where the epicentre of that change sits appears
+to vary with material*. Is it real, and is it being captured?
+
+**It was not being captured, and it still is not, by design.** The transient is detected as a
+single bit (`_sig_removal_armed`) and everywhere else defined as contamination — the settle gate
+clears the buffer on any settle loss, `SETTLE_S_DEFAULT = 2.0` trims after every mark, and the
+Settle tooltip says it outright: *"so target/air transitions … can't enter the window"*. The raw
+material was on disk the whole time; nothing had ever read session frames as a per-cell time
+series.
+
+- **Most of the visible effect is the display, and this was predicted before measuring.** σ over
+  a fixed 50-frame window straddling a step of per-cell amplitude `A` goes as `A·√(f(1−f))` —
+  peaking at **`A/2`** half a window in (~3.6 s) and back to floor one window (~7.2 s) later. At
+  the 500/1000 µV scale **any cell whose settled |Δ| exceeds ~2 mV saturates**, and a spanner at
+  60 mm is 39 mV, i.e. peak σ ≈ 19 500 µV — **19× over the ceiling**. "All yellow" is guaranteed,
+  and the apparent epicentre is the settled signature re-rendered through a saturating scale,
+  which is material-dependent *by construction* with no time-domain physics required.
+- **There is real per-cell structure, and it is scan order.** Timing each cell's 50 % crossing,
+  the spread runs ~3× the noise prediction, and the trend is the sweep: slope of t50 against
+  channel index **−5.6 ms/channel** (median), **−350 ms** across all 63 channels, against a
+  144 ms sweep at 6.94 Hz, negative in **33 of 41** events. Cells are sampled sequentially within
+  a sweep, so while the target is still moving, later-sampled cells see it closer and cross their
+  halfway point earlier — direction and consistency both match. **The magnitude does not**:
+  350 ms is 2.4× the sweep period, which sequential sampling alone does not explain. The 32-deep
+  boxcar interacting with a monotonic per-channel offset is the obvious candidate but is
+  **flagged, not asserted** — it cannot be settled without a controlled motion profile, which
+  hand-placed captures are not.
+- **The viscosity hypothesis is not supported, and the first answer was wrong.** Regressing out
+  the scan-order trend and normalising by transition duration, the per-*event* test read iron
+  0.090 vs non-ferrous 0.068, Mann-Whitney **p = 0.035** — apparently significant. It is not:
+  those 41 events come from only **9 distinct targets** (one contributes 6, another 10), so the
+  test was **pseudo-replicated**. Aggregating to one median per target first, the honest
+  comparison is iron n=4 median 0.099 vs non-ferrous n=5 median 0.069, **p = 0.286**. With four
+  iron targets the test has almost no power, so this is *"not shown"*, not *"shown absent"* — the
+  direction is at least consistent with the hypothesis, and it would take a deliberate design
+  (many targets, controlled placement) to say more.
+- **No consistent placement/removal asymmetry either** — it runs both ways across targets and
+  tracks transition duration rather than material.
+- **What remains unexplained:** after scan-order removal the residual is still ~2.4–2.7× the
+  noise prediction, for iron and non-ferrous alike. Something common to all materials is in
+  there; hand-motion trajectory — which varies per event and is unrecorded — is the leading
+  candidate.
+
+**Bottom line for the operator: the effect is real to look at but is instrumentation, not target
+physics. Nothing here justifies a new feature axis.** The one concrete change worth making is
+unrelated to materials — the Std Dev heatmap's own defects, recorded as §14.12.
 
 ## 18. Change Log Consolidation Pass.
 

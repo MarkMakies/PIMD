@@ -1,3 +1,70 @@
+### DESIGN.md — 1.13 — consolidation pass (§18)
+
+Human-directed, read-only rule suspended per §18. Consolidates the 13 entries above the previous
+marker. Net state determined per file first; the CHANGELOG was **not** replayed.
+
+**Three of those 13 were already in DESIGN** — the `DESIGN.md — 1.12` audit entry, the
+pack-voltage re-measurement and the errata list were folded in at 1.12 and only sat above the
+marker because the marker was never moved. Treated as consolidated, not re-imported.
+
+**The result that drove the pass: family is an orientation coordinate, not a material one.** The
+v3 corpus (170 captures / 25 targets, 2.6× the first and deliberately spanning orientation)
+shows the early-band sign splitting by *placement* — 90.9 % accurate transverse, **53.8 % axial**,
+every miss axial. The trivet reads `crossover` flat and `ferrous` on edge, because the axis
+measures **presented eddy-loop area = geometry × orientation**. What survives is stronger than
+the old verdict: the late-band sign reads iron-bearing vs non-ferrous at **97.2 % ungated**.
+Separately, the **Pasion–Oldenburg mixing law is confirmed** on the 13 tilt-recorded captures —
+oblique fits land on `cos²θ` within scatter, amplitude right to 2 %, every oblique pose a
+positive convex combination of the two extremes — so orientation becomes a *fitted parameter*.
+
+**Sections changed.** Header → Doc-rev **1.13**, classviz **v1.68**, features **v13**,
+corpus_check **v1.9**; per the operator's decision the Doc-rev line is now **short with no
+`(Previous: …)` chain** — the per-pass narrative lives here, in the archives. §1 gains an
+orientation paragraph and the corpus snapshot moves 66 → 188. §3 gains two measured lines:
+`splithalf_floor` **understates reproducibility noise ~2×** (so the SNR ≥ 5 gate is really a
+reproducibility gate of ≈ 2.5–3.5), and the **between-session noise component measures zero**.
+§10 **cashes in the feature-portability question** deferred since the 1.10 pass — the v2→v3 shift
+is coherent and one-parameter (band means +5.2 ×10⁻³, crossings ×0.76, amplitude by family not by
+gain), and **no target changed family**; the `(profile_name, profile_sha8)` guard still stands,
+since the epochs are relatable rather than interchangeable. §13 gains the two-basis bullet. §14.1
+gains independent offline confirmation of the reference-age ceiling; §14.7 gains the air-capture
+census as a third, target-free sighting of the moving zone; §14.11 is scoped (the corner is a
+second-rank floor contributor — 7 % of noise energy against the 3.80 V column's 46 %); **§14.9 is
+substantially rewritten** from a noise problem to an orientation problem, with the dead band
+demoted to a coverage trade. Three new open problems: **§14.12** the Std Dev heatmap bypasses both
+the glitch substitution and the stall guard, **§14.13** no within-placement consistency check
+(a rogue capture passes both gates at SNR 16.5), **§14.14** `Sn_Pb_solder_spool_01` is two objects
+under one id and its shorted-loop behaviour is a genuine tier-1 false-positive mode. §15: rows
+rewritten for classviz, features, corpus_check, delaycal, targets_v3, corpora and sessions, plus a
+**new `utilities/session_relabel/` row**. New **§17.14** (six results) and **§17.15** (the
+placement transient).
+
+**Two errors of the source entries corrected rather than carried.** The v3-analysis entry says
+"the §17.6 ladder values need restating against v3" — the crossing ladder lives in **§17.9**, and
+the per-epoch flag was written there. And "188 captures" was carried into the §17.14 provenance
+line as though the whole analysis ran on it; results 1–2 and 4–6 ran on 170, only the oblique
+study takes the file to 188. Both verified against the file (188 captures / 11 844 rows / 25
+targets / 100 with `pack_v` / **13** with `tilt_deg`; registry 27 objects).
+
+**Flagged, not fixed** (both code, outside a docs pass): `pimd_features.py`'s header reads v13
+while its `TOOL_VERSION` constant still reads **v11** — the de-sync delaycal v1.25 fixed, and
+`TOOL_VERSION` is what stamps a corpus row; and delaycal's **100 ns fine-step default**, off the
+8 ns grid and unreachable by its own spinbox. Both now recorded in their §15 rows.
+
+**Dropped / not carried**, as changelog-level detail: the relabel tool's `--apply` mechanics
+beyond its provenance and limits, the corpus tilt-migration procedure, and the withdrawn
+"steel spool core" speculation (the registry row was right; recorded in §14.14 as the correction
+it turned out to be). **No content removed.** Uncited-and-unmatched assets left alone rather than
+guessed: `References/Targets v1 Analysis/CC_BRIEF_shape_space.md`,
+`References/V3/NEXT_SESSION_handover_and_V3_profiling.md`, `References/V3/warm_bat_notes.md`.
+(2026-07-31)
+
+---
+
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-07-31
+
 ### findings — the heatmap transient is scan order, not material; viscosity not supported
 
 *2026-07-31 · answers the operator note at `TODO.md:112-115` · 41 timeable transitions from
@@ -730,8 +797,6 @@ deliberate code pass.
 0.5 s settling. (2026-07-31)
 
 ---
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-30
 
