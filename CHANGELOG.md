@@ -1,3 +1,238 @@
+### findings — the heatmap transient is scan order, not material; viscosity not supported
+
+*2026-07-31 · answers the operator note at `TODO.md:112-115` · 41 timeable transitions from
+9 targets across three relabelled dumps (`session_20260730_150124`, `_112854`, `_171026`).*
+
+**The question.** Watching the Std Dev (rolling N) heatmap at 500/1000 while placing a target,
+the grid "morphs to all yellow and back" — and *where the epicentre of that change sits appears
+to vary with material*. Is that real, and is it being captured?
+
+**It was not being captured, and it still is not, by design.** The transient is detected as a
+single bit (`_sig_removal_armed`) and everywhere else defined as contamination — the settle
+gate clears the buffer on any settle loss, `SETTLE_S_DEFAULT = 2.0` trims after every mark, and
+the Settle tooltip says the quiet part out loud: *"so target/air transitions … can't enter the
+window"*. The raw material was on disk the whole time; nothing had ever read session frames as
+a per-cell time series.
+
+**Most of the visible effect is the display, and this was predicted before measuring.** σ over
+a fixed 50-frame window straddling a step of per-cell amplitude `A` goes as `A·√(f(1−f))` —
+peaking at **`A/2`** half a window in (~3.6 s), back to floor one window (~7.2 s) later. At the
+500/1000 µV scale **any cell whose settled |Δ| exceeds ~2 mV saturates**; a spanner at 60 mm is
+39 mV, i.e. peak σ ≈ 19 500 µV, **19× over the ceiling**. So "all yellow" is guaranteed, and the
+apparent epicentre is the settled signature re-rendered through a saturating scale — which is
+material-dependent *by construction*, with no time-domain physics required.
+
+**There is real per-cell structure, and it is scan order.** Timing each cell's 50% crossing
+across a transition, the spread runs ~3× the noise prediction — so something beyond noise is
+there. It is the sweep:
+
+| measure | value |
+|---|---|
+| slope of t50 against channel index | **−5.6 ms/channel** (median) |
+| across all 63 channels | **−350 ms** |
+| one sweep at 6.94 Hz | 144 ms |
+| sign consistency | negative in **33 of 41** events |
+
+Cells are sampled sequentially within a sweep, so while the target is still moving, later-sampled
+cells see it closer and cross their halfway point earlier. Direction and consistency both match.
+**The magnitude does not fully match** — 350 ms is 2.4× the sweep period, which sequential
+sampling alone does not explain; the 32-deep boxcar interacting with a monotonic per-channel
+offset is the obvious candidate but is **flagged, not asserted**. It cannot be settled without a
+controlled motion profile, which the hand-placed captures are not.
+
+**The viscosity hypothesis is not supported, and the first answer was wrong.** Regressing out
+the scan-order trend and normalising by transition duration, the per-*event* test read iron
+0.090 vs non-ferrous 0.068, Mann-Whitney **p = 0.035** — apparently significant. It is not: those
+41 events come from only **9 distinct targets** (`Fe_SS_disc_01` alone contributes 6,
+`Ag_SS_spoon_plated_01` 10), so the test was pseudo-replicated. Aggregating to one median per
+target first, the honest comparison is **iron n=4 median 0.099 vs non-ferrous n=5 median 0.069,
+p = 0.286**. **Not supported.** With four iron targets the test has almost no power, so this is
+"not shown", not "shown absent" — but the direction is at least consistent with the hypothesis,
+and it would take a deliberate design (many targets, controlled placement) to say more.
+
+**No consistent placement/removal asymmetry either** — it runs both ways across targets
+(`Cu_Zn_brass_block_01` 0.443 place vs 1.165 remove; `Ag_SS_spoon_plated_01` 0.201 vs 0.175),
+and tracks transition duration rather than material.
+
+**What remains unexplained:** after scan-order removal the residual is still ~2.4–2.7× the noise
+prediction, for iron and non-ferrous alike. Something common to all materials is in there, and
+hand-motion trajectory — which varies per event and is unrecorded — is the leading candidate.
+
+**Bottom line for the operator: the effect is real to look at but is instrumentation, not
+target physics.** Nothing here justifies a new feature axis. The one concrete change worth
+making is unrelated to materials: **the Std Dev heatmap's own defects** — it is the only heatmap
+mode that bypasses the 64-frame glitch substitution and the v1.64 window-span stall guard, so it
+displays glitches and post-stall drift as noise. Recorded separately; not fixed here.
+(2026-07-31)
+
+---
+
+### utilities/session_relabel/ — v1 — retro-label the mark-free dumps by signature matching
+
+**NOT read-only with respect to the repo**, unlike the rest of `/utilities/` — `--apply`
+rewrites session dumps in place. Default is a dry run.
+
+Every dump written before classviz v1.68 carries **zero `# mark:` lines**: logging auto-started
+at v1.63 but the marks only ever came from a button nobody pressed. ~380 000 frames with no
+ground truth, and no key to the corpus — the corpus `session` id and the dump filename are
+independent stamps of different events. v1.68 fixes this forward; this recovers what it can
+from the eleven dumps already on disk.
+
+Plateaus come from the existing change-point approach; each is matched against the corpus by
+**cosine on the unit shape**, with time used only to bound the candidate set (never to break a
+tie, because `captured_at` lags the frames by tens of seconds). **The air baseline must be
+interpolated between a reference before and one after**, exactly as `compute_plateau_stats()`
+does — a single earlier reference carries the full drift to the capture, which at ~50 µV/s over
+a 400 s plateau gap is tens of mV, and it was costing ~0.05 of cosine. With interpolation the
+correct pairings score **0.996–1.000**.
+
+Applied at a 0.95 floor: **39 mark pairs across 5 dumps** (171026 ×20, 122511 ×9, 112854 ×6,
+150124 ×3, 082729 ×1), 440 plateaus rejected — most of them air, which shape matching cannot
+identify by construction and which the tool therefore declines to label rather than guess.
+
+**Provenance is explicit**: every injected `mark_target:` carries `reconstructed cos=… src=…`
+in its notes, and a `# session_notes:` line records the tool, date and floor. **Two limits worth
+knowing.** The match identifies the *target*, not the individual capture — repeated placements
+of one target at one distance are shape-identical, so two plateaus can and do cite the same
+`src=` capture. And injecting marks changes what `pimd_features.py --out` would produce from
+these dumps: it currently emits nothing for them, and would now emit rows that *duplicate*
+corpus captures under different ids. Do not merge without deciding to.
+
+Every file backed up (`.bak-*-pre-relabel`) and verified after writing: injection only inserts
+comment lines, and all 221 754 data lines across the five files came back byte-identical.
+(2026-07-31)
+
+---
+
+### src/pimd_classviz.py — v1.68 — saving a signature marks the dump; new '# capture:' join key
+
+Session logging has auto-started since v1.63, and `_append_mark()` / `_append_mark_target()`
+have existed since v1.32 — but they were only ever called from the manual Mark button
+(`:4765-4766`), which nobody pressed. Result: **all eleven session dumps on disk carry zero
+`# mark:` lines.** ~380 000 frames of raw per-cell data, completely unlabelled, while the
+ground truth sat in a separate CSV with no key linking the two.
+
+`_on_sig_save_clicked()` now calls new `_sig_save_marks()`, which stamps the running dump with
+the same `placement` dict the corpus row was built from — same functions, same format, no new
+schema for the mark pair. Every capture labels its own frames as a side effect of being saved.
+
+**The `# capture:` line is the part that matters.** A mark says *what* was in the field; it does
+not say *which frames*. Those two were not recoverable from each other: the corpus `session` id
+(`gui_*`) and the dump filename are independent stamps of different events, and `captured_at` is
+stamped at **save** time — tens of seconds after the frames, because the air-after capture and
+the Save/Ignore decision sit in between. Measured on the 07-30 data: a plateau at 15:31:44
+belongs to a capture stamped 15:32:40. Recovering the window meant searching backwards for a
+stable run, i.e. reconstruction.
+
+`_append_capture()` writes the bounds explicitly — `capture_id`, the corpus `session` id,
+`n_central`, and the target / air-before / air-after windows as epoch seconds — taken **straight
+off the capture buffers** rather than re-derived, so the line cannot drift from what was
+actually reduced. Those are the same PC clock that stamps every frame's `pc_wallclock` column,
+so the join is exact and lossless. This also makes emitting at save time correct rather than a
+compromise: the line self-describes its window, so there is no need to reach into the
+acquisition state machine.
+
+**Guarding is in the caller by necessity.** `_append_mark()` writes to `self._session_file`
+without checking it (`:7540-7542`) — the Mark button guards upstream — so `_sig_save_marks()`
+no-ops when not recording, paused, or with no file. Those are ordinary states (logging stopped,
+replaying an old corpus), not errors, and a capture must never fail because of one. The write is
+additionally wrapped: the corpus row is already on disk and is the product, so a dump-annotation
+failure reports to the status bar rather than taking the capture down with it.
+
+Verified: the three lines emit in order and round-trip through `parse_mark_target_line()` and
+the new `_parse_capture_content()` (including `tilt_deg=30` surviving); `air_after` is correctly
+omitted when that slot is empty; capturing with no session recording does not raise; and both
+pre-v1.68 dumps still parse with `captures=[]`. (2026-07-31)
+
+---
+
+### src/pimd_features.py — v13 — '# capture:' lines parsed into SessionData.captures
+
+Reader for the line classviz v1.68 writes. `SessionData` gains `captures` —
+`list[(datetime, dict)]` with `capture_id`, `session`, `n_central` and the window bounds parsed
+to `(start, end)` float pairs on the same clock as `t_seconds`, so a corpus row can be resolved
+to the exact frames it was reduced from.
+
+Two deliberate choices. Unknown keys are **kept rather than dropped**: this line is the join key
+between the corpus and the frame stream, and a reader that silently discarded a field a later
+classviz added would fail worse than one that carries it. And the branch sits with the other
+mid-stream `#` handlers, so it is additive — every dump written before v1.68 parses exactly as
+before with `captures=[]`, which was verified against two of them rather than assumed.
+(2026-07-31)
+
+---
+
+### findings — the two-basis mixing law is confirmed; and two corrections to the 07-31 entry
+
+*2026-07-31 · `gui_signatures_targets_v3_20260728_142316.csv`, now 188 captures ·
+`cal_63_air_bat_v3` sha `4a2352d2` · fw 4.26 · 6S battery. Oblique captures taken the same day
+the Tilt input shipped: `Fe_Cast_iron_trivet_01` at 0/30/60/90° ×2 reps and `Fe_SS_disc_01` at
+30/60/90°, all at 60 mm, `long_axis=z`.*
+
+**1. Pasion–Oldenburg's mixing law holds on this instrument.** The morning's entry could confirm
+rank-2 structure and x ≈ y but explicitly could not test the model's actual content — that an
+oblique orientation is a *weighted mix* of the two extremes — because every capture on disk sat
+at 0° or 90°. It now can.
+
+Fitting each oblique capture as `v(θ) = a·v_axial + b·v_transverse` against the dipole
+prediction `a = cos²θ`, `b = sin²θ`:
+
+| target | cos(axial, transverse) | oblique fit error in `a` | in `b` | amplitude meas./pred. |
+|---|---|---|---|---|
+| `Fe_Cast_iron_trivet_01` | 0.747 | **−0.015 ± 0.036** | −0.010 ± 0.075 | 0.982 – 1.006 |
+| `Fe_SS_disc_01` | 0.753 | **+0.008 ± 0.048** | −0.035 ± 0.006 | 0.927 – 1.042 |
+
+Both coefficients land on the prediction within their scatter, and the *amplitude* — a
+prediction the shape fit does not constrain — comes out right to within 2% on the trivet.
+Every oblique capture is a **positive convex combination** of the two extremes (a, b ≥ 0 within
+noise, a + b ≈ 1): no extrapolation, no third component. Fit residuals run 4–21% against a
+repeat-noise RMS of 9.4% (trivet) / 6.6% (SS disc).
+
+**The fit must be done on raw vectors, not unit shapes.** Normalising each capture to unit
+length destroys the amplitude weighting the model predicts, and the unit-shape version reads
+*shallower* than cos²θ (weight 0.83 / 0.46 at 30° / 60° against 0.75 / 0.25) — which would have
+been recorded as a partial failure of the model rather than an error of method. Noted because it
+is the kind of mistake that gets published.
+
+Every derived coordinate moves monotonically with tilt, which is the same result seen
+qualitatively — trivet early-band mean **+35 → +17 → −22 → −58** (×10⁻³) and crossing width
+**8.0 → 8.5 → 17.4 → 30.8 µs** across 0/30/60/90°, with amplitude falling 45.2 → 21.4 mV.
+**The same object walks from `ferrous` to `crossover` as it is tipped**, which confirms from a
+second direction the reframe that family is orientation, not material.
+
+**What this changes.** Orientation stops being a confound and becomes a *fitted parameter*:
+given a target's two basis shapes, θ is solvable from one capture, and an orientation-invariant
+descriptor — the 2-D subspace itself rather than any signature in it — becomes well-defined.
+That is the foundation the τ-class + size tier needs. **Cost of the result: two placements per
+target**, since the extremes were already being captured.
+
+**2. Correction — the solder roll's registry row was right.** The morning's entry stated that
+`magnet_test = none` "cannot be right for an object behaving this way" and named a steel spool
+core as "the obvious candidate". The operator has since magnet-tested it: **not magnetic at
+all.** The registry needs no change and that speculation is withdrawn.
+
+**The surviving explanation is a shorted multi-turn coil**, and it is more interesting than the
+one it replaces. A spool of solder wire whose ends touch is a closed conductive loop of high
+inductance and very low resistance — a long L/R time constant. A slowly-decaying induced current
+reads exactly like ferrous on *both* discriminators: flat late band (`late` +178 ×10⁻³) and high
+decay persistence (5.26, 5.70), crossing pinned at the 8 µs rail. So this is a genuine
+**false-positive mode for tier 1** — the one non-ferrous target in the corpus that breaks the
+97.2% late-sign rule — and a shorted loop is a shape a real buried target can take.
+
+The new `ax=z, tilt=0` captures read ferrous (persistence 5.26/5.70) while the 07-30 untilted
+`ax=z` captures read non-ferrous (1.07/1.20), so the two states are orientation-selected —
+consistent with flux threading the shorted turns in one pose and not the other. **Flagged, not
+asserted:** this cannot be settled from the corpus. The decisive test is a continuity
+measurement across the spool's two wire ends, which takes seconds and would confirm or kill it
+outright.
+
+**3. Correction — `magnet_test` was not the thing to doubt.** The morning's entry reached for a
+registry error to explain a signature. The registry was correct and the physics was unusual;
+the reasoning should have run the other way. Recorded because the same reflex would misfire on
+any closed-loop target. (2026-07-31)
+
+---
+
 ### src/pimd_classviz.py — v1.67 — Tilt (°) capture input for oblique poses
 
 `long_axis` can only express 0° or 90° to the coil axis, so every capture in every corpus

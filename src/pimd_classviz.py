@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.67
+# PIMD Signature Visualiser (ClassViz) v1.68
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.68 saving a signature marks the session dump; new '# capture:' frame-window join key
 #   v1.67 Tilt (°) capture input for oblique poses; tilt_deg joins the placement tuple
 #   v1.66 session dump: pack_v carries age_s; new '# soak:' run/idle history lines
 #   v1.65 FIX corpus append wrote the tool's columns, not the file's (ragged CSV)
@@ -131,7 +132,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.67'
+APP_VERSION = '1.68'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -4613,6 +4614,11 @@ class MainWindow(QMainWindow):
         # covers the automated Training cycle too (which saves through here),
         # by design -- everything captured this session is on the charts, and
         # "Clear signatures" is the way back out.
+        # v1.68: label the frames this row came from, while the capture buffers
+        # are still populated -- _reload_editable_signature_list() below does not
+        # touch them, but the training path clears them a few lines further on.
+        self._sig_save_marks(target_id, placement, capture_id,
+                             self._editable_sig_session_id, stats.get('n_central'))
         self._sig_autocheck_keys.add((self._editable_sig_session_id, capture_id))
         self._reload_editable_signature_list()
         if self._analysis_training_active:
@@ -7771,6 +7777,70 @@ class MainWindow(QMainWindow):
         ])
         self._session_file.write('# mark_target: {0}, {1}'.format(ts, buf.getvalue()))
         self._session_file.flush()
+
+    def _append_capture(self, capture_id, session_id, n_central):
+        """Append one '# capture:' line recording WHICH FRAMES a just-saved
+        signature was computed from (v1.68).
+
+        This is the join key the corpus and the session dump never had. The
+        corpus `session` id ('gui_*') and the dump filename are independent
+        stamps of different events, and `captured_at` is stamped at save time --
+        tens of seconds after the frames it describes, because the air-after
+        capture and the Save/Ignore decision sit in between. So an analyst had
+        to RECONSTRUCT the window by searching backwards for a stable run.
+        Writing the bounds explicitly makes that exact instead.
+
+        Bounds are epoch seconds straight off the capture buffers, i.e. the same
+        PC clock that stamps each frame's pc_wallclock column -- deliberately
+        not re-derived, so this cannot drift from what was actually reduced.
+
+        Safe when the air-after slot is empty (single-anchor captures) and when
+        nothing is recording -- both are normal states, see _sig_save_marks()."""
+        def span(entry):
+            if not entry or not len(entry['t_seconds']):
+                return None
+            t = entry['t_seconds']
+            return '{0:.3f}:{1:.3f}'.format(float(t[0]), float(t[-1]))
+        bits = ['capture_id={0}'.format(capture_id), 'session={0}'.format(session_id)]
+        if n_central is not None:
+            bits.append('n_central={0}'.format(int(n_central)))
+        for key, entry in (('tgt', self._sig_target),
+                            ('air_before', self._sig_air_before),
+                            ('air_after', self._sig_air_after)):
+            s = span(entry)
+            if s:
+                bits.append('{0}={1}'.format(key, s))
+        ts = datetime.fromtimestamp(time.time()).isoformat()
+        self._session_file.write('# capture: {0}, {1}\n'.format(ts, ', '.join(bits)))
+        self._session_file.flush()
+
+    def _sig_save_marks(self, target_id, placement, capture_id, session_id, n_central):
+        """Stamp the running session dump with the ground truth for a signature
+        that has just been saved to the corpus (v1.68).
+
+        Before this, session logging auto-started (v1.63) but the marks only
+        came from the manual Mark button, which nobody pressed -- so all eleven
+        dumps on disk carry zero '# mark:' lines and the frame stream is
+        unlabelled. Every capture now labels its own frames as a side effect of
+        being saved.
+
+        Silent no-op when nothing is recording or the session is paused: those
+        are ordinary states (logging stopped, replaying an old file), not
+        errors, and a capture must never fail because of them. _append_mark()
+        writes to the handle without checking it, so the guard has to be here --
+        same contract as the Mark button's own guards."""
+        if not self._recording or self._session_file is None or self._session_paused:
+            return
+        try:
+            self._append_mark('air' if target_id == 'air' else '{0} @{1}'.format(
+                target_id, pimd_features.format_distance(placement['distance_mm'])))
+            self._append_mark_target(target_id, placement)
+            self._append_capture(capture_id, session_id, n_central)
+        except (OSError, ValueError) as exc:
+            # The corpus row is already written and is the product; losing the
+            # dump annotation must not lose the capture with it.
+            self.statusBar().showMessage(
+                'Capture saved, but session-dump marking failed: {0}'.format(exc))
 
     # ------------------------------------------------------------------
     # Redraw (30 Hz timer)

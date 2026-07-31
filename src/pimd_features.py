@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v12
+# PIMD Feature Extractor (pimd_features.py) v13
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -15,6 +15,7 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v13 '# capture:' session-dump lines parsed — exact corpus-row -> frame-window join
 #   v12 tilt_deg column — oblique orientation capture; optional, last in the field list
 #   v11 firmware clock exposed as fw_seconds; FIX frame rate measured on it, not arrival time
 #   v10 pack_v gains age_s (old 2-field form still read); '# soak:' lines parsed
@@ -232,6 +233,19 @@ class SessionData:
                                 # Effective soak = streamed_s - stalled_s, because a
                                 # stalled stream is not sweeping. idle_before_s is
                                 # classviz-observed idle and may be None.
+    captures: list              # v13: list[(datetime, dict)] -- '# capture:' lines classviz
+                                # v1.68 writes when a signature is SAVED to a corpus. The
+                                # dict carries capture_id, session (the corpus's 'gui_*'
+                                # id), n_central, and the target/air-before/air-after
+                                # window bounds as epoch seconds on the SAME PC clock as
+                                # t_seconds -- so this is an EXACT join from a corpus row
+                                # to the frames it was computed from.
+                                #
+                                # Before v1.68 there was no such key at all: the corpus
+                                # 'session' id and the dump filename are independent
+                                # stamps of different events, and captured_at is stamped
+                                # at save time, tens of seconds after the frames. Empty
+                                # for every dump written before v1.68.
     stalls: list                # v9: list[(datetime, float)] -- '# stall:' lines classviz
                                 # v1.64 writes on a firmware-time gap, as (when, gap_s).
                                 # Frames either side of one are not one measurement:
@@ -300,6 +314,44 @@ def _parse_pack_v_content(content):
     except ValueError:
         age_s = None       # a malformed age is unknown, not a reason to drop a good reading
     return ts, volts, age_s
+
+
+def _parse_capture_content(content):
+    """'capture: <iso-ts>, capture_id=<id>, session=<gui id>, n_central=<n>,
+    tgt=<t0>:<t1>[, air_before=<t0>:<t1>][, air_after=<t0>:<t1>]'
+    -> (datetime, dict), or None if unparseable. Written by classviz v1.68.
+
+    The window bounds are epoch seconds from the same PC clock that stamps each
+    frame's pc_wallclock column, so `tgt` brackets the exact frames the corpus
+    row's delta_mV was reduced from. Use SessionData.t_seconds + t0 to convert.
+
+    Unknown keys are kept rather than dropped: this line is the join key between
+    the corpus and the frame stream, and a reader that silently discarded a
+    field a later classviz added would be worse than one that carries it."""
+    rest = content.split(':', 1)[1].strip()
+    parts = [x.strip() for x in rest.split(',')]
+    if len(parts) < 2:
+        return None
+    try:
+        ts = datetime.fromisoformat(parts[0])
+    except ValueError:
+        return None
+    d = _parse_kv_tail(parts[1:])
+    if 'capture_id' not in d:
+        return None
+    for key in ('tgt', 'air_before', 'air_after'):
+        if key in d:
+            lo, _, hi = str(d[key]).partition(':')
+            try:
+                d[key] = (float(lo), float(hi))
+            except ValueError:
+                d[key] = None
+    if 'n_central' in d:
+        try:
+            d['n_central'] = int(float(d['n_central']))
+        except ValueError:
+            d['n_central'] = None
+    return ts, d
 
 
 def _parse_soak_content(content):
@@ -424,6 +476,7 @@ def parse_session_file(path):
     pack_v = []
     stalls = []
     soak = []
+    captures = []
     notes_lines = []
     n_bands = n_cells = n_channels = None
     session_start_iso = None
@@ -532,6 +585,10 @@ def parse_session_file(path):
                         entry = _parse_soak_content(content)
                         if entry:
                             soak.append(entry)
+                    elif content.startswith('capture:'):
+                        entry = _parse_capture_content(content)
+                        if entry:
+                            captures.append(entry)
                     # else: unrecognised '#' line mid-stream - ignored
                     continue
                 parts = line.split(',')
@@ -568,6 +625,7 @@ def parse_session_file(path):
         fw_version=fw_version, supply=supply,
         colmap=colmap, session_notes='\n'.join(notes_lines), marks=marks,
         mark_targets=mark_targets, pack_v=pack_v, stalls=stalls, soak=soak,
+        captures=captures,
         t0=t0, t_seconds=t_seconds, fw_seconds=fw_seconds, frames_mV=frames_mV,
         flagged=flagged_arr,
     )
