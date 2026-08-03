@@ -722,6 +722,159 @@ every launch so the button overlay never appears unexpectedly on startup. (2026-
 
 ---
 
+### findings — sub-0.5 V thresholds plateau at a ~16-18 mV measurement floor, not a bug
+
+Reported from a live `pimd_delaycal` v1.42 session (fw v4.26) streaming a hand-edited 11-threshold
+ladder (`test v4a-distributted`, thresholds 4.9 → 0.005 V) — every row's Latest-mean (mV) column
+decreased correctly down to a few mV, then rose back to a steady ~16-18 mV across the last 3-4
+columns (0.3/0.1/0.01/0.005 V), the same magnitude in every band regardless of that column's very
+different delay (20 µs to 250 µs). Flagged as "should only ever be decreasing."
+
+**Confirmed real and stable, not a code defect.** Live board checks (`V` identify, then a
+standalone script replaying `pimd_delaycal`'s own `D`/`Q5`/`G` sequence and W-record parsing
+against the same profile):
+
+- Firmware is v4.26 — has the v4.25 outlier-gate fix and the v4.26 CC-write fix; v4.27 only adds
+  an unrelated diagnostic counter, so this is not a stale-firmware artefact.
+- A 150 s / 616-frame capture shows the plateau is **flat from the first frame** (t=5 s) to the
+  last (t=149 s), ruling out both a still-diluting rolling average and the documented
+  stream-start transient (§17.13) — this is a settled steady state from the moment streaming
+  starts, not a transient.
+- A fine delay sweep on the `25000 Hz / 4.0 µs` and `25000 Hz / 6.0 µs` bands between their 0.5 V
+  and 0.3 V delays (15.2→18.7 µs and 15.1→18.4 µs) shows a smooth, monotonic rise from ~6 mV to
+  ~17 mV — no discontinuity, no glitch, just the true decaying signal crossing below the RX
+  chain's floor and the rolling mean thereafter reading that floor instead of the target.
+
+**Reading is: the decaying pulse has fallen below the acquisition chain's noise/offset floor by
+this point, and the "mean" is now measuring the floor, not the signal.** The floor sits at
+~16-17 mV for most bands, with a mild per-band tilt (up to ~18.2 mV on the fastest/25 kHz bands,
+tapering toward ~16.3 mV on the slowest). Onset delay (where a band's decay crosses the floor)
+varies by band, which is why it shows up in different columns per row — but the locked operating
+profile `cal_63_air_bat_v3` (§10) never sweeps below 0.5 V, so this floor was never characterized
+before; the sub-0.5 V columns of any hand-edited ladder are past the edge of previously-measured
+territory. Not a firmware or delaycal defect — no code changed. Open question, not pursued here:
+whether the ~1-2 mV per-band tilt above the common floor is genuine RX floor variation by drive
+frequency or coupling from the higher-frequency PWM bands — would need a scope to settle.
+(2026-08-03)
+
+---
+
+### findings — sub-67.2 µs bands' tail-column plateau tracks coupling strength, corroborates §14.6
+
+Follow-up to the finding immediately above. Board updated to fw v4.27 (was v4.26 — no behaviour
+difference relevant here, v4.27 only adds a diagnostic emit-block counter). Same
+`test v4a-distributted` profile, live-captured with a real target (spanner + aluminium plate)
+first at 60 mm above the coil, then again with the target close to/resting on the coil, using
+the same replay-harness approach as the prior entry.
+
+At 60 mm, every band **under 67.2 µs pulse width** (4, 6, 9, 13.44, 20, 30, 45 µs) showed its
+0.3 V-and-below columns collapsed to essentially the same ~17-18 mV reading as the no-target
+floor (delta mostly < 1-3 mV) — flagged as still a problem, since a large ferrous+aluminium
+target should read higher than free air.
+
+**Resolved by proximity, not by code.** With the target moved close, those same cells rose
+clearly above both the free-air floor and the 60 mm reading — e.g. `15,625 Hz / 20.0 µs` at
+0.3 V: floor 14.92 mV, 60 mm 17.01 mV, close 25.92 mV (+11.0 mV over floor, +8.9 mV over the
+60 mm run); `10,000 Hz / 30.0 µs` at 0.3 V: 16.28 → 18.31 → 27.00 mV. Every sub-67.2 µs band
+showed the same rising pattern down through 0.1/0.01/0.005 V — the plateau moves with coupling
+strength, so it is real target signal that was simply too weak to clear the floor at 60 mm on
+these shorter pulses, not a hardware ceiling.
+
+**Corroborates the independently-recorded §14 item 6** ("possible TX coil-current plateau above
+~67 µs" — the 67.2→100 µs band-to-band increment being the smallest on the ladder, consistent
+with coil current flattening above that pulse width). The boundary observed here matches that
+open item's boundary exactly: bands below it likely drive less coil current/field energy, so
+they couple more weakly and need the target closer (or the floor lower) to read above it. This
+is corroborating field evidence, not the scope measurement §14.6 itself still calls for — that
+follow-up (coil current vs pulse width) remains open.
+
+**Practical consequence for `test v4a-distributted.json` / any hand-edited ladder:** the
+sub-0.3 V thresholds on bands under 67.2 µs are only informative at closer range/stronger
+targets than 60 mm — at 60 mm they read as floor, not as "no signal reachable at any range."
+No firmware or delaycal code changed. (2026-08-03)
+
+---
+
+### src/pimd_delaycal.py — v1.43 — FIX Compare-over-time "Mean level": was a ratio vs baseline, not an absolute delta
+
+Found live: a brass block and, separately, a steel spanner held close to the coil for a full
+minute each lit up the *same* narrow set of 6 cells (the 67.2/100/150 µs bands' 4.4 V/3.7 V
+columns) under Mean-level Compare-over-time, regardless of which target material was used —
+while the exact same targets had produced tens-of-mV changes across *every* band's high-voltage
+columns in the raw Latest-mean table moments earlier. Two different materials producing an
+identical, oddly narrow pattern was the tell that this was arithmetic, not physics.
+
+**Root cause:** `_compare_value_ratio()` (the single function behind every Compare-over-time
+metric) always returned `abs((current - baseline) / baseline)` — a change *relative to the
+cell's own baseline level*. That's a reasonable design for the other four selectable metrics
+(Std dev, Range P-P, Max |Δ from mean|, Drift ½ vs ½), which are spread statistics where "the
+noise doubled" is meaningful independent of the cell's absolute level (deliberate as of v1.40).
+But "Mean level" (added v1.42) is the raw signal level itself, not a spread — its own docstring
+already said it should track absolute level, but the implementation was never special-cased and
+inherited the divide-by-baseline behaviour anyway. Result: a cell with a large baseline (the
+thousands-of-mV, short-delay columns on every band) could shift by 50-113 mV and still divide
+down to a ratio of 0.01-0.05 (reads as quiet); a cell whose baseline happened to already be a
+few mV (further down the decay on the longer-pulse bands) could shift by only 4-17 mV and divide
+into a ratio past 1.0 (reads as red). Which cells turned red was tracking each cell's baseline
+size, not the target's actual effect on it — confirmed offline by replaying the fix's arithmetic
+against the spanner+aluminium-at-60mm capture from the two entries above: the cells the bug hid
+(3-5 % ratio) carried the largest real absolute shifts (up to 113 mV); the cells it flagged red
+carried the smallest (4-17 mV).
+
+**Fix:** `_compare_value_ratio()` now special-cases metric index 5 (Mean level) to return
+`abs(smoothed_mv - base)` in mV, guarded only by `base is not None` — the ratio path's
+near-zero-baseline guard doesn't apply to an absolute difference, where a near-zero baseline is
+a legitimate reading. `_refresh_std_metric_label()` updated to match: Mean level's Compare-over-
+time label and lo/hi spinbox suffix now read `mV`, not the blanket unitless-ratio label used by
+the other four metrics. The other four metrics' ratio behaviour is untouched — that was a
+deliberate, already-shipped design choice and not part of this defect.
+
+**Not yet done:** the Colour lo/hi spinboxes for the Std dev table (currently tuned around
+0.50/1.00 for a ratio scale) will need re-tuning to an mV-appropriate range now that Mean level
+reports absolute mV in compare mode — left for the operator, not changed here. (2026-08-03)
+
+---
+
+### src/pimd_delaycal.py — v1.44 — "Mean level" Compare-over-time is now signed, with a diverging colour scale
+
+Follow-up to v1.43 above. With that fix live, a brass block and a steel spanner held close to
+the coil both produced a broad, sensible response across every band's high-voltage columns —
+confirming the ratio bug was the whole story for *that* symptom — but a new pattern showed up:
+a diagonal band of near-zero Mean-level Δ cells running from the bottom-left of the grid toward
+the top-middle, its column position marching systematically with pulse width. Flagged as a
+possible new problem; investigated before touching any code.
+
+**Diagnosis, confirmed against this session's own captured data before changing anything.**
+v1.43 made Mean level's compare value `abs(current_mV - baseline_mV)`. `abs()` is mathematically
+forced to read nearly zero wherever the *signed* difference crosses zero, regardless of how
+large the true response is on either side. Recomputing the *signed* delta (not abs) from an
+already-recorded spanner+aluminium close-range capture confirmed exactly that: every band shows
+a clean negative-to-positive crossing (e.g. `25,000Hz/9.0us` crosses between 1.5 V and 0.5 V;
+`3,125Hz/100.0us` crosses between 4.8 V and 4.4 V), and the crossing column marches from the
+low-voltage/short-pulse corner to the high-voltage/long-pulse corner — precisely the diagonal
+shape reported. This matches the project's own documented two-basis/crossing-ladder behaviour
+for ferrous/conductive targets (an early-time and late-time response of opposite sign), so the
+diagonal is a real, expected sign flip that `abs()` was rendering as a false "no change" cell,
+not lost signal and not a new hardware defect.
+
+**Fix:** `_compare_value_ratio()`'s Mean-level branch now returns the signed difference
+(`smoothed_mv - base`) instead of `abs(smoothed_mv - base)`. `_update_thermal_tables()`'s
+Manual-Nudge live-colouring path special-cases this signed metric: Rank mode now ranks by
+magnitude (`abs()`) rather than the raw signed value, so crossing cells sort to the quiet end
+instead of landing in the middle of the order; the cell colour comes from a new diverging scale
+(`_diverging_color_from_fraction` / `_diverging_value_color`, near-white at zero fading to blue
+for a negative-going response and to the existing "noisy" red for a positive-going one) instead
+of the quiet-green-to-noisy-red gradient the other five metrics use; and the displayed number is
+signed (`+12.34` / `-45.67`) in both the Manual-Nudge live table and the plain (non-Manual-Nudge)
+compare display. The other five metrics are untouched — this only changes metric index 5.
+
+**Not yet done:** the Colour lo/hi spinboxes still drive the diverging scale's saturation
+distance from zero (same spinboxes v1.43 flagged as needing mV re-tuning) — verify the diverging
+colours read sensibly against real target data once re-tuned; not confirmed live yet, only
+against the offline signed-delta replay. (2026-08-03)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-31

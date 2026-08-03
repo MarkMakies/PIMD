@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.42
+# PIMD Delay Calibration v1.44
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -21,6 +21,8 @@
 #   G                                      — start Mode 2 streaming
 #
 # History (full detail in CHANGELOG.md):
+#   v1.44 "Mean level" Compare-over-time is now signed with a diverging colour scale, not abs()
+#   v1.43 FIX Compare-over-time for "Mean level": was a ratio vs baseline, now an absolute mV delta
 #   v1.42 new "Mean level" metric (sustained Compare-over-time); baseline capture logs per-cell values
 #   v1.41 FIX misleading "invalid profile index (Q5)"; client-side PWM duty-cycle pre-validation
 #   v1.40 FIX Compare-over-time: unsigned ratio, not a signed percentage (_compare_value_ratio)
@@ -89,7 +91,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QEvent, QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor, QFont  # noqa: E402
 
-APP_VERSION = '1.42'
+APP_VERSION = '1.44'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -1200,6 +1202,16 @@ class MainWindow(QMainWindow):
         (1.00, QColor(220,  50,  47)),   # noisy
     )
 
+    # Diverging scale for Mean level's *signed* Compare-over-time value (see
+    # _compare_value_ratio) -- near-white at zero (a real crossing, not
+    # "unsettled"/no-data grey) fading to blue for a negative-going response
+    # and to the same red used for "noisy" above for a positive-going one, so
+    # a sign flip reads as a smooth colour transition instead of the false
+    # green "quiet" a magnitude-only gradient would give it at the crossing.
+    _DIVERGING_ZERO = QColor(238, 238, 238)
+    _DIVERGING_NEG  = QColor( 40, 100, 220)
+    _DIVERGING_POS  = QColor(220,  50,  47)
+
     # Selectable metrics for the Std dev table, in combo-box order. Index 0
     # (std dev) is what Auto Nudge's own pass/fail evaluation always uses
     # (_auto_evaluate_parallel/_channel/_initial, _capture_measurement) --
@@ -1289,22 +1301,49 @@ class MainWindow(QMainWindow):
         t = 0.0 if val_mv <= lo else 1.0 if hi <= lo else (val_mv - lo) / (hi - lo)
         return self._gradient_color_from_fraction(t)
 
+    def _diverging_color_from_fraction(self, t: float, negative: bool) -> QColor:
+        """Map t in [0, 1] (0=near zero/crossing, 1=fully saturated) to a
+        blend between _DIVERGING_ZERO and whichever end `negative` selects.
+        Shared by both colour modes, mirroring _gradient_color_from_fraction."""
+        t = max(0.0, min(1.0, t))
+        end = self._DIVERGING_NEG if negative else self._DIVERGING_POS
+        mid = self._DIVERGING_ZERO
+        return QColor(
+            round(mid.red()   + (end.red()   - mid.red())   * t),
+            round(mid.green() + (end.green() - mid.green()) * t),
+            round(mid.blue()  + (end.blue()  - mid.blue())  * t))
+
+    def _diverging_value_color(self, val_mv: float) -> QColor:
+        """Absolute mode, signed metric: magnitude maps to saturation via the
+        same lo/hi spinboxes _value_gradient_color uses, sign picks which
+        end of the diverging scale to blend toward."""
+        lo, hi = self.sp_stddev_lo_mv.value(), self.sp_stddev_hi_mv.value()
+        mag = abs(val_mv)
+        t = 0.0 if mag <= lo else 1.0 if hi <= lo else (mag - lo) / (hi - lo)
+        return self._diverging_color_from_fraction(t, val_mv < 0)
+
     def _refresh_std_metric_label(self):
         idx  = self.cb_std_metric.currentIndex()
         unit = self._STD_METRIC_UNITS[idx]
         if self.cb_compare_mode.isChecked():
-            # A ratio is unitless regardless of the metric's own unit (mV or
-            # %) -- the table's effective unit becomes "a fraction of
-            # baseline" rather than mV or %, so the label has to say that
-            # rather than leave the operator reading it as the raw metric.
-            self.lbl_std_metric.setText(f'{self._STD_METRICS[idx]} Δ:')
+            if idx == 5:
+                # Mean level's compare value is an absolute mV delta (see
+                # _compare_value_ratio), not a ratio -- keep the real unit
+                # rather than the blanket "unitless ratio" label below.
+                self.lbl_std_metric.setText(f'{self._STD_METRICS[idx]} Δ (mV):')
+            else:
+                # A ratio is unitless regardless of the metric's own unit (mV or
+                # %) -- the table's effective unit becomes "a fraction of
+                # baseline" rather than mV or %, so the label has to say that
+                # rather than leave the operator reading it as the raw metric.
+                self.lbl_std_metric.setText(f'{self._STD_METRICS[idx]} Δ:')
         else:
             self.lbl_std_metric.setText(f'{self._STD_METRICS[idx]} ({unit}):')
         # Absolute mode's lo/hi spinboxes are shared across metrics, so their
         # unit label has to track whichever metric is selected -- a ratio
         # read against mV-tuned lo/hi values (or vice versa) would be
-        # silently meaningless.
-        sp_suffix = '' if self.cb_compare_mode.isChecked() else f' {unit}'
+        # silently meaningless. Mean level stays in mV in both modes.
+        sp_suffix = ' mV' if idx == 5 else ('' if self.cb_compare_mode.isChecked() else f' {unit}')
         self.sp_stddev_lo_mv.setSuffix(sp_suffix)
         self.sp_stddev_hi_mv.setSuffix(sp_suffix)
 
@@ -1356,7 +1395,12 @@ class MainWindow(QMainWindow):
                 # Flag anything the near-zero guard in _compare_value_ratio()
                 # will treat as "no usable baseline" -- the direct answer to
                 # "why is this cell greyed out", instead of inferring it.
-                flag = '  <-- near zero, ratio will show as unsettled (…)' if abs(baseline) < 1e-9 else ''
+                # Doesn't apply to Mean level (idx 5): its compare value is a
+                # signed difference, not a ratio, so a near-zero baseline is
+                # a perfectly usable one, not an unsettled-guard trip.
+                flag = ('  <-- near zero, ratio will show as unsettled (…)'
+                         if abs(baseline) < 1e-9 and self.cb_std_metric.currentIndex() != 5
+                         else '')
                 self._log(f'  {self._ch_label(ch)}: {baseline:.4f}{flag}')
         self._compare_baseline_ts = time.time()
         self.statusBar().showMessage(
@@ -1368,7 +1412,29 @@ class MainWindow(QMainWindow):
         neutral grey/'…' state used for an unsettled window. Unsigned ratio
         (not a percentage) -- a rise and a fall of the same size are equally
         noteworthy drift, and 0.10 means the metric moved by a tenth of the
-        baseline, not ten percent."""
+        baseline, not ten percent.
+
+        Metric index 5 (Mean level) is not a spread statistic like the other
+        five -- it's the raw signal level, and dividing its change by the
+        cell's own baseline conflates "how big was this cell to begin with"
+        with "how much did it move". That silently hid large real mV shifts
+        on high-level cells (huge denominator) and inflated small ones on
+        already-decayed cells (tiny denominator) into false positives --
+        the two effects together made Compare-over-time track each cell's
+        baseline size rather than the actual change.
+
+        Mean level therefore returns a *signed* mV difference, not even an
+        absolute one -- a real ferrous/conductive target's response is
+        negative-going early in the decay and positive-going later (the
+        project's own two-basis/crossing-ladder behaviour), so the response
+        crosses zero somewhere in the middle of most rows. Collapsing that to
+        abs() makes a strong response either side of the crossing look like a
+        false "no change" at the exact crossing cell -- confirmed directly
+        against this project's own capture data, where the crossing column
+        marches across the grid with pulse width, producing a diagonal band
+        of false near-zero cells. The caller uses the sign to pick a
+        diverging colour instead of the quiet-to-noisy gradient the other
+        (unsigned) metrics use."""
         if self.cb_compare_type.currentIndex() == 0:   # Capture
             base = self._compare_baseline.get(ch)
         else:                                          # Rolling lag
@@ -1376,7 +1442,11 @@ class MainWindow(QMainWindow):
                 ch, deque(maxlen=self.sp_compare_lag.value() + 1))
             buf.append(smoothed_mv)
             base = buf[0] if len(buf) == buf.maxlen else None
-        if base is None or abs(base) < 1e-9:
+        if base is None:
+            return None
+        if self.cb_std_metric.currentIndex() == 5:   # Mean level -- signed mV, not a ratio
+            return smoothed_mv - base
+        if abs(base) < 1e-9:
             return None
         return abs((smoothed_mv - base) / base)
 
@@ -2429,9 +2499,19 @@ class MainWindow(QMainWindow):
                         else:
                             cell_values[(d, c)] = smoothed
 
+            # Mean level's compare value is signed (see _compare_value_ratio)
+            # -- ranking by the raw signed value would put near-zero
+            # crossing cells in the *middle* of the order instead of at the
+            # quiet end, so Rank mode ranks by magnitude for this metric and
+            # the diverging scale (not the quiet-to-noisy gradient) carries
+            # the sign.
+            signed_metric = (self.cb_compare_mode.isChecked()
+                              and self.cb_std_metric.currentIndex() == 5)
+
             ranks = {}
             if self.cb_std_color_mode.currentIndex() == 0 and cell_values:   # Rank
-                order = sorted(cell_values, key=cell_values.get)
+                rank_key = (lambda k: abs(cell_values[k])) if signed_metric else cell_values.get
+                order = sorted(cell_values, key=rank_key)
                 total = len(order)
                 ranks = {key: (i / (total - 1) if total > 1 else 0.0)
                          for i, key in enumerate(order)}
@@ -2444,10 +2524,16 @@ class MainWindow(QMainWindow):
                     key = (d, c)
                     if key in cell_values:
                         val_mv = cell_values[key]
-                        color  = (self._gradient_color_from_fraction(ranks[key])
-                                  if ranks else self._value_gradient_color(val_mv))
+                        if signed_metric:
+                            color = (self._diverging_color_from_fraction(ranks[key], val_mv < 0)
+                                      if ranks else self._diverging_value_color(val_mv))
+                            text = f'{val_mv:+.2f}'
+                        else:
+                            color = (self._gradient_color_from_fraction(ranks[key])
+                                      if ranks else self._value_gradient_color(val_mv))
+                            text = f'{val_mv:.2f}'
                         if item_s:
-                            item_s.setText(f'{val_mv:.2f}')
+                            item_s.setText(text)
                             item_s.setBackground(color)
                         if cal_item:
                             cal_item.setBackground(color)
@@ -2477,7 +2563,12 @@ class MainWindow(QMainWindow):
                             smoothed = self._smoothed_metric_mv(ch, raw)
                             if self.cb_compare_mode.isChecked():
                                 ratio = self._compare_value_ratio(ch, smoothed)
-                                item_s.setText('…' if ratio is None else f'{ratio:.2f}')
+                                if ratio is None:
+                                    item_s.setText('…')
+                                elif self.cb_std_metric.currentIndex() == 5:
+                                    item_s.setText(f'{ratio:+.2f}')   # signed, see _compare_value_ratio
+                                else:
+                                    item_s.setText(f'{ratio:.2f}')
                             else:
                                 item_s.setText(f'{smoothed:.2f}')
                         else:
