@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.29
+# PIMD Delay Calibration v1.42
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -21,6 +21,18 @@
 #   G                                      — start Mode 2 streaming
 #
 # History (full detail in CHANGELOG.md):
+#   v1.42 new "Mean level" metric (sustained Compare-over-time); baseline capture logs per-cell values
+#   v1.41 FIX misleading "invalid profile index (Q5)"; client-side PWM duty-cycle pre-validation
+#   v1.40 FIX Compare-over-time: unsigned ratio, not a signed percentage (_compare_value_ratio)
+#   v1.39 Compare-over-time: Space/button capture baseline or rolling-lag %Δ, age-warned Std dev table
+#   v1.38 new metric: Max %Δ from mean -- normalises by each cell's own mean, unlike Max |Δ| (mV)
+#   v1.37 FIX Std dev table metric jitter (smoothing) + rank-based colouring (Rank vs Absolute)
+#   v1.36 Std dev table metric selector (Range P-P, Max |Δ|, Drift ½ vs ½ added); "Samples N" relabel
+#   v1.35 guard/status messages now say to press THERMAL for Manual Nudge, not just what not to do
+#   v1.34 FIX Auto Nudge running was painting over Manual Nudge; the two modes are now exclusive
+#   v1.33 Manual Nudge: rolling-window std gate, continuous gradient colouring, no THERMAL timeout
+#   v1.32 compact table rows/font + screen-clamped window geometry (v1.31 no-scroll sizing overshot)
+#   v1.31 Manual Nudge: std-dev heatmap colouring + per-cell +/- buttons; no-scroll table sizing
 #   v1.30 fine step snapped to the 8 ns grid at default, restore and use (was 100 ns)
 #   v1.29 profile save dialog (filename = profile name) + auto-generated notes
 #   v1.28 Compare Profiles tab; measured-voltage cache from thermal/Auto soaks
@@ -74,10 +86,10 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QFileDialog, QHeaderView, QInputDialog, QPlainTextEdit, QSplitter, QTabWidget,
 )
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
-from PyQt6.QtCore import QIODevice, Qt, QTimer  # noqa: E402
-from PyQt6.QtGui import QColor  # noqa: E402
+from PyQt6.QtCore import QEvent, QIODevice, Qt, QTimer  # noqa: E402
+from PyQt6.QtGui import QColor, QFont  # noqa: E402
 
-APP_VERSION = '1.30'
+APP_VERSION = '1.42'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -92,6 +104,72 @@ PROFILES_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'profiles')
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'delaycal_settings.json')
+
+# Row-height budget shared by all three live tables (delay, mean, std dev) so
+# none of them ever needs an internal scrollbar. Deliberately compact -- three
+# full tables plus the config/log/Auto+Manual Nudge controls all have to fit
+# in one non-scrolling window, so every row is a small font on a fixed 20 px
+# section (_compact_table() below), not Qt's ~30 px default.
+TABLE_HEADER_PX = 20
+TABLE_ROW_PX    = 20
+TABLE_BORDER_PX = 4
+TABLE_MIN_H_PX  = 64
+TABLE_FONT_PT   = 8
+
+def _table_min_height(n_rows):
+    return max(TABLE_HEADER_PX + n_rows * TABLE_ROW_PX + TABLE_BORDER_PX, TABLE_MIN_H_PX)
+
+
+def _compact_table(tbl):
+    """Small font + fixed row/header height, so the Manual Nudge button
+    overlay can't grow a row past the size _table_min_height() budgeted for
+    it (Qt otherwise sizes a row to its cell widgets' sizeHint, which for a
+    QPushButton is taller than the plain-text rows this was tuned against)."""
+    font = QFont()
+    font.setPointSize(TABLE_FONT_PT)
+    tbl.setFont(font)
+    tbl.horizontalHeader().setFont(font)
+    tbl.horizontalHeader().setFixedHeight(TABLE_HEADER_PX)
+    tbl.verticalHeader().setFont(font)
+    tbl.verticalHeader().setDefaultSectionSize(TABLE_ROW_PX)
+    tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+
+
+# Mirrors mcu/pimd_mcu.py's compute_pulse_duties()/pulse_duties_valid() exactly
+# -- same constants, same integer truncation -- so delaycal can catch a cell
+# the firmware would reject *before* ever sending it, rather than discovering
+# it via a D-command rejection. Keep these three in lockstep with the
+# firmware's copy if either changes (SAMPLE_PULSE_CORRECTION in particular).
+PWM_DUTY_SCALING_NUMERATOR   = 2 ** 16
+PWM_DUTY_SCALING_DENOMINATOR_NS = 10 ** 9
+SAMPLE_PULSE_CORRECTION_US   = 0.904
+
+def _compute_pulse_duties(pulse_us, delay_us, freq_hz):
+    pulse_ns = int(pulse_us * 1000)
+    delay_ns = int((delay_us + SAMPLE_PULSE_CORRECTION_US) * 1000)
+    drive_duty = (pulse_ns * freq_hz * PWM_DUTY_SCALING_NUMERATOR) // PWM_DUTY_SCALING_DENOMINATOR_NS
+    sample_duty = drive_duty + (
+        (delay_ns * freq_hz * PWM_DUTY_SCALING_NUMERATOR) // PWM_DUTY_SCALING_DENOMINATOR_NS)
+    return drive_duty, sample_duty
+
+
+def _pulse_duties_valid(drive_duty, sample_duty):
+    """True iff both duties fit in 16 bits and sample falls strictly after drive."""
+    return 0 <= drive_duty <= 65535 and 0 <= sample_duty <= 65535 and sample_duty > drive_duty
+
+
+def _max_valid_delay_us(pulse_us, freq_hz):
+    """Largest delay_us that keeps sample_duty within the 16-bit PWM ceiling
+    for this (pulse_us, freq_hz) -- for an operator-facing "how far can I
+    push this" figure. None if the pulse width alone already overflows
+    drive_duty (no delay, however short, could fix that)."""
+    drive_duty, _ = _compute_pulse_duties(pulse_us, 0.0, freq_hz)
+    if drive_duty > 65535:
+        return None
+    max_delay_ns = ((65535 - drive_duty) * PWM_DUTY_SCALING_DENOMINATOR_NS
+                     // (freq_hz * PWM_DUTY_SCALING_NUMERATOR))
+    return max_delay_ns / 1000.0 - SAMPLE_PULSE_CORRECTION_US
+
 
 def _snap_8ns(delay_us):
     """Round a delay to the nearest 8 ns RP2040 PWM clock boundary."""
@@ -167,9 +245,16 @@ class MainWindow(QMainWindow):
         # Thermal / profile state
         self._thermal_state      = 'idle'       # 'idle' | 'running'
         self._thermal_remaining  = 0.0
+        self._thermal_manual_elapsed = 0        # s elapsed while Manual Nudge overrides the timeout
         self._thermal_timer: 'QTimer | None' = None
+        self._pending_d_ready = None   # callback awaiting the firmware's D response; see
+                                        # _send_dynamic_profile() / read_from_serial()
         self._thermal_buf: deque = deque(maxlen=10_000)
         self._thermal_latest: 'list | None' = None  # µV ints, length n_channels
+        self._metric_smooth_buf: 'dict[int, deque]' = {}  # flat ch -> recent computed mV values
+        self._compare_baseline: 'dict[int, float]' = {}   # flat ch -> captured metric value
+        self._compare_baseline_ts: 'float | None' = None  # wall time of capture
+        self._compare_lag_buf: 'dict[int, deque]' = {}    # flat ch -> recent smoothed values
         self._thermal_n_bands    = 0
         self._thermal_n_cells    = 0
         self._thermal_n_channels = 0
@@ -212,6 +297,20 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_settings()
+
+        # Space-bar capture for Compare-over-time mode. An application-level
+        # filter (not keyPressEvent) is the only reliable way to intercept a
+        # plain, unmodified key regardless of which child widget currently
+        # has focus -- a focused QPushButton would otherwise consume Space
+        # itself (its default click-activation) before a window-level
+        # keyPressEvent ever saw it.
+        QApplication.instance().installEventFilter(self)
+
+        self._capture_age_timer = QTimer(self)
+        self._capture_age_timer.setInterval(1000)
+        self._capture_age_timer.timeout.connect(self._update_capture_age_label)
+        self._capture_age_timer.start()
+        self._update_capture_age_label()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -364,7 +463,7 @@ class MainWindow(QMainWindow):
 
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(160)
+        self.log_box.setMinimumHeight(90)
         self.log_box.setPlaceholderText('Activity log…')
         log_layout.addWidget(self.log_box)
 
@@ -395,6 +494,7 @@ class MainWindow(QMainWindow):
             QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
+        _compact_table(self.table)
         cal_layout.addWidget(self.table, stretch=1)
 
         # ── Live monitoring + Auto Nudge section ─────────────────────
@@ -432,14 +532,16 @@ class MainWindow(QMainWindow):
         ctrl.addWidget(self.cb_auto_thermal)
 
         ctrl.addSpacing(16)
-        ctrl.addWidget(QLabel('Std dev N:'))
+        ctrl.addWidget(QLabel('Samples N:'))
 
         self.sp_thermal_n = QSpinBox()
         self.sp_thermal_n.setRange(2, 2000)
         self.sp_thermal_n.setValue(50)
         self.sp_thermal_n.setFixedWidth(70)
         self.sp_thermal_n.setToolTip(
-            'Rolling window (frames) for std dev — shared by Thermal and Auto Nudge.\n'
+            'Rolling window (frames) for the selected Std dev table metric --\n'
+            'shared by Thermal, Auto Nudge and Manual Nudge. Auto Nudge always\n'
+            'evaluates against std dev regardless of the metric shown here.\n'
             'Keep ≤ 200 with Auto: at ~100 Hz W-rate, N=200 ≈ 2 s; thermal drift\n'
             '(~50 µV/s) contributes ~100 µV — well below the 500 µV default threshold.')
         ctrl.addWidget(self.sp_thermal_n)
@@ -457,18 +559,126 @@ class MainWindow(QMainWindow):
         self.tbl_thermal_mean.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_thermal_mean.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tbl_thermal_mean.setMinimumHeight(120)
+        self.tbl_thermal_mean.setMinimumHeight(TABLE_MIN_H_PX)
+        _compact_table(self.tbl_thermal_mean)
         therm_layout.addWidget(self.tbl_thermal_mean, stretch=1)
 
-        lbl_std = QLabel('Std dev (mV):')
-        lbl_std.setStyleSheet('font-weight: bold;')
-        therm_layout.addWidget(lbl_std)
+        std_row = QHBoxLayout()
+        std_row.setSpacing(6)
+        self.lbl_std_metric = QLabel('Std dev (mV):')
+        self.lbl_std_metric.setStyleSheet('font-weight: bold;')
+        std_row.addWidget(self.lbl_std_metric)
+        std_row.addWidget(QLabel('Metric:'))
+        self.cb_std_metric = QComboBox()
+        self.cb_std_metric.addItems(self._STD_METRICS)
+        self.cb_std_metric.setToolTip(
+            'What the table below shows, over the last "Samples N" frames.\n'
+            'Std dev: noise/spread. Range (P-P): highest − lowest raw reading.\n'
+            'Max |Δ from mean|: worst single-frame outlier, in mV.\n'
+            'Drift (½ vs ½): first-half vs second-half mean -- a directional\n'
+            'trend a symmetric spread metric can hide.\n'
+            'Max %Δ from mean: same worst-outlier test as Max |Δ|, but as a\n'
+            '% of that cell\'s own mean instead of absolute mV -- comparable\n'
+            'across cells sitting on very different absolute signal levels\n'
+            '(e.g. a short vs long delay on the same target).\n'
+            'Mean level: the window\'s raw average reading. Unlike every other\n'
+            'metric here, this is NOT a spread measure -- use it with Compare\n'
+            'over time to detect a SUSTAINED change (e.g. a target present),\n'
+            'since Std dev/Range/Max Δ/Drift all re-centre on their own window\n'
+            'each tick and only flag a transition, not a held level shift.\n'
+            'Display only -- Auto Nudge always evaluates against std dev.')
+        self.cb_std_metric.currentIndexChanged.connect(self._on_std_metric_changed)
+        std_row.addWidget(self.cb_std_metric)
+
+        std_row.addSpacing(12)
+        std_row.addWidget(QLabel('Smoothing:'))
+        self.sp_metric_smooth = QSpinBox()
+        self.sp_metric_smooth.setRange(1, 50)
+        self.sp_metric_smooth.setValue(5)
+        self.sp_metric_smooth.setSuffix(' draws')
+        self.sp_metric_smooth.setFixedWidth(80)
+        self.sp_metric_smooth.setToolTip(
+            'Averages this many of the table\'s own recent computed readings\n'
+            '(not raw samples) before display. 1 = raw, unsmoothed. Range P-P and\n'
+            'Max |Δ from mean| are driven by one or two extreme samples in the\n'
+            'window, so they jump around a lot more than Std dev between redraws --\n'
+            'this settles them to a readable number without changing "Samples N".')
+        std_row.addWidget(self.sp_metric_smooth)
+
+        std_row.addStretch()
+        therm_layout.addLayout(std_row)
+
+        compare_row = QHBoxLayout()
+        compare_row.setSpacing(6)
+
+        self.cb_compare_mode = QCheckBox('Compare over time')
+        self.cb_compare_mode.setToolTip(
+            'Shows the unsigned ratio of change of the selected metric versus a\n'
+            'baseline (e.g. 0.10 = moved by a tenth of the baseline), instead of\n'
+            'its raw instantaneous value. Capture mode: press Space (focus must\n'
+            'not be in a text field) or the Capture button to snapshot the current\n'
+            'reading as that baseline. Rolling lag: no action needed -- continuously\n'
+            'compares against the reading from "Lag" draws ago.')
+        self.cb_compare_mode.toggled.connect(self._on_compare_mode_toggled)
+        compare_row.addWidget(self.cb_compare_mode)
+
+        self.cb_compare_type = QComboBox()
+        self.cb_compare_type.addItems(['Capture', 'Rolling lag'])
+        self.cb_compare_type.currentIndexChanged.connect(self._on_compare_type_changed)
+        compare_row.addWidget(self.cb_compare_type)
+
+        self.pb_capture_now = QPushButton('Capture')
+        self.pb_capture_now.setFixedWidth(70)
+        self.pb_capture_now.setToolTip('Same as pressing Space: snapshot the current baseline.')
+        self.pb_capture_now.clicked.connect(self._capture_compare_baseline)
+        compare_row.addWidget(self.pb_capture_now)
+
+        self.lbl_capture_age = QLabel('no snapshot')
+        self.lbl_capture_age.setAutoFillBackground(True)
+        compare_row.addWidget(self.lbl_capture_age)
+
+        compare_row.addSpacing(12)
+        compare_row.addWidget(QLabel('Lag:'))
+        self.sp_compare_lag = QSpinBox()
+        self.sp_compare_lag.setRange(1, 500)
+        self.sp_compare_lag.setValue(20)
+        self.sp_compare_lag.setSuffix(' draws')
+        self.sp_compare_lag.setFixedWidth(90)
+        self.sp_compare_lag.setToolTip(
+            'Rolling lag mode: compare the current reading against the reading\n'
+            'from this many redraw ticks ago.')
+        compare_row.addWidget(self.sp_compare_lag)
+
+        compare_row.addSpacing(12)
+        compare_row.addWidget(QLabel('Age warn lo/hi (s):'))
+        self.sp_age_lo_s = QDoubleSpinBox()
+        self.sp_age_lo_s.setRange(1.0, 3600.0)
+        self.sp_age_lo_s.setDecimals(0)
+        self.sp_age_lo_s.setValue(30)
+        self.sp_age_lo_s.setFixedWidth(70)
+        compare_row.addWidget(self.sp_age_lo_s)
+        self.sp_age_hi_s = QDoubleSpinBox()
+        self.sp_age_hi_s.setRange(1.0, 3600.0)
+        self.sp_age_hi_s.setDecimals(0)
+        self.sp_age_hi_s.setValue(120)
+        self.sp_age_hi_s.setFixedWidth(70)
+        compare_row.addWidget(self.sp_age_hi_s)
+        for sp in (self.sp_age_lo_s, self.sp_age_hi_s):
+            sp.setToolTip(
+                'Capture mode only: how old the snapshot is allowed to get before the\n'
+                'age label warns -- green under lo, red above hi, same gradient as the\n'
+                'Std dev table itself.')
+
+        compare_row.addStretch()
+        therm_layout.addLayout(compare_row)
+        self._on_compare_type_changed(self.cb_compare_type.currentIndex())   # set initial enabled state
 
         self.tbl_thermal_std = QTableWidget(0, 0)
         self.tbl_thermal_std.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl_thermal_std.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tbl_thermal_std.setMinimumHeight(120)
+        self.tbl_thermal_std.setMinimumHeight(TABLE_MIN_H_PX)
+        _compact_table(self.tbl_thermal_std)
         therm_layout.addWidget(self.tbl_thermal_std, stretch=1)
 
         # ── Auto Nudge sub-section ────────────────────────────────────
@@ -566,6 +776,81 @@ class MainWindow(QMainWindow):
 
         auto_row2.addStretch()
         therm_layout.addLayout(auto_row2)
+        # ─────────────────────────────────────────────────────────────
+
+        # ── Manual Nudge sub-section ──────────────────────────────────
+        sep_lbl_manual = QLabel('── Manual Nudge ──')
+        sep_lbl_manual.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        therm_layout.addWidget(sep_lbl_manual)
+
+        manual_row = QHBoxLayout()
+        manual_row.setSpacing(6)
+
+        self.cb_manual_nudge = QCheckBox('Manual Nudge')
+        self.cb_manual_nudge.setToolTip(
+            'Adds a −/+ button to every delay-table cell and colours the Std dev\n'
+            'table by value, so cells can be nudged by hand while watching the\n'
+            'result live (start THERMAL first to see the reaction).\n'
+            'Mutually exclusive with Auto Nudge -- enabling this stops Auto Nudge\n'
+            'if it is running, and Auto cannot be started while this is checked.')
+        self.cb_manual_nudge.toggled.connect(self._on_manual_nudge_toggled)
+        manual_row.addWidget(self.cb_manual_nudge)
+
+        manual_row.addSpacing(8)
+        manual_row.addWidget(QLabel('Nudge:'))
+        self.sp_manual_nudge_ns = QSpinBox()
+        self.sp_manual_nudge_ns.setRange(8, 9600)
+        self.sp_manual_nudge_ns.setSingleStep(8)
+        self.sp_manual_nudge_ns.setValue(80)
+        self.sp_manual_nudge_ns.setSuffix(' ns')
+        self.sp_manual_nudge_ns.setFixedWidth(90)
+        self.sp_manual_nudge_ns.setToolTip(
+            'Step applied per click of a delay cell\'s −/+ button (ns, multiple\n'
+            'of the 8 ns PWM grid).')
+        manual_row.addWidget(self.sp_manual_nudge_ns)
+
+        manual_row.addSpacing(16)
+        manual_row.addWidget(QLabel('Colour by:'))
+        self.cb_std_color_mode = QComboBox()
+        self.cb_std_color_mode.addItems(['Rank', 'Absolute'])
+        self.cb_std_color_mode.setToolTip(
+            'Rank (default): colours each visible cell by its percentile among all\n'
+            'other currently-visible, fully-settled cells for the selected metric --\n'
+            'always shows relative standing, regardless of a band/pulse-width\'s\n'
+            'absolute scale. Best for comparing cells against each other.\n'
+            'Absolute: colours against the fixed lo/hi mV thresholds below.')
+        self.cb_std_color_mode.currentIndexChanged.connect(self._on_std_color_mode_changed)
+        manual_row.addWidget(self.cb_std_color_mode)
+
+        manual_row.addSpacing(8)
+        manual_row.addWidget(QLabel('Colour lo/hi:'))
+        self.sp_stddev_lo_mv = QDoubleSpinBox()
+        self.sp_stddev_lo_mv.setRange(0.0, 999.0)
+        self.sp_stddev_lo_mv.setDecimals(2)
+        self.sp_stddev_lo_mv.setSingleStep(0.05)
+        self.sp_stddev_lo_mv.setValue(0.50)
+        self.sp_stddev_lo_mv.setSuffix(' mV')
+        self.sp_stddev_lo_mv.setFixedWidth(90)
+        self.sp_stddev_lo_mv.setEnabled(False)
+        manual_row.addWidget(self.sp_stddev_lo_mv)
+
+        self.sp_stddev_hi_mv = QDoubleSpinBox()
+        self.sp_stddev_hi_mv.setRange(0.0, 999.0)
+        self.sp_stddev_hi_mv.setDecimals(2)
+        self.sp_stddev_hi_mv.setSingleStep(0.05)
+        self.sp_stddev_hi_mv.setValue(1.00)
+        self.sp_stddev_hi_mv.setSuffix(' mV')
+        self.sp_stddev_hi_mv.setFixedWidth(90)
+        self.sp_stddev_hi_mv.setEnabled(False)
+        manual_row.addWidget(self.sp_stddev_hi_mv)
+        for sp in (self.sp_stddev_lo_mv, self.sp_stddev_hi_mv):
+            sp.setToolTip(
+                'Std dev table colouring in Absolute mode (active while Manual Nudge\n'
+                'is on), for whichever metric is selected above: below lo = green,\n'
+                'above hi = red, in between = yellow-through-orange. Inert in Rank mode.')
+
+        manual_row.addStretch()
+        therm_layout.addLayout(manual_row)
         # ─────────────────────────────────────────────────────────────
 
         # Vertical splitter: cal table (top, 2×) | monitoring + nudge (bottom, 1×)
@@ -901,6 +1186,385 @@ class MainWindow(QMainWindow):
             if item:
                 item.setBackground(color)
 
+    # Continuous quiet -> noisy ramp for Manual Nudge's live colouring -- a
+    # wider, more graduated range than a flat 3-bucket scheme, and kept
+    # separate from the discrete Auto Nudge state palette (_COL_DONE etc.)
+    # on purpose: Manual Nudge shows level, not state, so none of that
+    # palette's colours (including the "drifted" lavender) can appear here.
+    # Shared by every metric _metric_value_mv() can produce -- it is just a
+    # plain mV magnitude, whichever metric it came from.
+    _VALUE_GRADIENT = (
+        (0.00, QColor( 46, 160,  67)),   # quiet
+        (0.35, QColor(230, 200,  40)),
+        (0.70, QColor(240, 140,  40)),
+        (1.00, QColor(220,  50,  47)),   # noisy
+    )
+
+    # Selectable metrics for the Std dev table, in combo-box order. Index 0
+    # (std dev) is what Auto Nudge's own pass/fail evaluation always uses
+    # (_auto_evaluate_parallel/_channel/_initial, _capture_measurement) --
+    # this selector only changes what the table *displays*, not what Auto
+    # Nudge optimises for.
+    _STD_METRICS = ('Std dev', 'Range P-P', 'Max |Δ from mean|', 'Drift ½ vs ½',
+                     'Max %Δ from mean', 'Mean level')
+    _STD_METRIC_UNITS = ('mV', 'mV', 'mV', 'mV', '%', 'mV')
+
+    def _metric_value_mv(self, vals):
+        """Reduce a window of raw µV ints to the figure the selected metric
+        shows -- mV for every metric except index 4, which is a percentage.
+        `vals` is the same rolling-window slice _stdev() was always called
+        on -- only the reduction changes.
+
+        Every metric except index 5 (Mean level) is a *spread* measure --
+        computed relative to the window's own mean, re-centred fresh each
+        tick. That makes them self-blind to a sustained level shift: once a
+        step change (e.g. a target arriving) has fully slid out of the
+        window, the window is just as internally "flat" at the new level as
+        it was at the old one, so Compare-over-time on any of indices 0-4
+        can only ever flag the transient, not a held state. Index 5 exists
+        for exactly that gap -- it tracks absolute level, so Compare-over-
+        time against it stays red for as long as the level actually differs
+        from the captured baseline, however long that is."""
+        idx = self.cb_std_metric.currentIndex()
+        if idx == 1:
+            return (max(vals) - min(vals)) / 1000.0
+        if idx == 2:
+            mean = sum(vals) / len(vals)
+            return max(abs(v - mean) for v in vals) / 1000.0
+        if idx == 3:
+            h = len(vals) // 2
+            return abs(sum(vals[h:]) / len(vals[h:]) - sum(vals[:h]) / len(vals[:h])) / 1000.0
+        if idx == 4:
+            # Same peak-deviation numerator as index 2, but normalised by the
+            # window's own mean instead of read off in absolute mV -- this is
+            # the fix for cells that sit on very different absolute signal
+            # levels (e.g. a short vs long delay on the same target) showing
+            # incomparable absolute numbers even when their *relative* noise
+            # is similar. Guard divide-by-near-zero for a stalled/dead channel.
+            mean = sum(vals) / len(vals)
+            if abs(mean) < 1e-9:
+                return 0.0
+            return max(abs(v - mean) for v in vals) / abs(mean) * 100.0
+        if idx == 5:
+            return sum(vals) / len(vals) / 1000.0
+        return _stdev(vals) / 1000.0   # index 0, default
+
+    def _smoothed_metric_mv(self, ch, raw_mv):
+        """Simple moving average over the last few *computed* readings (not
+        raw ADC samples) for one flat channel. Range P-P and Max |Δ from mean|
+        are order statistics -- driven by one or two extreme samples in the
+        window, not an average over all of them -- so a single spike entering
+        or leaving the rolling window can swing the raw reading 3-5x between
+        redraw ticks even though nothing physically changed. This damps that
+        without touching the underlying window/gating logic at all."""
+        k = self.sp_metric_smooth.value()
+        if k <= 1:
+            return raw_mv
+        buf = self._metric_smooth_buf.setdefault(ch, deque(maxlen=k))
+        buf.append(raw_mv)
+        return sum(buf) / len(buf)
+
+    def _reset_metric_smoothing(self):
+        self._metric_smooth_buf.clear()
+
+    def _gradient_color_from_fraction(self, t: float) -> QColor:
+        """Map t in [0, 1] (0=quiet, 1=noisy) to a point on _VALUE_GRADIENT.
+        Shared by both colour modes: Absolute derives t from the lo/hi mV
+        spinboxes, Rank derives it directly from a cell's percentile."""
+        t = max(0.0, min(1.0, t))
+        stops = self._VALUE_GRADIENT
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t <= t1:
+                frac = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+                return QColor(
+                    round(c0.red()   + (c1.red()   - c0.red())   * frac),
+                    round(c0.green() + (c1.green() - c0.green()) * frac),
+                    round(c0.blue()  + (c1.blue()  - c0.blue())  * frac))
+        return stops[-1][1]
+
+    def _value_gradient_color(self, val_mv: float) -> QColor:
+        """Absolute mode: map val_mv to _VALUE_GRADIENT by where it falls
+        between the lo/hi mV spinboxes (clamped at both ends)."""
+        lo, hi = self.sp_stddev_lo_mv.value(), self.sp_stddev_hi_mv.value()
+        t = 0.0 if val_mv <= lo else 1.0 if hi <= lo else (val_mv - lo) / (hi - lo)
+        return self._gradient_color_from_fraction(t)
+
+    def _refresh_std_metric_label(self):
+        idx  = self.cb_std_metric.currentIndex()
+        unit = self._STD_METRIC_UNITS[idx]
+        if self.cb_compare_mode.isChecked():
+            # A ratio is unitless regardless of the metric's own unit (mV or
+            # %) -- the table's effective unit becomes "a fraction of
+            # baseline" rather than mV or %, so the label has to say that
+            # rather than leave the operator reading it as the raw metric.
+            self.lbl_std_metric.setText(f'{self._STD_METRICS[idx]} Δ:')
+        else:
+            self.lbl_std_metric.setText(f'{self._STD_METRICS[idx]} ({unit}):')
+        # Absolute mode's lo/hi spinboxes are shared across metrics, so their
+        # unit label has to track whichever metric is selected -- a ratio
+        # read against mV-tuned lo/hi values (or vice versa) would be
+        # silently meaningless.
+        sp_suffix = '' if self.cb_compare_mode.isChecked() else f' {unit}'
+        self.sp_stddev_lo_mv.setSuffix(sp_suffix)
+        self.sp_stddev_hi_mv.setSuffix(sp_suffix)
+
+    def _on_std_metric_changed(self, idx):
+        self._refresh_std_metric_label()
+        self._reset_metric_smoothing()   # don't blend readings from two different metrics
+        self._compare_baseline.clear()   # ...or a baseline captured under a different metric
+        self._compare_baseline_ts = None
+        self._compare_lag_buf.clear()
+
+    def _on_std_color_mode_changed(self, idx):
+        is_absolute = (idx == 1)
+        self.sp_stddev_lo_mv.setEnabled(is_absolute)
+        self.sp_stddev_hi_mv.setEnabled(is_absolute)
+
+    # ------------------------------------------------------------------
+    # Compare over time (Std dev table)
+    # ------------------------------------------------------------------
+    def _on_compare_mode_toggled(self, checked):
+        self._refresh_std_metric_label()
+
+    def _on_compare_type_changed(self, idx):
+        is_capture = (idx == 0)
+        self.pb_capture_now.setEnabled(is_capture)
+        self.lbl_capture_age.setEnabled(is_capture)
+        self.sp_age_lo_s.setEnabled(is_capture)
+        self.sp_age_hi_s.setEnabled(is_capture)
+        self.sp_compare_lag.setEnabled(not is_capture)
+
+    def _capture_compare_baseline(self):
+        if self._thermal_latest is None or self._thermal_n_bands == 0:
+            self.statusBar().showMessage('No live data to capture -- start THERMAL first.')
+            return
+        n = self.sp_thermal_n.value()
+        recent = list(self._thermal_buf)[-n:]
+        if len(recent) < n:
+            self.statusBar().showMessage('Still filling the Samples N window -- try again shortly.')
+            return
+        unit = self._STD_METRIC_UNITS[self.cb_std_metric.currentIndex()]
+        self._log(f'Compare baseline captured -- per-cell values ({unit}):')
+        for d in range(self._thermal_n_bands):
+            b = self._thermal_display_order[d] if self._thermal_display_order else d
+            for c in range(self._thermal_n_cells):
+                ch = b * self._thermal_n_cells + c
+                vals = [frame[ch] for frame in recent]
+                raw  = self._metric_value_mv(vals)
+                baseline = self._smoothed_metric_mv(ch, raw)
+                self._compare_baseline[ch] = baseline
+                # Flag anything the near-zero guard in _compare_value_ratio()
+                # will treat as "no usable baseline" -- the direct answer to
+                # "why is this cell greyed out", instead of inferring it.
+                flag = '  <-- near zero, ratio will show as unsettled (…)' if abs(baseline) < 1e-9 else ''
+                self._log(f'  {self._ch_label(ch)}: {baseline:.4f}{flag}')
+        self._compare_baseline_ts = time.time()
+        self.statusBar().showMessage(
+            f'Baseline captured ({self._thermal_n_bands * self._thermal_n_cells} cells) -- '
+            f'see Activity Log for per-cell values.')
+
+    def _compare_value_ratio(self, ch, smoothed_mv):
+        """None means "no usable baseline yet" -- caller shows the same
+        neutral grey/'…' state used for an unsettled window. Unsigned ratio
+        (not a percentage) -- a rise and a fall of the same size are equally
+        noteworthy drift, and 0.10 means the metric moved by a tenth of the
+        baseline, not ten percent."""
+        if self.cb_compare_type.currentIndex() == 0:   # Capture
+            base = self._compare_baseline.get(ch)
+        else:                                          # Rolling lag
+            buf = self._compare_lag_buf.setdefault(
+                ch, deque(maxlen=self.sp_compare_lag.value() + 1))
+            buf.append(smoothed_mv)
+            base = buf[0] if len(buf) == buf.maxlen else None
+        if base is None or abs(base) < 1e-9:
+            return None
+        return abs((smoothed_mv - base) / base)
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Space
+                and self.cb_compare_mode.isChecked()
+                and self.cb_compare_type.currentIndex() == 0
+                and not isinstance(QApplication.focusWidget(), QLineEdit)):
+            self._capture_compare_baseline()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _update_capture_age_label(self):
+        """Runs on its own 1 Hz timer, independent of THERMAL's state, so a
+        stale-baseline warning still ticks even if THERMAL isn't currently
+        running -- the captured value is exactly as stale either way."""
+        if self._compare_baseline_ts is None:
+            self.lbl_capture_age.setText('no snapshot')
+            c = _COL_NR
+        else:
+            age = time.time() - self._compare_baseline_ts
+            lo, hi = self.sp_age_lo_s.value(), self.sp_age_hi_s.value()
+            t = 0.0 if age <= lo else 1.0 if hi <= lo else (age - lo) / (hi - lo)
+            c = self._gradient_color_from_fraction(t)
+            self.lbl_capture_age.setText(f'Δt = {age:.0f}s')
+        self.lbl_capture_age.setStyleSheet(
+            f'background-color: rgb({c.red()}, {c.green()}, {c.blue()});')
+
+    # ------------------------------------------------------------------
+    # Manual Nudge
+    #
+    # A −/+ overlay on every delay-table cell, shown only while cb_manual_
+    # nudge is checked. The underlying QTableWidgetItem (text + background
+    # colour) stays the single source of truth exactly as it is for every
+    # other table path (_fill_cell, _auto_color_cell, _build_profile) --
+    # setCellWidget only occludes it visually, so toggling Manual Nudge off
+    # reveals the plain item exactly as it was.
+    # ------------------------------------------------------------------
+    def _on_manual_nudge_toggled(self, checked):
+        # Mutually exclusive with Auto Nudge -- both want to own the profile
+        # reconfigure cycle and the table colouring, and running them together
+        # left Auto Nudge's own state-mirror painting over Manual Nudge's
+        # display with no visible indication that was happening.
+        if checked:
+            if self._auto_running:
+                self._log('Auto Nudge stopped -- Manual Nudge enabled.')
+                self._stop_auto()
+            self._apply_manual_nudge_overlay()
+            self.pb_auto.setEnabled(False)
+            if self._thermal_state != 'running':
+                self.statusBar().showMessage(
+                    'Manual Nudge on -- press THERMAL to start streaming, '
+                    'then use each cell\'s −/+ buttons.')
+        else:
+            self._clear_manual_nudge_overlay()
+            self.pb_auto.setEnabled(
+                self.serial.isOpen() and self.table.rowCount() > 0 and bool(self._fp_pairs))
+
+    def _apply_manual_nudge_overlay(self):
+        for r in range(self.table.rowCount()):
+            for c in range(self.table.columnCount()):
+                item = self.table.item(r, c)
+                if item is None:
+                    continue
+                self.table.setCellWidget(
+                    r, c, self._build_manual_nudge_widget(r, c, item.text()))
+
+    def _clear_manual_nudge_overlay(self):
+        for r in range(self.table.rowCount()):
+            for c in range(self.table.columnCount()):
+                self.table.setCellWidget(r, c, None)
+
+    # Small enough to sit inside a fixed TABLE_ROW_PX (20 px) row without
+    # forcing it taller -- a stock QPushButton's own padding alone exceeds
+    # that, so padding/margin are stripped via stylesheet rather than font
+    # size alone.
+    _NUDGE_BTN_STYLE = (
+        'QPushButton { padding: 0px; margin: 0px; font-size: %dpt; }' % TABLE_FONT_PT)
+
+    def _build_manual_nudge_widget(self, r, c, text):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(1, 0, 1, 0)
+        h.setSpacing(1)
+
+        pb_minus = QPushButton('−')
+        pb_minus.setFixedSize(14, TABLE_ROW_PX - 2)
+        pb_minus.setStyleSheet(self._NUDGE_BTN_STYLE)
+        pb_minus.setToolTip('Nudge this cell\'s delay earlier by the Manual Nudge step.')
+        pb_minus.clicked.connect(lambda: self._on_manual_nudge_clicked(r, c, -1))
+        h.addWidget(pb_minus)
+
+        lbl = QLabel(text)
+        lbl.setObjectName('manual_nudge_label')
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = QFont()
+        font.setPointSize(TABLE_FONT_PT)
+        lbl.setFont(font)
+        h.addWidget(lbl, stretch=1)
+
+        pb_plus = QPushButton('+')
+        pb_plus.setFixedSize(14, TABLE_ROW_PX - 2)
+        pb_plus.setStyleSheet(self._NUDGE_BTN_STYLE)
+        pb_plus.setToolTip('Nudge this cell\'s delay later by the Manual Nudge step.')
+        pb_plus.clicked.connect(lambda: self._on_manual_nudge_clicked(r, c, 1))
+        h.addWidget(pb_plus)
+
+        return w
+
+    def _on_manual_nudge_clicked(self, r, c, sign):
+        item = self.table.item(r, c)
+        if item is None or item.text() in ('', 'N/R'):
+            return
+        try:
+            old = float(item.text())
+        except ValueError:
+            return
+
+        step_us   = self.sp_manual_nudge_ns.value() / 1000.0
+        new_delay = _snap_8ns(old + sign * step_us)
+
+        if r < len(self._fp_pairs):
+            freq_hz, pulse_us = int(round(self._fp_pairs[r][0] * 1000)), self._fp_pairs[r][1]
+            dd, sd = _compute_pulse_duties(pulse_us, new_delay, freq_hz)
+            if not _pulse_duties_valid(dd, sd):
+                # Refused, not clamped: the firmware would silently reject the
+                # whole D command this cell rides in on and keep streaming the
+                # previous (stale) profile with no obvious error -- "nudge
+                # keeps working but nothing changes" is worse than a clear
+                # refusal that leaves the cell exactly where it was.
+                max_delay = _max_valid_delay_us(pulse_us, freq_hz)
+                max_str = (f'{max_delay:.3f} µs' if max_delay is not None
+                           else 'no valid delay at this pulse width')
+                self.statusBar().showMessage(
+                    f'Nudge refused: {new_delay:.3f} µs exceeds the PWM duty limit for '
+                    f'{freq_hz}Hz/{pulse_us:.1f}µs (max ≈ {max_str}) -- cell left at '
+                    f'{old:.3f} µs.')
+                self._log(f'Manual nudge refused: {freq_hz}Hz/{pulse_us:.1f}µs @ '
+                          f'{new_delay:.3f} µs invalid (sample_duty={sd} > 65535, '
+                          f'max ≈ {max_str}); cell left at {old:.3f} µs.')
+                return
+
+        item.setText(f'{new_delay:.3f}')
+
+        widget = self.table.cellWidget(r, c)
+        if widget:
+            lbl = widget.findChild(QLabel, 'manual_nudge_label')
+            if lbl:
+                lbl.setText(f'{new_delay:.3f}')
+
+        band = (self._row_label(*self._fp_pairs[r]) if r < len(self._fp_pairs) else f'row{r}')
+        volt = (f'{self._targets_v[c]:.1f}V' if c < len(self._targets_v) else f'col{c}')
+        self._log(f'Manual nudge {band} / {volt}: '
+                  f'{sign * self.sp_manual_nudge_ns.value():+d} ns → {new_delay:.3f} µs')
+
+        if self._thermal_state == 'running':
+            self._manual_push_profile()
+
+    def _manual_push_profile(self):
+        """Reconfigure the running THERMAL stream with the table's current
+        delays -- the same D/Q/G reconfigure sequence _auto_run_soak() uses
+        for each Auto Nudge iteration -- so a manual nudge's effect on std
+        dev shows up (after the 1 s settle gate) instead of being silently
+        streamed with the pre-nudge delay until the next THERMAL restart."""
+        profile = self._build_profile()
+        # Belt and braces alongside _on_manual_nudge_clicked()'s own guard --
+        # that one only checks the cell just clicked; a bad import or a value
+        # typed/edited another way could still leave a different cell invalid.
+        problems = self._validate_profile_pwm(profile)
+        if problems:
+            self._warn_profile_pwm_problems(problems, 'Manual Nudge')
+            return
+
+        self._thermal_profile = profile
+        self._thermal_buf.clear()
+        self._reset_metric_smoothing()
+        self._compare_lag_buf.clear()   # NOT _compare_baseline -- a captured baseline is
+                                          # meant to survive exactly this kind of reconfigure
+
+        def _on_d_ready():
+            self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
+            self.send_command('G')
+            self._auto_settling = True
+            QTimer.singleShot(1000, self._auto_settle_done)
+
+        self._send_dynamic_profile(profile, _on_d_ready)
+
     # ------------------------------------------------------------------
     # Serial
     # ------------------------------------------------------------------
@@ -947,6 +1611,19 @@ class MainWindow(QMainWindow):
         self.serial.write((text + '\n').encode())
         self.last_command = text
 
+    def _send_dynamic_profile(self, profile, on_ready):
+        """Send E + D for `profile`, then hold Q<n>/G back until the
+        firmware's own D response confirms it actually took -- read_from_
+        serial() calls `on_ready` once that arrives. Q<n>/G must never fire
+        after a D the firmware rejected: Q<n> would then fail on an undefined
+        profile with a "invalid profile index" error that masks the real one,
+        and G would happily restart streaming on whatever profile was already
+        active -- silently continuing on a stale, pre-reconfigure delay set
+        with no obvious sign the requested change never applied."""
+        self.send_command('E')
+        self.send_command(self._build_d_command(profile))
+        self._pending_d_ready = on_ready
+
     def read_from_serial(self):
         while self.serial.canReadLine():
             raw = self.serial.readLine().data().decode('utf-8', errors='replace').rstrip()
@@ -958,6 +1635,21 @@ class MainWindow(QMainWindow):
             if (self._thermal_state == 'running' or self._auto_state == 'soaking') \
                     and raw.startswith('W'):
                 self._on_thermal_w_record(raw)
+                continue
+
+            if self._pending_d_ready is not None:
+                # 'E' (sent immediately before 'D') prints nothing, so the
+                # next line here is always D's own response -- either this
+                # succeeds and Q/G proceed, or it's the real rejection reason
+                # and Q/G never get sent at all.
+                if raw.startswith('D OK'):
+                    on_ready = self._pending_d_ready
+                    self._pending_d_ready = None
+                    on_ready()
+                elif 'ERROR' in raw:
+                    self._pending_d_ready = None
+                    self.status_label.setText(f'Firmware: {raw}')
+                    self._log(f'D command rejected: {raw}')
                 continue
 
             if raw.startswith('R'):
@@ -1013,11 +1705,14 @@ class MainWindow(QMainWindow):
         self.table.setVerticalHeaderLabels(
             [self._row_label(f, p) for f, p in fp_pairs])
         self.table.setHorizontalHeaderLabels([f'{v:.3f} V' for v in targets_v])
+        self.table.setMinimumHeight(_table_min_height(len(fp_pairs)))
         for r in range(len(fp_pairs)):
             for c in range(len(targets_v)):
                 item = QTableWidgetItem('')
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(r, c, item)
+        if self.cb_manual_nudge.isChecked():
+            self._apply_manual_nudge_overlay()
 
     def _mark_row_pending(self, row):
         for c in range(self._thresh_idx, len(self._thresholds)):
@@ -1060,6 +1755,7 @@ class MainWindow(QMainWindow):
         self.pb_export_profile.setEnabled(False)
         self.pb_thermal.setEnabled(False)
         self.pb_auto.setEnabled(False)
+        self.cb_manual_nudge.setEnabled(False)
 
         self._sweep_started_at = datetime.now()
         self._sweep_ended_at   = None
@@ -1217,6 +1913,9 @@ class MainWindow(QMainWindow):
         self.pb_export_profile.setEnabled(True)
         self.pb_thermal.setEnabled(True)
         self.pb_auto.setEnabled(True)
+        self.cb_manual_nudge.setEnabled(True)
+        if self.cb_manual_nudge.isChecked():
+            self._apply_manual_nudge_overlay()   # refresh labels with the just-filled delays
         self.progress_label.setText('Calibration complete.')
         self.status_label.setText('Done — Export CSV / Export Profile / THERMAL / Auto.')
         self._log('Calibration done.')
@@ -1237,6 +1936,9 @@ class MainWindow(QMainWindow):
             self.table.rowCount() > 0 and bool(self._fp_pairs))
         self.pb_auto.setEnabled(
             self.serial.isOpen() and self.table.rowCount() > 0 and bool(self._fp_pairs))
+        self.cb_manual_nudge.setEnabled(True)
+        if self.cb_manual_nudge.isChecked():
+            self._apply_manual_nudge_overlay()   # refresh labels with whatever filled so far
         self.progress_label.setText('Stopped.')
         self.status_label.setText('Sweep stopped.')
         self._log('Calibration stopped.')
@@ -1328,6 +2030,46 @@ class MainWindow(QMainWindow):
         profile['bands']    = bands
         return profile
 
+    def _validate_profile_pwm(self, profile):
+        """Client-side mirror of mcu/pimd_mcu.py's validate_profile() -- every
+        cell the firmware's D command would reject, found before ever sending
+        it. Returns a list of problem dicts (band index, cell index, the
+        offending values, and the largest delay that would still be valid at
+        that band's pulse width -- None if the pulse width alone overflows)."""
+        problems = []
+        for b, band in enumerate(profile['bands']):
+            freq_hz, pulse_us = band['freq_hz'], band['pulse_us']
+            for c, delay_us in enumerate(band['delays_us']):
+                dd, sd = _compute_pulse_duties(pulse_us, delay_us, freq_hz)
+                if not _pulse_duties_valid(dd, sd):
+                    problems.append({
+                        'band': b, 'cell': c, 'freq_hz': freq_hz, 'pulse_us': pulse_us,
+                        'delay_us': delay_us, 'drive_duty': dd, 'sample_duty': sd,
+                        'max_delay_us': _max_valid_delay_us(pulse_us, freq_hz),
+                    })
+        return problems
+
+    def _warn_profile_pwm_problems(self, problems, context):
+        """Surface every PWM-duty problem found by _validate_profile_pwm() --
+        status bar gets a one-line summary, the Activity Log gets the full
+        list with each cell's max valid delay, so the operator has exactly
+        what they need to fix it without re-deriving it themselves."""
+        if not problems:
+            return
+        first = problems[0]
+        max_str = (f'{first["max_delay_us"]:.3f} µs max' if first['max_delay_us'] is not None
+                   else 'no valid delay at this pulse width')
+        self.statusBar().showMessage(
+            f'{len(problems)} cell(s) exceed the PWM duty-cycle limit ({context}) -- e.g. '
+            f'{first["freq_hz"]}Hz/{first["pulse_us"]:.1f}µs @ {first["delay_us"]:.3f}µs '
+            f'({max_str}).')
+        self._log(f'WARNING: {len(problems)} cell(s) exceed the PWM duty-cycle limit ({context}):')
+        for p in problems:
+            max_str = (f'{p["max_delay_us"]:.3f} µs' if p['max_delay_us'] is not None
+                       else 'n/a (pulse width alone overflows)')
+            self._log(f'  {p["freq_hz"]}Hz/{p["pulse_us"]:.1f}µs @ {p["delay_us"]:.3f}µs: '
+                      f'sample_duty={p["sample_duty"]} > 65535 (max valid delay ≈ {max_str})')
+
     def _default_save_name(self):
         """Filename offered by the save dialog: last chosen, else imported, else stamp."""
         if self._last_save_name:
@@ -1412,6 +2154,8 @@ class MainWindow(QMainWindow):
                 for c, delay in enumerate(band['delays_us']):
                     if c < len(targets_v):
                         self._fill_cell(r, c, f'{delay:.3f}', color=_COL_DONE)
+            if self.cb_manual_nudge.isChecked():
+                self._apply_manual_nudge_overlay()   # refresh labels with the imported delays
 
             connected = self.serial.isOpen()
             self.pb_export.setEnabled(True)
@@ -1437,6 +2181,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'Profile imported: {os.path.basename(path)}')
             self._log(f'Profile imported: {os.path.basename(path)} '
                       f'— {len(fp_pairs)} band(s), {len(targets_v)} threshold(s)')
+
+            # Warn now, at the earliest possible point, rather than waiting
+            # for a THERMAL/Auto/Manual push to discover it later -- imported
+            # profiles are exactly how a hand-edited or exploratory grid
+            # (e.g. a "how far can this tail column go" experiment) reaches
+            # this tool. Warn only, don't block: the table still loads as-is.
+            problems = self._validate_profile_pwm(self._build_profile())
+            self._warn_profile_pwm_problems(problems, 'Import Profile')
         except (KeyError, ValueError, json.JSONDecodeError, OSError) as e:
             self.statusBar().showMessage(f'Import error: {e}')
             self._log(f'Import failed: {e}')
@@ -1464,6 +2216,11 @@ class MainWindow(QMainWindow):
             return
 
         profile = self._build_profile()
+        problems = self._validate_profile_pwm(profile)
+        if problems:
+            self._warn_profile_pwm_problems(problems, 'THERMAL')
+            return
+
         n_bands = len(profile['bands'])
         n_cells = len(profile['bands'][0]['delays_us'])
         self._thermal_n_bands    = n_bands
@@ -1471,31 +2228,37 @@ class MainWindow(QMainWindow):
         self._thermal_n_channels = n_bands * n_cells
         self._thermal_profile    = profile
         self._thermal_buf.clear()
+        self._reset_metric_smoothing()
+        self._compare_lag_buf.clear()
         self._thermal_latest     = None
         self._thermal_remaining  = float(self.sp_thermal_secs.value())
-        self._thermal_state      = 'running'
+        self._thermal_manual_elapsed = 0
 
-        self.send_command('E')
-        self.send_command(self._build_d_command(profile))
-        self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
-        self.send_command('G')
+        def _on_d_ready():
+            # Not set until D is confirmed -- if it's rejected, nothing
+            # actually started, and _thermal_state must say so.
+            self._thermal_state = 'running'
+            self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
+            self.send_command('G')
 
-        self._rebuild_thermal_tables(profile)
+            self._rebuild_thermal_tables(profile)
 
-        self._thermal_timer = QTimer(self)
-        self._thermal_timer.setInterval(1000)
-        self._thermal_timer.timeout.connect(self._thermal_tick)
-        self._thermal_timer.start()
+            self._thermal_timer = QTimer(self)
+            self._thermal_timer.setInterval(1000)
+            self._thermal_timer.timeout.connect(self._thermal_tick)
+            self._thermal_timer.start()
 
-        self.pb_thermal.setEnabled(False)
-        self.pb_thermal.setStyleSheet(self.MY_GREEN)
-        self.pb_thermal_stop.setEnabled(True)
-        self.pb_run.setEnabled(False)
-        self.pb_auto.setEnabled(False)
-        self.lbl_thermal_status.setText(
-            f'Running — {int(self._thermal_remaining)} s remaining')
-        self._log(f'THERMAL started ({int(self._thermal_remaining)} s)')
-        self.statusBar().showMessage('Thermal monitoring started.')
+            self.pb_thermal.setEnabled(False)
+            self.pb_thermal.setStyleSheet(self.MY_GREEN)
+            self.pb_thermal_stop.setEnabled(True)
+            self.pb_run.setEnabled(False)
+            self.pb_auto.setEnabled(False)
+            self.lbl_thermal_status.setText(
+                f'Running — {int(self._thermal_remaining)} s remaining')
+            self._log(f'THERMAL started ({int(self._thermal_remaining)} s)')
+            self.statusBar().showMessage('Thermal monitoring started.')
+
+        self._send_dynamic_profile(profile, _on_d_ready)
 
     def _capture_measurement(self):
         """Cache the mean µV per cell of the profile just streamed.
@@ -1540,6 +2303,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('Thermal monitoring stopped.')
 
     def _thermal_tick(self):
+        # Manual Nudge overrides "Thermal secs" entirely -- an operator working
+        # cell-by-cell has no fixed session length, and stopping mid-nudge
+        # would be an unwelcome surprise. Runs until Stop is pressed.
+        if self.cb_manual_nudge.isChecked():
+            self._thermal_manual_elapsed += 1
+            self.lbl_thermal_status.setText(
+                f'Running — Manual Nudge, {self._thermal_manual_elapsed} s '
+                f'(no limit — press Stop to end)')
+            return
+
         self._thermal_remaining -= 1.0
         if self._thermal_remaining <= 0:
             self.lbl_thermal_status.setText('Complete.')
@@ -1550,6 +2323,15 @@ class MainWindow(QMainWindow):
                 f'Running — {int(self._thermal_remaining)} s remaining')
 
     def _rebuild_thermal_tables(self, profile):
+        # A profile-shape change means the flat channel index a captured
+        # baseline or lag history is keyed on would otherwise silently point
+        # at a different physical cell -- unlike a plain reconfigure
+        # (_thermal_buf.clear() sites), a captured baseline does NOT survive
+        # this one.
+        self._compare_baseline.clear()
+        self._compare_baseline_ts = None
+        self._compare_lag_buf.clear()
+
         bands = profile['bands']
         # Sort thermal table rows ascending by pulse_us; calibration table stays in
         # protocol (run) order.  _thermal_proto_to_display maps protocol_band → display_row
@@ -1563,9 +2345,7 @@ class MainWindow(QMainWindow):
         col_labels = [f'{v:.3f} V' for v in self._targets_v]
         n_rows, n_cols = len(row_labels), len(col_labels)
 
-        # Minimum height so all rows are always fully visible (no scrollbar).
-        # 28 px header + 30 px per row + 4 px border, floor at 120 px.
-        min_h = max(28 + n_rows * 30 + 4, 120)
+        min_h = _table_min_height(n_rows)
 
         for tbl in (self.tbl_thermal_mean, self.tbl_thermal_std):
             tbl.setRowCount(n_rows)
@@ -1611,34 +2391,106 @@ class MainWindow(QMainWindow):
         n = self.sp_thermal_n.value()
         recent = list(self._thermal_buf)[-n:]
         threshold_uV = self.sp_auto_threshold_mv.value() * 1000.0
+        # Manual Nudge's own live view only -- Auto Nudge keeps its pass/fail
+        # mirror below untouched, and a plain (neither-mode) Thermal run keeps
+        # today's plain uncoloured numbers.
+        manual_live = self.cb_manual_nudge.isChecked() and not self._auto_running
 
-        for d in range(self._thermal_n_bands):
-            b  = self._thermal_display_order[d] if self._thermal_display_order else d
-            for c in range(self._thermal_n_cells):
-                ch = b * self._thermal_n_cells + c
+        if manual_live:
+            # Rolling window, gated on a genuinely full window -- exactly
+            # _stddev_window()'s "filling" guard in pimd_classviz.py, so a
+            # channel reads as an explicit neutral "not settled yet" rather
+            # than a bogus quiet (green) 0.00 for the first fraction of a
+            # second after every reconfigure. Two passes: (1) compute+smooth
+            # every settled cell's value -- Rank mode needs the whole table's
+            # values before any one cell's colour can be decided; (2) paint.
+            # Painting every cell unconditionally each tick also means none
+            # can be left showing a stale colour from an earlier Auto Nudge
+            # run (e.g. the lavender "drifted" state) once Manual Nudge takes
+            # the cell over.
+            cell_values = {}   # (d, c) -> smoothed val_mv, settled cells only
+            for d in range(self._thermal_n_bands):
+                b = self._thermal_display_order[d] if self._thermal_display_order else d
+                for c in range(self._thermal_n_cells):
+                    ch = b * self._thermal_n_cells + c
 
-                item_m = self.tbl_thermal_mean.item(d, c)
-                if item_m:
-                    item_m.setText(str(int(latest[ch] / 1000)))
+                    item_m = self.tbl_thermal_mean.item(d, c)
+                    if item_m:
+                        item_m.setText(str(int(latest[ch] / 1000)))
 
-                item_s = self.tbl_thermal_std.item(d, c)
-                if item_s:
-                    if len(recent) >= 2:
-                        vals   = [frame[ch] for frame in recent]
-                        std_uV = _stdev(vals)
-                        item_s.setText(f'{std_uV / 1000:.2f}')
-                    else:
-                        item_s.setText('0.00')
+                    if len(recent) >= n:
+                        vals = [frame[ch] for frame in recent]
+                        raw  = self._metric_value_mv(vals)
+                        smoothed = self._smoothed_metric_mv(ch, raw)
+                        if self.cb_compare_mode.isChecked():
+                            ratio = self._compare_value_ratio(ch, smoothed)
+                            if ratio is not None:
+                                cell_values[(d, c)] = ratio
+                        else:
+                            cell_values[(d, c)] = smoothed
 
-                # Mirror calibration table status colour to both thermal tables
-                if self._auto_running:
+            ranks = {}
+            if self.cb_std_color_mode.currentIndex() == 0 and cell_values:   # Rank
+                order = sorted(cell_values, key=cell_values.get)
+                total = len(order)
+                ranks = {key: (i / (total - 1) if total > 1 else 0.0)
+                         for i, key in enumerate(order)}
+
+            for d in range(self._thermal_n_bands):
+                b = self._thermal_display_order[d] if self._thermal_display_order else d
+                for c in range(self._thermal_n_cells):
+                    item_s   = self.tbl_thermal_std.item(d, c)
                     cal_item = self.table.item(b, c)
-                    if cal_item:
-                        bg = cal_item.background()
-                        if item_m:
-                            item_m.setBackground(bg)
+                    key = (d, c)
+                    if key in cell_values:
+                        val_mv = cell_values[key]
+                        color  = (self._gradient_color_from_fraction(ranks[key])
+                                  if ranks else self._value_gradient_color(val_mv))
                         if item_s:
-                            item_s.setBackground(bg)
+                            item_s.setText(f'{val_mv:.2f}')
+                            item_s.setBackground(color)
+                        if cal_item:
+                            cal_item.setBackground(color)
+                    else:
+                        if item_s:
+                            item_s.setText('…')
+                            item_s.setBackground(_COL_NR)
+                        if cal_item:
+                            cal_item.setBackground(_COL_NR)
+        else:
+            for d in range(self._thermal_n_bands):
+                b  = self._thermal_display_order[d] if self._thermal_display_order else d
+                for c in range(self._thermal_n_cells):
+                    ch = b * self._thermal_n_cells + c
+
+                    item_m = self.tbl_thermal_mean.item(d, c)
+                    if item_m:
+                        item_m.setText(str(int(latest[ch] / 1000)))
+
+                    item_s   = self.tbl_thermal_std.item(d, c)
+                    cal_item = self.table.item(b, c)
+
+                    if item_s:
+                        if len(recent) >= 2:
+                            vals = [frame[ch] for frame in recent]
+                            raw  = self._metric_value_mv(vals)
+                            smoothed = self._smoothed_metric_mv(ch, raw)
+                            if self.cb_compare_mode.isChecked():
+                                ratio = self._compare_value_ratio(ch, smoothed)
+                                item_s.setText('…' if ratio is None else f'{ratio:.2f}')
+                            else:
+                                item_s.setText(f'{smoothed:.2f}')
+                        else:
+                            item_s.setText('0.00')
+
+                    # Mirror calibration table status colour to both thermal tables
+                    if self._auto_running:
+                        if cal_item:
+                            bg = cal_item.background()
+                            if item_m:
+                                item_m.setBackground(bg)
+                            if item_s:
+                                item_s.setBackground(bg)
 
     # ------------------------------------------------------------------
     # Auto Nudge — sequential per-channel processing
@@ -1662,6 +2514,11 @@ class MainWindow(QMainWindow):
         if not self._fp_pairs or not self._targets_v:
             self.statusBar().showMessage('Run calibration first.')
             return
+        if self.cb_manual_nudge.isChecked():
+            self.statusBar().showMessage(
+                'Manual Nudge is on -- press THERMAL to stream live data and use each '
+                'cell\'s −/+ buttons, or uncheck Manual Nudge to use Auto Nudge instead.')
+            return
 
         profile = self._build_profile()
         n_bands = len(profile['bands'])
@@ -1677,10 +2534,17 @@ class MainWindow(QMainWindow):
                 '(need at least 2 target voltages or freq/pulse pairs).')
             return
 
+        problems = self._validate_profile_pwm(profile)
+        if problems:
+            self._warn_profile_pwm_problems(problems, 'Auto Nudge')
+            return
+
         self._thermal_n_bands    = n_bands
         self._thermal_n_cells    = n_cells
         self._thermal_n_channels = n_ch
         self._thermal_buf.clear()
+        self._reset_metric_smoothing()
+        self._compare_lag_buf.clear()
         self._thermal_latest     = None
         self._rebuild_thermal_tables(profile)
 
@@ -1715,6 +2579,7 @@ class MainWindow(QMainWindow):
         self.pb_run.setEnabled(False)
         self.pb_thermal.setEnabled(False)
         self.pb_thermal_stop.setEnabled(False)
+        self.cb_manual_nudge.setEnabled(False)
         self.lbl_thermal_status.setText('Auto running…')
 
         self._auto_running  = True
@@ -1744,6 +2609,7 @@ class MainWindow(QMainWindow):
         self.pb_auto_stop.setEnabled(False)
         self.pb_run.setEnabled(self.serial.isOpen())
         self.pb_thermal.setEnabled(bool(self._fp_pairs))
+        self.cb_manual_nudge.setEnabled(True)
         self.lbl_thermal_status.setText('')
         if was_soaking:
             self._log('Auto Nudge stopped by user.')
@@ -1759,43 +2625,69 @@ class MainWindow(QMainWindow):
                 for c in range(n_cells)
             ]
 
+        problems = self._validate_profile_pwm(self._auto_cur_profile)
+        if problems:
+            # Shouldn't normally happen -- Auto Nudge's own cap keeps it near
+            # a delay that was already valid -- but a defensive abort here is
+            # cheap insurance: without it the firmware would silently reject
+            # this iteration's D command and keep soaking on stale delays,
+            # and Auto Nudge would "evaluate" a channel against data that was
+            # never actually reconfigured.
+            self._warn_profile_pwm_problems(problems, 'Auto Nudge iteration')
+            self._log('Auto Nudge aborted -- a nudge produced an out-of-range delay.')
+            self.send_command('E')
+            self._auto_state   = 'idle'
+            self._auto_running = False
+            self.pb_auto.setEnabled(bool(self._fp_pairs) and self.serial.isOpen())
+            self.pb_auto.setStyleSheet('')
+            self.pb_auto_stop.setEnabled(False)
+            self.pb_run.setEnabled(self.serial.isOpen())
+            self.pb_thermal.setEnabled(bool(self._fp_pairs))
+            self.cb_manual_nudge.setEnabled(True)
+            self.lbl_auto_status.setText('Aborted -- out-of-range delay.')
+            return
+
         self._thermal_buf.clear()
+        self._reset_metric_smoothing()
+        self._compare_lag_buf.clear()
         self._thermal_profile = self._auto_cur_profile   # delays as sent, for _meas_cache
-        self.send_command('E')
-        self.send_command(self._build_d_command(self._auto_cur_profile))
-        self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
-        self.send_command('G')
-        self._auto_state    = 'soaking'
-        self._auto_settling = True
-        QTimer.singleShot(1000, self._auto_settle_done)
 
-        soak_ms = self.sp_auto_soak_s.value() * 1000
-        self._auto_soak_timer = QTimer(self)
-        self._auto_soak_timer.setSingleShot(True)
-        self._auto_soak_timer.timeout.connect(self._auto_soak_done)
-        self._auto_soak_timer.start(soak_ms)
+        def _on_d_ready():
+            self.send_command(f'Q{DYNAMIC_PROFILE_INDEX}')
+            self.send_command('G')
+            self._auto_state    = 'soaking'
+            self._auto_settling = True
+            QTimer.singleShot(1000, self._auto_settle_done)
 
-        soak_s = self.sp_auto_soak_s.value()
-        if self._auto_parallel:
-            max_iter = self.sp_auto_max_iter.value()
-            n_bad    = len(self._auto_targets)
-            if n_bad == 0:
-                self.lbl_auto_status.setText(f'Parallel — initial soak {soak_s} s…')
+            soak_ms = self.sp_auto_soak_s.value() * 1000
+            self._auto_soak_timer = QTimer(self)
+            self._auto_soak_timer.setSingleShot(True)
+            self._auto_soak_timer.timeout.connect(self._auto_soak_done)
+            self._auto_soak_timer.start(soak_ms)
+
+            soak_s = self.sp_auto_soak_s.value()
+            if self._auto_parallel:
+                max_iter = self.sp_auto_max_iter.value()
+                n_bad    = len(self._auto_targets)
+                if n_bad == 0:
+                    self.lbl_auto_status.setText(f'Parallel — initial soak {soak_s} s…')
+                else:
+                    self.lbl_auto_status.setText(
+                        f'Parallel — iter {self._auto_iter}/{max_iter}, '
+                        f'{n_bad} ch — soaking {soak_s} s…')
+            elif self._auto_phase == 'initial':
+                self.lbl_auto_status.setText(f'Sequential — initial soak {soak_s} s…')
             else:
+                ch        = self._auto_targets[self._auto_target_idx]
+                n_targets = len(self._auto_targets)
+                max_att   = self.sp_auto_max_iter.value()
                 self.lbl_auto_status.setText(
-                    f'Parallel — iter {self._auto_iter}/{max_iter}, '
-                    f'{n_bad} ch — soaking {soak_s} s…')
-        elif self._auto_phase == 'initial':
-            self.lbl_auto_status.setText(f'Sequential — initial soak {soak_s} s…')
-        else:
-            ch        = self._auto_targets[self._auto_target_idx]
-            n_targets = len(self._auto_targets)
-            max_att   = self.sp_auto_max_iter.value()
-            self.lbl_auto_status.setText(
-                f'{self._ch_label(ch)} — '
-                f'cell {self._auto_target_idx + 1}/{n_targets}, '
-                f'attempt {self._auto_ch_attempts + 1}/{max_att} — '
-                f'soaking {soak_s} s…')
+                    f'{self._ch_label(ch)} — '
+                    f'cell {self._auto_target_idx + 1}/{n_targets}, '
+                    f'attempt {self._auto_ch_attempts + 1}/{max_att} — '
+                    f'soaking {soak_s} s…')
+
+        self._send_dynamic_profile(self._auto_cur_profile, _on_d_ready)
 
     def _auto_soak_done(self):
         if self._auto_state != 'soaking':
@@ -1809,6 +2701,8 @@ class MainWindow(QMainWindow):
         """1-second settling gate expired: begin accepting W records into the buffer."""
         self._auto_settling = False
         self._thermal_buf.clear()   # discard any stray frames that arrived during gate
+        self._reset_metric_smoothing()
+        self._compare_lag_buf.clear()
 
     def _auto_evaluate(self):
         """Dispatch to parallel evaluator or sequential initial/channel evaluator."""
@@ -2124,6 +3018,7 @@ class MainWindow(QMainWindow):
         self.pb_auto_stop.setEnabled(False)
         self.pb_run.setEnabled(self.serial.isOpen())
         self.pb_thermal.setEnabled(bool(self._fp_pairs))
+        self.cb_manual_nudge.setEnabled(True)
         self.pb_export.setEnabled(True)
         self.pb_export_profile.setEnabled(True)
 
@@ -2169,6 +3064,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Settings persistence
     # ------------------------------------------------------------------
+    def _clamp_to_screen(self, w, h):
+        """Cap a requested window size to the current screen's available area
+        (minus a small margin for window-manager chrome), so a saved size from
+        a larger/different monitor -- or the fallback default -- never opens a
+        window taller or wider than the screen actually in front of the
+        operator."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return w, h
+        avail = screen.availableGeometry()
+        return min(w, avail.width() - 20), min(h, avail.height() - 40)
+
     def _load_settings(self):
         try:
             with open(SETTINGS_PATH) as f:
@@ -2197,9 +3104,27 @@ class MainWindow(QMainWindow):
             self.sp_auto_cap_ns.setValue(     s.get('auto_cap_ns',       self.sp_auto_cap_ns.value()))
             self.cb_sequential.setChecked(   bool(s.get('auto_sequential', False)))
             self.cb_auto_thermal.setChecked( bool(s.get('auto_thermal', True)))
-            # Window geometry
+            self.sp_manual_nudge_ns.setValue(s.get('manual_nudge_ns',    self.sp_manual_nudge_ns.value()))
+            self.sp_stddev_lo_mv.setValue(   s.get('stddev_lo_mv',       self.sp_stddev_lo_mv.value()))
+            self.sp_stddev_hi_mv.setValue(   s.get('stddev_hi_mv',       self.sp_stddev_hi_mv.value()))
+            std_metric_idx = int(s.get('std_metric', 0))
+            if 0 <= std_metric_idx < len(self._STD_METRICS):
+                self.cb_std_metric.setCurrentIndex(std_metric_idx)
+            std_color_idx = int(s.get('std_color_mode', 0))
+            if 0 <= std_color_idx < 2:
+                self.cb_std_color_mode.setCurrentIndex(std_color_idx)
+            self.sp_metric_smooth.setValue(  s.get('metric_smooth',      self.sp_metric_smooth.value()))
+            compare_type_idx = int(s.get('compare_type', 0))
+            if 0 <= compare_type_idx < 2:
+                self.cb_compare_type.setCurrentIndex(compare_type_idx)
+            self.sp_compare_lag.setValue(   s.get('compare_lag',        self.sp_compare_lag.value()))
+            self.sp_age_lo_s.setValue(      s.get('age_lo_s',           self.sp_age_lo_s.value()))
+            self.sp_age_hi_s.setValue(      s.get('age_hi_s',           self.sp_age_hi_s.value()))
+            # Window geometry -- clamp() covers both a fresh-default size and
+            # a size saved from a larger/different screen than this one.
             w = int(s.get('window_w', 1440))
-            h = int(s.get('window_h', 1200))
+            h = int(s.get('window_h', 1000))
+            w, h = self._clamp_to_screen(w, h)
             self.resize(w, h)
             x, y = s.get('window_x'), s.get('window_y')
             if x is not None and y is not None:
@@ -2214,7 +3139,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self.h_splitter.setSizes(
                     [int(v) for v in h_splitter_sizes]))
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
-            self.resize(1440, 1200)  # first run — use default size
+            w, h = self._clamp_to_screen(1440, 1000)
+            self.resize(w, h)  # first run — use default size, capped to the screen
 
     def _save_settings(self):
         s = {
@@ -2236,6 +3162,16 @@ class MainWindow(QMainWindow):
             'auto_cap_ns':       self.sp_auto_cap_ns.value(),
             'auto_sequential':   self.cb_sequential.isChecked(),
             'auto_thermal':      self.cb_auto_thermal.isChecked(),
+            'manual_nudge_ns':   self.sp_manual_nudge_ns.value(),
+            'stddev_lo_mv':      self.sp_stddev_lo_mv.value(),
+            'stddev_hi_mv':      self.sp_stddev_hi_mv.value(),
+            'std_metric':        self.cb_std_metric.currentIndex(),
+            'std_color_mode':    self.cb_std_color_mode.currentIndex(),
+            'metric_smooth':     self.sp_metric_smooth.value(),
+            'compare_type':      self.cb_compare_type.currentIndex(),
+            'compare_lag':       self.sp_compare_lag.value(),
+            'age_lo_s':          self.sp_age_lo_s.value(),
+            'age_hi_s':          self.sp_age_hi_s.value(),
             'window_w':          self.width(),
             'window_h':          self.height(),
             'window_x':          self.x(),
@@ -2273,6 +3209,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = MainWindow()   # _load_settings() sets geometry; default 1440×1200 on first run
+    window = MainWindow()   # _load_settings() sets geometry; default 1440×1000 on first run, clamped to screen
     window.show()
     sys.exit(app.exec())

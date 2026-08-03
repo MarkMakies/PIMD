@@ -237,6 +237,491 @@ guessed: `References/Targets v1 Analysis/CC_BRIEF_shape_space.md`,
 
 ---
 
+### src/pimd_delaycal.py — v1.42 — "Mean level" metric for sustained Compare-over-time; baseline log
+
+Bench report on v1.39-v1.41's Compare-over-time: capture a baseline, most cells read green; add a
+target, most go red (correct); but 10-11 seconds later, with the target still physically present,
+everything reads green again. Reproduced exactly with a standalone simulation before touching any
+code: a sliding 16-sample ("Samples N") window stepping from a quiet 1000 µV level to a stable
+1400 µV level, computing Max |Δ from mean| frame by frame --
+
+```
+frame 39 (t+ 0): Max|Δ|=  4.94 uV  ratio=0.00   green   <- baseline captured here
+frame 40 (t+ 1): Max|Δ|=381.00 uV  ratio=76.14  RED     <- target just appeared
+frame 54 (t+15): Max|Δ|=379.33 uV  ratio=75.81  RED     <- window still straddles old/new
+frame 55 (t+16): Max|Δ|=  5.24 uV  ratio=0.06   green   <- window now ALL target-present
+```
+
+Root cause: every metric on offer (Std dev, Range P-P, Max |Δ|, Drift, Max %Δ) is a *spread* measure
+— computed relative to the window's own mean, re-centred fresh every tick. Once a step change has
+fully slid out of the window (exactly `Samples N` frames later, matching the reported ~10-11 s),
+the window is just as internally "flat" at the new level as it was at the old one — these metrics
+are structurally blind to a *sustained* level shift, only the transition through it. Not a bug in
+any one metric's arithmetic; a category mismatch between what Compare-over-time needs (a level to
+compare) and what every existing metric measures (noise around whatever level currently holds).
+
+New 6th metric, **Mean level** (`_STD_METRICS`/`_STD_METRIC_UNITS` index 5): the window's raw
+average, mV, with no self-centring at all. Verified against the same simulated step change that a
+Std dev/Max Δ metric would clear in ~16 frames stays at the true ~40% ratio for as long as the
+elevated level holds. Selecting it doesn't change how any other metric behaves — it's an additional
+option, not a replacement — and Auto Nudge's own evaluation is (as always) untouched, still reading
+`_stdev()` directly at its own three call sites regardless of what this dropdown shows.
+
+Separately, an operator counter-example ("I saw ~4 mV right at capture and that cell still greyed
+out") couldn't be resolved from the screenshot alone -- "Latest mean" and the selected spread metric
+are different numbers, and confirming which one was actually stored needed the real value, not
+another guess. `_capture_compare_baseline()` now logs every cell's captured value to the Activity
+Log on each capture (`ch<N> [<band>/<threshold>]: <value>`), flagging any that will trip the
+near-zero guard in `_compare_value_ratio()` (`abs(baseline) < 1e-9`) with the exact reason a cell
+will show as unsettled (`…`) instead of leaving it to be inferred. (2026-08-03)
+
+---
+
+### src/pimd_delaycal.py — v1.41 — FIX misleading Q5 error; client-side PWM duty pre-validation
+
+Operator report: importing a saved profile and pressing THERMAL showed "Firmware: Command Input
+Error: invalid profile index (Q5)". Traced to `mcu/pimd_mcu.py`'s `Q` handler (`:716-724`):
+`Q<DYNAMIC_PROFILE_INDEX>` fails whenever `dynamic_profile` is `None`, i.e. whenever the `D` command
+sent immediately before it was rejected (`validate_profile()` at `:281-288` requires every cell's
+`sample_duty` to fit 16 bits, `compute_pulse_duties()` at `:253-261`, and land after `drive_duty`).
+`_start_thermal()`/`_manual_push_profile()`/`_auto_run_soak()` all fired `E`/`D`/`Q<n>`/`G` as one
+unconditional burst with no check that `D` actually succeeded, so **Q5's failure was never the real
+story** — it's a downstream symptom of a rejected `D`, and its error line simply overwrote the
+actual rejection reason in `status_label` before the operator ever saw it. Confirmed against every
+saved profile in `data/profiles/`: `test v4f.json` has cells (the short-period bands' extended
+"tail" delay column) that overflow the 16-bit ceiling — `sample_duty` scales with `delay × freq`, so
+a tail delay that's fine on the long-period bands overflows on the short-period ones in the same
+file.
+
+**Worse than just a bad message**: a rejected `D` leaves the firmware's *previous* `dynamic_profile`
+untouched, so a follow-up `G` still succeeds — Mode 2 keeps streaming on the **stale, pre-attempt**
+delay set with no crash and no obvious interruption. This is exactly what the operator went on to
+report separately: reducing a delay then increasing it back past the limit "still keeps going
+without error as far as I can see" — the stream never stopped, it just silently stopped reflecting
+the requested change.
+
+**Fix 1 — client-side pre-validation, catch it before ever sending.** New `_compute_pulse_duties()`
+/ `_pulse_duties_valid()` / `_max_valid_delay_us()` module functions, an exact mirror of the
+firmware's own copy (same constants, same integer truncation — comment cross-references
+`mcu/pimd_mcu.py` so the two don't silently drift apart). New `_validate_profile_pwm(profile)` /
+`_warn_profile_pwm_problems(problems, context)` methods, wired in at every point a delay could
+become live or get saved:
+- `_on_manual_nudge_clicked()` checks the *proposed* delay before updating the cell or pushing at
+  all — refuses with the offending value, the sample_duty, and the largest delay that would still
+  be valid at that band's pulse width, leaving the cell exactly where it was. Refusing rather than
+  clamping was the deliberate choice: silently rewriting a value mid-experiment (the operator has
+  been visibly probing exactly this ceiling across `test v4a`-`v4f`) would hide the boundary they're
+  trying to find.
+- `_start_thermal()`, `_start_auto()`, `_manual_push_profile()` validate the whole profile and
+  refuse to send anything if any cell is invalid, each with the full list of bad cells logged.
+  `_auto_run_soak()` gets the same guard as defensive insurance (a nudge staying within its own cap
+  should already be valid) and cleanly aborts the whole Auto Nudge run rather than soaking on
+  half-applied delays if it ever isn't.
+- `_import_profile()` warns (doesn't block — the table still loads as-is) immediately on import,
+  the earliest point an exploratory/hand-edited grid like `test v4f.json` reaches this tool, rather
+  than waiting for a THERMAL press to discover it.
+
+**Fix 2 — for whatever pre-validation doesn't anticipate, stop sending blind.** New
+`_send_dynamic_profile(profile, on_ready)` sends `E`+`D` and holds `Q<n>`/`G` back via a new
+`self._pending_d_ready` callback instead of firing all four commands unconditionally.
+`read_from_serial()` now checks for a pending callback first: `'E'` prints nothing, so the very next
+line after sending `D` is always its own response — `'D OK'` fires the callback (which sends
+`Q<n>`/`G` and does whatever state/UI setup used to run unconditionally), any `ERROR` clears the
+callback and shows *that* message directly, and `Q<n>`/`G` are never sent at all. All three
+reconfigure sites refactored to this pattern; `_start_thermal()`'s `_thermal_state = 'running'` also
+moved inside the callback -- it must not read as running when nothing actually started.
+
+Verified with a mock serial simulating both a `D OK` and a `D`-rejection response for all three call
+sites: `Q`/`G` are only ever sent after confirmed success, the real rejection message reaches
+`status_label` unmasked, and `_thermal_state`/`_auto_state` correctly stay unchanged (not falsely
+"running"/"soaking") when `D` fails. Cross-checked `_validate_profile_pwm()`'s output against the
+firmware's own math on a live-edited profile file and confirmed exact agreement. (2026-08-03)
+
+---
+
+### src/pimd_delaycal.py — v1.40 — FIX Compare-over-time: unsigned ratio, not a signed percentage
+
+Operator correction on v1.39, two changes: don't multiply by 100 (a plain ratio, not a percentage),
+and show the magnitude only (unsigned), not a signed `+`/`-` value.
+
+`_compare_value_pct()` renamed `_compare_value_ratio()` (the old name was actively wrong once it no
+longer returns a percentage) and its body changed from `(smoothed_mv - base) / base * 100.0` to
+`abs((smoothed_mv - base) / base)`. Since the return value is now always ≥ 0 — matching every other
+metric this table already shows — the two `abs()` wrappers v1.39 added specifically to handle a
+*signed* value at the colour/rank call sites in `_update_thermal_tables()` are reverted (`sorted(...,
+key=cell_values.get)` and `_value_gradient_color(val_mv)`, dropping their now-redundant `abs(...)`
+wrapping and the comment explaining why it was there, which no longer applies). Both display-text
+call sites drop their `:+.2f` formatting back to plain `:.2f`, matching every other metric.
+
+Direct consequence, not scope creep: `_refresh_std_metric_label()`'s Compare-mode label changes
+`' Δ (%):'` → `' Δ:'` and the Absolute-mode lo/hi spinbox suffix `'%'` → `''` (a ratio has no
+natural unit) — leaving stale "%" text next to a bare ratio would be actively misleading. The
+`cb_compare_mode` tooltip's wording updated to match (`0.10` now reads as "moved by a tenth of the
+baseline", not ten percent). Verified: a rise and an equal-magnitude fall from baseline now return
+identical unsigned values, display text carries no leading sign, and the label/suffix read correctly
+in both modes. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.39 — Compare-over-time: baseline capture / rolling-lag %Δ, age-warned
+
+Every metric so far (v1.36-v1.38) reads an *instantaneous* window. The operator's next ask: compare
+that reading across two points in time — snapshot a baseline before touching something (a nudge, a
+physical target move) and watch how far each cell has drifted since, with a visible warning once the
+snapshot is too old to be a fair comparison. Same shape of problem classviz already solved for its
+own "leading air reference" (`_sig_air_ref_ts`, `pimd_classviz.py:762` — captured value + wall-clock
+age, coloured against a threshold, `:2938-2947`) — reimplemented here with delaycal's own plain
+QLabel/table tools rather than importing classviz's gauge-widget machinery.
+
+**Applies to whichever metric is currently selected** (confirmed with the operator over a hardcoded
+6th metric) — one comparison mechanism reused for Std dev, Range, either Max Δ variant, or Drift.
+Displays **percent change from baseline**: `(current − baseline) / baseline × 100`.
+
+**Two modes**, new `cb_compare_type` combo: **Capture** — press **Space** (new
+`QApplication`-level `eventFilter`, guarded on `cb_compare_mode` checked + Capture selected + focus
+not in a `QLineEdit`, so typing "25/10, 20/20" with its embedded spaces or a focused button's own
+Space-activates-click behaviour is undisturbed) or the new "Capture" button to snapshot every cell's
+current smoothed value via `_capture_compare_baseline()`. **Rolling lag** — no action needed,
+continuously compares against the reading from a new "Lag:" spinbox's worth of redraw ticks ago, via
+a small per-channel `_compare_lag_buf` history.
+
+**Persistence across reconfigures — the one non-obvious call.** A captured baseline survives a
+nudge/reconfigure (the five existing `_thermal_buf.clear()` sites) — the whole point of Capture mode
+is comparing *across* exactly that kind of change. The rolling-lag buffer, by contrast, *is* cleared
+at those same five sites (same reasoning as `_metric_smooth_buf`: a post-nudge reading compared
+against a pre-nudge lagged one is comparing across a physical parameter change, not organic
+settling). Both are cleared on a metric change or a profile-shape change (`_rebuild_thermal_tables`),
+since the flat channel index either is keyed on would otherwise silently point at a different
+physical cell, or blend two different metrics' numbers together.
+
+**Colouring** reuses the existing Rank/Absolute machinery (`_gradient_color_from_fraction`,
+`cb_std_color_mode`) unchanged — `abs()` applied at the point colour/rank is computed (not stored in
+`cell_values`, which keeps its sign for the displayed `+12.34`-style text) so a rise and a fall of
+the same size read as equally noteworthy drift; a no-op for every other metric, which were already
+always ≥ 0. Still gates on `manual_live`, consistent with every colouring feature this session — no
+colour outside Manual Nudge's live view.
+
+**Age label** (`lbl_capture_age`): a dedicated 1 Hz `QTimer`, independent of THERMAL's own state (a
+stale-baseline warning still ticks even with THERMAL stopped), shows "no snapshot" (grey) or "Δt =
+Ns" coloured green→red via the same gradient against new `sp_age_lo_s`/`sp_age_hi_s` spinboxes
+(defaults 30/120 s).
+
+New settings keys `compare_type`, `compare_lag`, `age_lo_s`, `age_hi_s`; `cb_compare_mode`'s checked
+state is deliberately not persisted (same reasoning as `cb_manual_nudge` — don't surprise-arm a
+keyboard shortcut on launch). Verified offline: the event filter fires only when focus is on a
+neutral widget and not a `QLineEdit` (checked against a real focused widget, not just `isinstance`
+on the target), percent arithmetic for both modes, baseline surviving `_auto_settle_done()` while
+being cleared by a metric change or profile rebuild, and the age label crossing green→red. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.38 — new metric: Max %Δ from mean
+
+Follow-up bench feedback on v1.37: neither Rank nor Absolute colouring actually answered the
+underlying question. The operator's real complaint with "Max |Δ from mean|" (mV) wasn't the colour
+scheme, it was the *unit* — two cells with genuinely similar relative noise read as wildly different
+absolute mV numbers whenever their underlying signal levels differ (a short-delay cell sampling
+early in the decay sits at volts; a long-delay cell sampling late sits at millivolts), because
+"worst outlier in mV" conflates *how noisy* a cell is with *how big its signal happens to be*.
+Comparing cells/pulse-widths/bands against each other — the operator's stated goal — needs the
+outlier expressed relative to that cell's own signal level, not an absolute figure.
+
+New 5th metric, **Max %Δ from mean**: the same worst-single-frame-outlier numerator as "Max |Δ from
+mean|", but divided by the window's own mean and expressed as a percentage instead of read off in
+mV. Verified with a synthetic pair mirroring the bench scenario — a ~4.7 V cell and a ~0.05 V cell,
+both given the same ~1% relative noise: absolute Max|Δ| reads 39.0 mV vs 0.39 mV (unusable for
+comparison), Max %Δ reads 0.83% vs 0.78% (directly comparable, as intended).
+
+`_STD_METRICS` gains the new entry; new parallel `_STD_METRIC_UNITS` tuple (`'mV'`×4, `'%'`) drives
+the table's label suffix and — since Absolute mode's lo/hi spinboxes are shared across every metric
+— their `setSuffix()` too, so a percent metric read against stale mV-labelled thresholds (or vice
+versa) can't happen silently. Guards `abs(mean) < 1e-9` (a stalled/dead channel) to avoid a
+divide-by-zero rather than assuming a real signal channel never reads exactly 0 µV. Rank/Absolute
+colouring, smoothing, and the settings/reset machinery from v1.37 apply to this metric exactly as
+they do to the other four — no separate plumbing needed. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.37 — FIX Std dev table metric jitter; rank-based colouring added
+
+Bench report on v1.36's metric selector: watching the live Std dev table with Range P-P selected,
+a 150 µs-pulse/100 µs-delay cell's reading bounced between 0.08 and 0.4 mV, and a 100 µs-pulse/8 µs-
+delay cell (same target, a spanner) bounced between 1.10 and 3.0 mV — a 3–5× swing *within the same
+cell*, with the operator noting "max delta from mean is correct" by contrast. Re-read
+`_update_thermal_tables()` end to end first: no bug — the window genuinely is recomputed fresh
+every redraw tick from the last `Samples N` frames of `_thermal_buf`, exactly as designed. Two
+separate, real problems, not one:
+
+**The metric itself is inherently jittery.** Range P-P and Max |Δ from mean| are order statistics —
+driven by one or two extreme samples in the window, not an average over all of them. Each redraw
+tick the window slides forward a few frames; if a single spike sample enters or leaves, the value
+can swing hard purely from that one sample. Std dev averages over the whole window so one outlier
+barely moves it, which is why it read as "correct" by comparison — nothing was wrong with the
+Range/Max|Δ| arithmetic, just their statistical volatility as an instantaneous live reading.
+
+**The colour can't discriminate what the operator is actually comparing.** The two example cells
+sit on wildly different absolute scales (~10× apart) — itself real, useful signal about which
+pulse-widths/delays carry more SNR, which is exactly the "which cells carry less info, to prune"
+question the operator is using this table to answer. But with one *global* lo/hi mV threshold
+colouring every cell, everything in the quiet band clips to one end of the gradient and everything
+in the loud band clips to the other — zero colour variation *within* a band, which is precisely the
+comparison needed.
+
+**Fix, two parts, confirmed with the operator (Rank as the new default over keeping Absolute-only):**
+
+1. **Smoothing.** New per-channel `self._metric_smooth_buf: dict[int, deque]` (flat channel →
+   recent *computed* mV readings, not raw samples) and `_smoothed_metric_mv()`: a simple moving
+   average over the last `Smoothing` draws (new spinbox, range 1–50, default 5; 1 = raw/off) before
+   display. Applied after `_metric_value_mv()` in both `_update_thermal_tables()` branches. Cleared
+   at every existing `_thermal_buf.clear()` call site (`_start_thermal`, `_start_auto`,
+   `_auto_run_soak`, `_auto_settle_done`, `_manual_push_profile`) plus on a metric change, so
+   smoothing never blends pre/post-reconfigure data or two different metrics together.
+
+2. **Rank colouring.** New `cb_std_color_mode` combo (`'Rank'` / `'Absolute'`, **default Rank**)
+   next to the existing lo/hi spinboxes, which now disable themselves in Rank mode (inert there).
+   `_value_gradient_color()` split into a low-level `_gradient_color_from_fraction(t)` (the
+   existing stop-interpolation, unchanged) plus a thin absolute-mode wrapper, so Rank mode can
+   share the same gradient stops with `t` = a cell's percentile among all currently-visible,
+   fully-settled cells for the selected metric, instead of `t` = position between lo/hi. This
+   required restructuring `_update_thermal_tables()`'s Manual Nudge path into two passes — compute
+   every settled cell's (smoothed) value first, since Rank mode needs the whole table's values
+   before any single cell's colour can be decided, then paint. Verified offline: two synthetic
+   cells at the bench's ~10× scale gap get three genuinely distinct colours in Rank mode, while
+   Absolute mode with the same lo/hi reproduces the reported clipping exactly — confirming both the
+   diagnosis and the fix.
+
+**Scope unchanged from v1.36**: Auto Nudge's own pass/fail evaluation (`_auto_evaluate_parallel` /
+`_channel` / `_initial`, `_capture_measurement`) still calls `_stdev()` directly at its three
+existing sites, untouched by any of this — reconfirmed by grep after the change. New settings keys
+`std_color_mode` and `metric_smooth`, same safe-default/out-of-range-guard pattern as `std_metric`.
+(2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.36 — Std dev table metric selector: Range P-P, Max |Δ|, Drift ½ vs ½
+
+The Std dev table only ever computed one reduction over its rolling window (`_stdev(vals)`), but
+the operator wanted to look at other things through the same live window without a second table —
+concretely, peak-to-peak voltage range ("a value of 10 would mean there was 10 mV between the
+lowest low and highest high in that sample period"), plus whatever else was worth suggesting. The
+window-buffering/gating machinery (`_thermal_buf`, the "filling" guard, the sample-count spinbox)
+was already generic; only the reduction itself was hardcoded.
+
+New `QComboBox` (`cb_std_metric`) next to the table's label, populated from a new `_STD_METRICS`
+tuple: **Std dev** (unchanged default), **Range P-P** (the requested metric — `max(vals) -
+min(vals)`), **Max |Δ from mean|** (worst single-frame outlier, a one-sided view range can miss),
+and **Drift ½ vs ½** (first-half vs second-half window mean — catches a channel steadily walking in
+one direction, which a symmetric spread metric like std dev or range reports as noise rather than
+trend). All four are cheap reductions over the same already-sliced `vals` list. New
+`_metric_value_mv()` dispatches on the combo index; both call sites in `_update_thermal_tables()`
+(the plain numeric path and Manual Nudge's gradient-coloured path) now go through it instead of
+calling `_stdev()` directly. `_stddev_gradient_color()` / `_STDDEV_GRADIENT` renamed
+`_value_gradient_color()` / `_VALUE_GRADIENT` since they now colour whichever metric is selected,
+not std dev specifically — same lo/hi spinboxes and gradient, just re-labelled ("Std colour lo/hi:"
+→ "Colour lo/hi:").
+
+**Scope decision: display only.** Auto Nudge's own pass/fail evaluation (`_auto_evaluate_parallel`
+/ `_channel` / `_initial`, `_capture_measurement`) still calls `_stdev()` directly at its three
+existing call sites, completely untouched — confirmed by grep after the change. Changing what Auto
+Nudge's automatic search optimises for is a materially bigger, unrequested behaviour change; this
+feature is about what the operator *looks at* live, not what Auto Nudge hunts for.
+
+**Relabelled** "Std dev N:" → "Samples N:" (variable name `sp_thermal_n` unchanged — it's still the
+one rolling-window size shared by Thermal, Auto Nudge and Manual Nudge; only the UI label was
+std-dev-specific). New settings key `std_metric` (combo index) persists the selection, defaulting to
+0 (Std dev) when absent so existing settings files keep today's behaviour unchanged; an out-of-range
+stored index is ignored rather than crashing `_load_settings()`. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.35 — Manual Nudge guard/status messages now say what to do, not just what not to
+
+v1.34's mutual-exclusion guard produced "Turn off Manual Nudge before starting Auto Nudge." when
+Auto was clicked while Manual Nudge was checked — accurate, but the very next question the operator
+asked was "so how do I start Manual Nudge, then?", because Manual Nudge has no button of its own: it
+is a checkbox that arms the −/+ overlay and colouring, and the existing **THERMAL** button (a
+different section entirely) is what actually starts the live stream it reacts to. Nothing wrong with
+the underlying mutual-exclusion logic from v1.34; the messaging around it just didn't say that.
+
+Two messages now name the actual next step. `_start_auto()`'s refusal is now "Manual Nudge is on --
+press THERMAL to stream live data and use each cell's −/+ buttons, or uncheck Manual Nudge to use
+Auto Nudge instead." And `_on_manual_nudge_toggled()` now proactively shows "Manual Nudge on -- press
+THERMAL to start streaming, then use each cell's −/+ buttons." the moment the checkbox is ticked (only
+when THERMAL isn't already running), rather than waiting for the operator to hit the wrong button
+first and read about it from a refusal. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.34 — FIX Auto Nudge running was painting over Manual Nudge; modes now exclusive
+
+v1.33's screenshot-driven bug report ("colours only update every 14 or so cycles and restart at
+zero... that timeout still stopped everything") turned out not to be a Manual Nudge bug at all — the
+screenshot showed **Auto Nudge actually running** (green "Auto" button, "Stop Auto" enabled,
+"Parallel — iter 7/20 ... soaking 5s", Activity Log lines in Auto Nudge's own `nudge #N` format)
+with the Manual Nudge checkbox *also* ticked alongside it. `_update_thermal_tables()`'s
+`manual_live = cb_manual_nudge.isChecked() and not self._auto_running` guard was working exactly as
+coded: because Auto Nudge was running, Manual Nudge's continuous gradient never engaged at all, and
+every cell was showing Auto Nudge's own existing state-mirror colouring instead — which by Auto
+Nudge's own long-standing design resets every soak cycle (`sp_auto_soak_s`, 5 s here) and stops when
+`sp_auto_max_iter` is reached (20 here). Both symptoms were 100% pre-existing Auto Nudge behaviour,
+unrelated to anything Manual Nudge does; the actual bug was that nothing stopped the two features
+from running concurrently with no indication of which one was driving what was on screen.
+
+Fixed by making the two modes **mutually exclusive**, confirmed with the operator over the
+alternative (letting them coexist and stripping Auto Nudge's own iteration cap, which would have
+blurred two different interaction models together and touched Auto Nudge's working design rather
+than Manual Nudge's). `_start_auto()` now refuses to start ("Turn off Manual Nudge before starting
+Auto Nudge.") while `cb_manual_nudge` is checked. `_on_manual_nudge_toggled()` now stops Auto Nudge
+first (logged) if it happens to be running when Manual Nudge is checked, and disables/re-enables
+`pb_auto` in step with the checkbox so the button itself reflects which mode is available.
+`cb_manual_nudge` is disabled for the duration of an Auto Nudge run (`_start_auto()`) and re-enabled
+wherever Auto Nudge's own cleanup already re-enables its other buttons (`_stop_auto()`,
+`_auto_finish()`). With the two modes now unable to overlap, Manual Nudge's v1.33 rolling-window
+gradient (already verified correct in isolation) is what will actually paint the tables whenever
+Manual Nudge is checked. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.33 — Manual Nudge: rolling-window std gate, continuous gradient colour, no THERMAL timeout
+
+Three operator-reported problems after using v1.31/v1.32's Manual Nudge on the bench, all in
+`_update_thermal_tables()` / the Std dev colouring path.
+
+**"Every colour change I see them all at once and they all start at 0.0."** The std column was
+colouring off `len(recent) >= 2` — as few as two buffered frames — instead of a genuinely full
+rolling window, so right after any reconfigure (a nudge push, a THERMAL restart) every channel's
+buffer is simultaneously near-empty and reads a spuriously tiny (often near-zero) std for its first
+fraction of a second, colouring every cell "quiet" together before real readings arrive. Fixed by
+gating Manual Nudge's own colouring on `len(recent) >= n` (the full configured `Std dev N`) — the
+same "filling" guard `pimd_classviz.py`'s `_stddev_window()`/`_window_frames()` already uses for
+its rolling reductions. Below the full window a cell now shows a neutral grey `…` (reusing the
+existing `_COL_NR` constant) rather than a numeric `0.00`, matching classviz's own refusal to
+render an unsettled window as if it were a real (quiet) reading. The "at once" part is otherwise
+inherent to the architecture and not new here: `D`/`Q`/`G` redefines the whole profile, so a
+reconfigure restarts the shared frame stream for every channel simultaneously, same as Auto Nudge's
+existing soak-and-restart cycle.
+
+**"No purple entries, just the colour representing level" + "greater range, like heatmap."** Turned
+out to be two sides of one bug. `_apply_manual_nudge_overlay()`'s per-cell widget (v1.31) is a plain
+`QWidget`/`QLabel` with no explicit background, i.e. transparent — confirmed by grabbing the table's
+pixmap in an offscreen test and sampling pixels under the overlay: a purple `_COL_AUTO_DRIFTED`
+background painted on a delay-table cell by an earlier Auto Nudge run bled straight through the
+nudge buttons untouched. Manual Nudge's colouring also only ever touched `tbl_thermal_std`, so
+`self.table`'s cells kept whatever state colour Auto Nudge (or a sweep) had last left there. Fixed
+by having Manual Nudge explicitly repaint **both** `self.table` and `tbl_thermal_std` for every cell
+on every redraw tick (never leaving a background unset), and by replacing the old 3-bucket
+green/yellow/red scheme (`_stddev_heatmap_color`, reusing the Auto Nudge state palette including the
+lavender "drifted" colour) with a new continuous `_stddev_gradient_color()` — a 4-stop green →
+yellow → orange → red ramp interpolated between the lo/hi mV spinboxes and clamped at both ends.
+This is deliberately its own palette, decoupled from `_COL_DONE`/`_COL_AUTO_FLAGGED`/etc.: Manual
+Nudge shows a continuous *level*, not one of Auto Nudge's discrete *states*, so none of that
+palette's colours — purple included — can appear in it, and the wider graduated range gives far
+more visual resolution across the lo–hi band than three flat buckets did.
+
+**"No max iterations, manual continues until stopped by user."** THERMAL's own fixed run length
+(`sp_thermal_secs`, default 240 s) was still ticking down underneath Manual Nudge and auto-stopping
+the whole live view exactly like an ordinary Thermal run — silently ending a nudge-and-watch session
+mid-work. `_thermal_tick()` now checks `cb_manual_nudge` first: while it's checked, the countdown is
+skipped entirely (a new `_thermal_manual_elapsed` counter tracks and displays elapsed seconds
+instead) and THERMAL runs indefinitely until the operator presses Stop; unchecking it resumes the
+ordinary countdown from wherever `_thermal_remaining` was left, untouched by the manual interval. (2026-08-02)
+
+---
+
+### src/pimd_delaycal.py — v1.32 — FIX v1.31's no-scroll sizing overshot the screen; compact rows + screen clamp
+
+v1.31's fix for internal table scrollbars worked exactly as designed — and overshot: fitting
+three full tables without a scrollbar just moved the excess height to the *window*, which grew
+past the operator's actual screen. Two compounding causes. First, `_table_min_height()`'s row
+budget (34 px, bumped from the original 30 to fit the new Manual Nudge overlay) was only ever a
+*minimum*, not an enforced size — `self.table` had no explicit row height, so once the −/+
+overlay's `QPushButton`s were installed, Qt sized each row to the button's own sizeHint (a stock
+button's internal padding alone exceeds 34 px), which is taller than the budget assumed and stacks
+across every row. Second, the default window height was raised 1200 → 1500 alongside that budget,
+with no relationship to the screen actually in front of the operator.
+
+**Rows are now genuinely fixed, not just budgeted.** New `_compact_table()` helper applies an 8 pt
+font and `verticalHeader().setSectionResizeMode(Fixed)` at `TABLE_ROW_PX` (20 px, down from the
+34 px budget) to all three live tables at construction — Qt can no longer grow a row to fit a cell
+widget's sizeHint, so the Manual Nudge buttons are shrunk to fit inside 20 px instead (`setFixedSize`
++ a stylesheet stripping the stock padding/margin that a font-size change alone doesn't remove) and
+`TABLE_HEADER_PX` drops to match. `TABLE_MIN_H_PX` floor drops 120 → 64 accordingly. The Activity
+Log's minimum height also drops 160 → 90 px — another fixed minimum that was stacking on top of the
+three tables' own. For the 3-band × 9-threshold default config this drops the window's actual
+`minimumSizeHint` from needing roughly 950+ px to **646 px**, comfortably under any normal laptop
+screen's usable height.
+
+**Window geometry is now screen-clamped, not just guessed.** New `_clamp_to_screen()` reads
+`QApplication.primaryScreen().availableGeometry()` and caps both the fallback default (reverted
+1500 → 1000, since rows no longer need the extra room) and whatever `window_h`/`window_w` a
+settings file supplies — covering not only first run but a size saved from a larger or different
+monitor than the one currently in front of the operator, which no fixed default could have
+anticipated. (2026-08-01)
+
+---
+
+### src/pimd_delaycal.py — v1.31 — Manual Nudge mode: std-dev heatmap colouring + per-cell −/+ nudge buttons
+
+Auto Nudge already drives the calibrated delay table's cells toward a std-dev threshold
+automatically; there was no operator-driven equivalent — no way to nudge one cell by hand
+and watch the effect on live std dev without editing config files and re-running a sweep.
+
+**Std dev table now colours by value.** `tbl_thermal_std` previously only ever showed plain
+numbers — the only colouring it ever got was Auto Nudge mirroring the calibration table's
+pass/fail state onto it while Auto Nudge is running. `_update_thermal_tables()` now also
+colours each cell green/yellow/red against two new spinboxes (`sp_stddev_lo_mv`,
+`sp_stddev_hi_mv`) via a new `_stddev_heatmap_color()` helper, whenever the new "Manual
+Nudge" checkbox (`cb_manual_nudge`) is on and Auto Nudge isn't (so Auto Nudge's own
+pass/fail mirror still wins if both are touched in one session). This is deliberately the
+same 3-bucket scheme `pimd_classviz.py`'s Stats tab already uses for its own Std column
+(`sp_std_lower`/`sp_std_upper` there) — and its three colours are already delaycal's own
+`_COL_DONE` / `_COL_AUTO_QUEUED` / `_COL_AUTO_FLAGGED` constants, so the palette is shared
+across both tools with nothing new invented. classviz's other Std Dev view — the pyqtgraph
+gradient heatmap with a draggable colorbar region acting as a range "slider" — was not
+pulled in: delaycal has zero pyqtgraph coupling today, and adding it as a dependency for one
+table wasn't worth it next to the two-spinbox scheme classviz's own plain-table equivalent
+already uses.
+
+**Delay table cells get a −/+ overlay.** `self.table`'s cells are (and remain) plain
+`QTableWidgetItem`s — text is still the only store of a cell's delay, read by
+`_build_profile()` and written by `_fill_cell()` / `_auto_finish()` exactly as before; none
+of that changed. What's new is a removable visual overlay: while `cb_manual_nudge` is
+checked, `_apply_manual_nudge_overlay()` installs a small `−`/label/`+` composite widget on
+every cell via `setCellWidget()`, purely occluding the item (its background colour is
+untouched underneath). Unchecking calls `_clear_manual_nudge_overlay()` and reveals the
+plain item again. `_rebuild_table()`, `_import_profile()`, `_finish()` and
+`stop_calibration()` all refresh the overlay if it's active, so a fresh sweep or import
+never leaves stale button labels; the checkbox itself is disabled for the duration of a
+sweep to avoid needing to refresh it mid-fill.
+
+**Clicking − or + on a cell** (`_on_manual_nudge_clicked`) reads the cell's current delay,
+adds/subtracts the new `sp_manual_nudge_ns` step (8–9600 ns, same shape as
+`sp_auto_nudge_ns` but a separate control — Auto and Manual Nudge are independent
+workflows), snaps to the 8 ns grid via the existing `_snap_8ns()`, and writes the result
+back into the item and the overlay label. If THERMAL is currently streaming,
+`_manual_push_profile()` pushes the change to the firmware immediately — the same
+`E` / `D` / `Q<n>` / `G` reconfigure sequence `_auto_run_soak()` already uses for every Auto
+Nudge iteration — and reuses the existing `_auto_settling` 1 s settle gate / buffer clear so
+the reconfigure transient doesn't contaminate the next std-dev window. Without THERMAL
+running, the click only updates the display; the change is picked up the next time THERMAL
+starts or a profile is exported, same as any other cell edit today.
+
+**No-scroll table sizing**, raised separately mid-session: the calibration delay table had no
+minimum-height sizing, unlike the thermal mean/std tables which already compute one so every
+row is visible without an internal scrollbar. Pulled that formula out into a shared
+`_table_min_height()` helper (constants `TABLE_HEADER_PX`/`TABLE_ROW_PX`/`TABLE_BORDER_PX`/
+`TABLE_MIN_H_PX`, row height bumped 30 → 34 px to fit the nudge overlay comfortably) and
+applied it to all three tables — delay, mean, and std dev — so none of them scroll
+internally. Default window height (first-run / missing-settings-file fallback only; existing
+saved geometry is untouched) raised 1440×1200 → 1440×1500 to give the taller stack of three
+tables room without the operator needing to resize manually.
+
+New settings persisted: `manual_nudge_ns`, `stddev_lo_mv`, `stddev_hi_mv`. The Manual Nudge
+checkbox's own on/off state is deliberately **not** persisted — it defaults unchecked on
+every launch so the button overlay never appears unexpectedly on startup. (2026-08-01)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-31
