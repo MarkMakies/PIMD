@@ -1,3 +1,23 @@
+### .claude/settings.json — config — worktree.bgIsolation set to "none"
+
+Background-job (bg-agent) sessions were auto-isolating every edit into a fresh git worktree,
+branched from `origin/main` by default. That's what produced the multi-worktree tangle cleaned
+up the same day: `main`, `worktree-move-jpg-images` and `worktree-rawlog-instrument` all
+diverging independently, one of them (`worktree-rawlog-instrument`) accumulating zero real
+commits while unrelated work landed straight in `main`'s working tree instead. No git config or
+prior settings entry actually controlled this — a CLAUDE.md line added in an earlier session
+("we prefer to only work in one branch at a time") read as a fix but had no mechanism behind it;
+it's been reverted.
+
+Setting `worktree.bgIsolation: "none"` in `.claude/settings.json` makes background jobs edit the
+shared checkout directly, like a normal foreground session — no more auto-created worktrees to
+merge back and clean up. Trade-off: the isolation that stopped a background job and concurrent
+foreground work from touching `main` at the same time is now off. `.claude/` is itself gitignored
+in this repo, so this entry is the only record of the change; the setting takes effect purely by
+the file existing on disk. (2026-08-04)
+
+---
+
 ### DESIGN.md — 1.13.1 — post-consolidation corrections (§18)
 
 Human-directed, read-only rule suspended per §18. **Not a consolidation and no new bench data** —
