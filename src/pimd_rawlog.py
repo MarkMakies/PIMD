@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Raw Logger v1.13
+# PIMD Raw Logger v1.14
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Deliberately dumb: loads a profile, streams it (Mode 2 dynamic profile,
@@ -50,6 +50,8 @@
 # bottom-right cell is the longest pulse width read at the longest delay.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.14 settings persistence (port/target/distance/settle/warmup/geometry),
+#         matching the other PC apps
 #   v1.13 Place/Remove Target renamed to Acquire Target/Acquire Air (each
 #         just stamps the start of its own segment, no place/remove
 #         pairing); "Last line" panel replaced with a live band x delay grid
@@ -87,13 +89,17 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice  # noqa: E402
 from PyQt6.QtGui import QFontDatabase  # noqa: E402
 
-APP_VERSION = '1.13'
+APP_VERSION = '1.14'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_delaycal.py / pimd_classviz.py
+
+DEFAULT_PORT = '/dev/ttyACM0'
 
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'profiles')
 SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'sessions')
 TARGETS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'targets', 'targets_v4.csv')
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'data', 'rawlog_settings.json')
 
 # Fields copied inline into MARK acquire-target lines, so the raw log alone
 # identifies what was in the field without needing targets_v4.csv alongside it.
@@ -197,7 +203,7 @@ class MainWindow(QMainWindow):
 
         conn_row = QHBoxLayout()
         conn_row.addWidget(QLabel('Port:'))
-        self.le_port = QLineEdit('/dev/ttyACM0')
+        self.le_port = QLineEdit(DEFAULT_PORT)
         conn_row.addWidget(self.le_port)
         self.pb_connect = QPushButton('Connect')
         self.pb_connect.clicked.connect(self._on_connect_clicked)
@@ -304,6 +310,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.txt_activity, 1)
 
         self.resize(1000, 640)
+        self._load_settings()
 
     # ------------------------------------------------------------------
     # Activity log (on-screen only -- separate from the session log file)
@@ -648,9 +655,54 @@ class MainWindow(QMainWindow):
         self.le_note.clear()
 
     # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+    def _load_settings(self):
+        try:
+            with open(SETTINGS_PATH) as f:
+                s = json.load(f)
+            self.le_port.setText(s.get('port', DEFAULT_PORT))
+            target_idx = int(s.get('target_idx', 0))
+            if 0 <= target_idx < self.cb_target.count():
+                self.cb_target.setCurrentIndex(target_idx)
+            self.sb_distance_mm.setValue(     s.get('distance_mm',    self.sb_distance_mm.value()))
+            self.sb_settle_window.setValue(   s.get('settle_window',  self.sb_settle_window.value()))
+            self.sb_settle_mv.setValue(       s.get('settle_mv',      self.sb_settle_mv.value()))
+            self.sb_warmup_s.setValue(        s.get('warmup_s',       self.sb_warmup_s.value()))
+            w = int(s.get('window_w', 1000))
+            h = int(s.get('window_h', 640))
+            self.resize(w, h)
+            x, y = s.get('window_x'), s.get('window_y')
+            if x is not None and y is not None:
+                self.move(int(x), int(y))
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            pass  # first run -- keep the widget defaults set above
+
+    def _save_settings(self):
+        s = {
+            'port':           self.le_port.text(),
+            'target_idx':     self.cb_target.currentIndex(),
+            'distance_mm':    self.sb_distance_mm.value(),
+            'settle_window':  self.sb_settle_window.value(),
+            'settle_mv':      self.sb_settle_mv.value(),
+            'warmup_s':       self.sb_warmup_s.value(),
+            'window_w':       self.width(),
+            'window_h':       self.height(),
+            'window_x':       self.x(),
+            'window_y':       self.y(),
+        }
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(s, f, indent=2)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
     def closeEvent(self, event):
+        self._save_settings()
         if self.serial.isOpen():
             self.send_command('E')
             self.serial.waitForBytesWritten(200)

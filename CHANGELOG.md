@@ -1,3 +1,16 @@
+### src/pimd_rawlog.py — v1.14 — settings persistence, matching the other PC apps
+
+`pimd_rawlog.py` was the only PC app without settings persistence — port, target/distance,
+settle window/threshold, warm-up target, and window geometry all reset to defaults on every
+launch. Added `_load_settings`/`_save_settings` following the same JSON-file pattern as
+`pimd_gui.py`, `pimd_delaycal.py`, `pimd_classviz.py`, and `pimd_classify.py` (each app owns its
+own settings file — `data/rawlog_settings.json` here — not a shared one), loaded at the end of
+`__init__` and saved from `closeEvent`. The loaded profile itself is not persisted, consistent
+with the other apps (a profile is re-selected via Load Profile / Resume Session each run, not
+auto-restored). (2026-08-04)
+
+---
+
 ### src/pimd_classify.py — v1.3 — Heatmap rows now match the standard grid orientation
 
 `_band_display_order` sorted bands by first delay value **descending**, and with
