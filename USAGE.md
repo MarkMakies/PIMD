@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.27
+# PIMD — Usage Guide (USAGE.md) v1.28
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,10 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.28 2026-08-04 gui v4.13 → v4.14. §3 rewritten around the pack/board-temp gauges,
+                the wider pulse/delay range and its period-fit readout, session
+                logs moving to data/sessions/, and Connect/Start matching the
+                other apps; the .ui file is gone. §1 diagram.
 v1.27 2026-07-31 classviz v1.66 → v1.67, features v11 → v12, corpus_check v1.8 → v1.9.
                 §5's Analysis bullet: the new Tilt (°) input and the tilt_deg column —
                 zero reference, the enabled-only-when-z rule, its place in the
@@ -138,7 +142,7 @@ mcu/pimd_mcu.py (fw v4.26, RP2040)          — the measurement primitive
       │  USB-serial, ASCII records (DESIGN §9)
       ├─► src/pimd_delaycal.py (v1.29)      — calibrates sample delays,
       │        exports cal_*.json profiles ──► src/data/profiles/
-      ├─► src/pimd_gui.py (v4.13)           — Mode 1 live telemetry / bench monitor
+      ├─► src/pimd_gui.py (v4.14)           — Mode 1 live telemetry / bench monitor
       └─► src/pimd_classviz.py (v1.61)      — Mode 2 heatmap; loads & runs saved
                profiles; captures signatures ──► src/data/corpora/ + src/data/sessions/
                      │        └─ uses src/pimd_shape.py (v1) — shared feature maths
@@ -199,7 +203,7 @@ calculation.
 
 ---
 
-## 3. pimd_gui — Mode 1 telemetry GUI (v4.13)
+## 3. pimd_gui — Mode 1 telemetry GUI (v4.14)
 
 **Intent.** The primary operator interface for **Mode 1 filtered telemetry** —
 real-time voltage/noise monitoring at a single operating point. This is the bench
@@ -213,13 +217,31 @@ consumes Mode 2 streams (`W` records are silently ignored).
   sends `S` then the config in one press.
 - Freq/pulse/delay entry snaps to the 8 ns PWM grid and clean 125 MHz divisors —
   **orange highlight** = off-grid value (the firmware would quantise silently).
+- **Pulse 4–150 µs, delay 4–250 µs** (v4.14) — the full range the widest tracked
+  profile uses, so Mode 1 can sit on any cell Mode 2 sweeps. The readout under
+  the sliders gives drive duty and `pulse+delay` against the period, and turns
+  red when the pair no longer fits inside one period — the config the firmware
+  rejects outright.
+- **Pack and board-temperature gauges** (v4.14, needs firmware v4.28+) — battery
+  icon showing state of charge with the measured pack volts and which DESIGN §12
+  data-quality zone they sit in, plus a board-temp bar. Fed by the firmware's
+  unsolicited `P` telemetry and a 10 s `V` poll. A latched low-voltage lockout
+  turns the gauge red, stops the run, and is spelled out in the alert line.
+  The temperature scale is a **placeholder** until the thermistor front end
+  exists — read it as a trend, not a calibrated figure.
 - Rolling drift slope (µV/s) over the last 100 packets; V/div floor 200 µV.
-- Every `*` record is logged to a per-run CSV (`src/data/P<DDMM-HHMMSS>.csv`).
+- Every `*` record is logged to a session CSV
+  (`src/data/sessions/gui_<YYYYmmdd_HHMMSS>.csv`), opened on **Start** — a short
+  `#` header, then the records verbatim, with `# sensor:` lines interleaved as
+  pack/temp telemetry arrives.
 
-**Notes.** No auto-connect — Connect first, then Start. Output buffer is flushed
-before `E` so queued `A<n>` polls can't delay the stop at slow sample rates. The
-UI fields display µs but the wire protocol is ns (conversion internal). Settings
-(port, params, toggles, geometry) persist in `src/data/gui_settings.json`.
+**Notes.** No auto-connect — Connect first (Start stays disabled until there is a
+port), then Start. Connect sends `E` then `V`, as classviz and delaycal do. Output
+buffer is flushed before `E` so queued `A<n>` polls can't delay the stop at slow
+sample rates. The UI fields display µs but the wire protocol is ns (conversion
+internal). Settings (port, params, toggles, geometry) persist in
+`src/data/gui_settings.json`. There is no `.ui` file — the window is built in
+code, like every other app here (v4.14).
 
 ---
 

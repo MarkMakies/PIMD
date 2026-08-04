@@ -69,7 +69,7 @@ src/                       PC-side tools (PyQt6)
   pimd_gui.py              Mode 1 filtered-telemetry GUI
   pimd_classviz.py         Mode 2 decay-space heatmap + ML logger
   pimd_delaycal.py         Delay-calibration sweep tool
-  pimd111.ui  pimd111_ui.py
+  pimd_rawlog.py           Raw Mode 2 session logger
   requirements.txt
   data/                    Settings, captured CSVs and calibrated profiles (runtime-generated)
 

@@ -1,3 +1,105 @@
+### src/pimd_gui.py — v4.14 — UI folded into the app, pack/temp gauges, session logs, full pulse/delay range
+
+Five changes in one pass, all in the Mode 1 GUI; no firmware or wire-protocol change (DESIGN
+§9/§11 untouched — the app still sends only `S`/`E`/`*`/`A<n>`/`V`).
+
+**1. `pimd111.ui` / `pimd111_ui.py` retired.** The window is now built in code
+(`_build_ui()` and four `_build_*_block()` helpers), like `pimd_classviz.py`,
+`pimd_delaycal.py` and `pimd_rawlog.py`. The generated module had become a liability rather
+than a convenience: every edit since v4.06 was a *deletion* performed at runtime
+(`getattr(self.ui, 'label_9').setParent(None)` for the dead F1–F4 preset chips, then the same
+for four V/div radios in v4.12), with new widgets bolted onto layouts by object name
+(`gridLayout_2`, `formLayout_10`) — so the real layout could only be read by holding both files
+in your head at once, and Qt Designer had not been used since 2026-07-02. Both files deleted;
+`README.md`'s layout listing and `USAGE.md` §3 updated. Behaviour preserved deliberately:
+same widgets, same button-group ids (now assigned explicitly with `addButton(btn, id)` rather
+than relying on Qt's implicit −2, −3, … allocation order, which the `vert_scales` /
+`horiz_scales` dicts silently depended on), same key chips, same settings keys — an existing
+`gui_settings.json` loads unchanged.
+
+*One latent bug fell out of the move.* `apply_soc_defaults()` sets the sliders to values they
+already hold at construction, so `valueChanged` never fired and the three QLineEdits kept
+whatever text the `.ui` file carried (`25.0 kHz` / `10.0 us` / `7.6 us`) until settings were
+loaded over them — on a first run with no settings file those stale strings were what
+`change_parameters()` then parsed and sent. The defaults now set the displays explicitly.
+
+**2. ENT / SPC removed.** The Return→Connect and Space→Start/Stop shortcuts and their two
+chips are gone. Both are single, deliberate actions at the start of a run, and Space in
+particular is one fat finger away from stopping a soaked rig mid-capture.
+
+**3. Connect / Start brought in line with the newer apps.** Connect now sends `E` (safe state)
+then `V`, as `pimd_classviz.py` and `pimd_delaycal.py` do; Start is **disabled until a port is
+open** and refuses to run without one (previously "Running" would light up green against a
+closed port, log to a file and show nothing, with no indication why); disconnecting stops a
+running acquisition first; the port field is `.strip()`ed and matched to classviz's width.
+State is still read back from the button text, as in the other two apps — left alone
+deliberately, since making this app the odd one out is worse than the idiom. New alert line
+under the port field carries firmware complaints (`Command Input ERROR: …`, `LOCKOUT: …`),
+which the app previously dropped on the floor: the status bar is rewritten ~20×/s by the `*`
+stream, so an error posted there is invisible.
+
+**4. Raw-voltage progress bar replaced with pack + board-temperature gauges.** The old
+vertical `dialV` bar duplicated the Current readout beside it, at 50 px of width. In its place,
+consuming firmware v4.28's new telemetry: a **battery-icon gauge** — fill and centre text are
+state of charge, caption is the measured pack voltage and which DESIGN §12 *data-quality* zone
+it sits in (≥24.0 above the ceiling / 23.3–24.0 transition / 21.5–23.3 clean window / below
+that out of window / ≤21.0 lockout floor), with the clean window's lower edge drawn as a dashed
+tick — and a plain **board-temperature bar**. Fed by the unsolicited `P` line plus a 10 s `V`
+poll, because the firmware re-samples both channels at 1 Hz but only reports `P` every 60 s,
+and `V`'s trailing fields also carry the lockout flag. A latched lockout turns the gauge red,
+stops the run, and prints the firmware's own line in the alert row.
+
+SoC comes from the same nominal ICR18650-26C curve as `utilities/pack_discharge/packv.py`,
+copied rather than imported (nothing in `src/` depends on `utilities/`, DESIGN §15). It is
+applied to the **loaded** voltage with no correction, so it reads a few percent low while
+pulsing (~0.29 V at the terminals, §12) — an indicator, not the calibrated runway number, and
+commented as such. The temperature scale is the firmware's **placeholder** linear mapping,
+so the gauge is deliberately single-colour with no threshold bands: inventing green/amber/red
+limits on an uncalibrated placeholder would read as measurement.
+
+**5. Pulse and sample delay reach the profile maxima.** Ranges were 5–40 µs pulse and 5–30 µs
+delay (sliders) against 5–100 µs (typed entry), which cannot reach the cells the current
+profiles actually sweep. Now **4–150 µs pulse / 4–250 µs delay**, taken from
+`cal_110_full_range_v4.json` (pulse 4.0–150.0, delays 4.288–250.0), so Mode 1 can sit on any
+cell Mode 2 visits. Whether a given pair is *legal* depends on frequency — the firmware
+rejects any config where `pulse + delay + 0.904 µs` does not fit inside one period
+(`pulse_duties_valid()`) — and that limit is now reachable at the low-frequency bands, so a new
+readout under the sliders shows drive duty and `pulse+delay` against the period, turning red
+before the board has to say no. The 8 ns-grid orange highlights are unchanged, and the ±10-count
+(80 ns) coarse keys are deliberately left as they were: direct entry is the way across a
+250 µs range, and re-tuning muscle memory was not part of the ask.
+
+**Session logs move to `data/sessions/`.** Was `data/P<DDMM-HHMMSS>.csv`, opened in
+`my_init()` — so merely *starting* the app left an empty CSV beside the settings files
+(three were sitting there, two of them zero bytes). Now `data/sessions/gui_<ts>.csv` opened on
+**Start**, alongside every other session dump in this project, line-buffered, with a three-line
+`#` header (app version, `session_start_iso`, column names) and `# sensor:` lines interleaved as
+pack/temp telemetry arrives — so a Mode 1 dump can be correlated against pack state after the
+fact, which is exactly what §17.13 needed and did not have. The filename QLineEdit is replaced
+by a label; nothing reads these files, so the added header breaks no consumer. Path is now
+absolute (script-relative), not `'data/…'` against the process cwd.
+
+**6. Current readout to µV, and the alert row now clears itself.** Two bench annoyances found
+on the first real run. The Current readout formatted a µV integer as `{:9,.0f} mV`, throwing
+away the whole sub-mV part — the part being measured; now `{:9,.3f}`, i.e. the full resolution
+the `*` record already carries (minimum width 120 → 150 px so the column does not reflow when
+the first packet lands). And the new alert row only ever *wrote*: the single clear was on a
+successful Connect, so `Command Input ERROR: rejected pulse config (drive_duty=78748,
+sample_duty=135161)` sat under the Session row for the rest of the session, while the board ran
+happily on a later, valid config. A firmware complaint is about the config that was live when
+it was sent, so it now retires when that stops being true: non-sticky alerts self-clear after
+`ALERT_CLEAR_MS` (10 s, single-shot `QTimer`), and `change_parameters()` clears before sending
+a new `*` — a still-bad config re-alerts within one serial round trip. A latched **LOCKOUT** is
+posted `sticky=True` and is exempt from both, since it is a standing condition, not an event:
+it goes only on a reconnect or when a `V` reply reports the latch dropped. (2026-08-05)
+
+Verified offscreen against synthetic `*`/`R`/`P`/`V`/`LOCKOUT` lines: layout renders, gauges
+track, session file lands in `data/sessions/` with the expected content, the period-fit readout
+flips red at 25 kHz / 150 µs / 250 µs and back to a 30.0 % duty at 2 kHz. **Not yet run against
+the board** — firmware v4.28's own sensor path is itself still bench-unverified. (2026-08-04)
+
+---
+
 ### mcu/pimd_mcu.py — v4.28 — pack-voltage + board-temp sense (ADC), 'P' telemetry, hard-latched low-voltage failsafe
 
 Motivated directly by an incident: the rig was left running unattended and two 18650 cells
