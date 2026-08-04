@@ -1,3 +1,32 @@
+### src/pimd_classify.py — v1.3 — Heatmap rows now match the standard grid orientation
+
+`_band_display_order` sorted bands by first delay value **descending**, and with
+`invertY(True)` on `heat_plot` that put the longest-pulse/longest-delay band at the top of the
+heatmap and the shortest at the bottom — the opposite of this project's standard grid
+orientation (declared in `pimd_rawlog.py`'s header, CHANGELOG v1.13: shortest pulse/delay
+top-left, longest bottom-right). Flipped the sort to ascending so this file's heatmap now
+agrees with `pimd_rawlog.py`'s raw-value grid and `pimd_classviz.py`'s tables/heatmaps. Found
+while auditing `pimd_classviz.py` for the same bug (below) and confirming cross-app
+consistency, at the user's request. (2026-08-04)
+
+---
+
+### src/pimd_classviz.py — v1.70 — Main/Analysis heatmap rows now match the standard grid orientation
+
+Same bug as `pimd_classify.py` v1.3 above: `_band_display_order` sorted bands by first delay
+value **descending**, so with `invertY(True)` the Main Heatmap and Analysis Heatmap tabs (which
+both reindex by this array) showed the longest-pulse/longest-delay band at the top and the
+shortest at the bottom — inconsistent with `pimd_rawlog.py`'s declared standard grid
+orientation (v1.13: shortest pulse/delay top-left, longest bottom-right) and with this file's
+own Stats table, which already derived an ascending (correct) order from the same data via
+`reversed(_band_display_order)`. Flipped `_band_display_order` to sort ascending and stopped
+deriving `_band_stats_order` by reversing it — both are now the same ascending order, so the
+Stats table's already-correct row order is unaffected. Verified against the profile actually in
+use, `cal_110_full_range_v4.json`: its bands list `pulse_us` and `delays_us[0]` both ascending
+together, so ascending-by-delay is a valid pulse-width proxy for this profile. (2026-08-04)
+
+---
+
 ### src/pimd_delaycal.py — v1.45 — Std dev table Colour lo/hi: lo spinbox floor -999 mV (was 0)
 
 The "Colour lo/hi" pair that drives Absolute-mode colouring on the bottom (Std dev / metric)

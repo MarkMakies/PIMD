@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.69
+# PIMD Signature Visualiser (ClassViz) v1.70
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -19,6 +19,9 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.70 FIX Main/Analysis heatmap rows sorted delay-descending (longest at
+#         top) instead of ascending -- now matches the standard grid
+#         orientation (shortest pulse/delay top-left, longest bottom-right)
 #   v1.69 FIX both Std Dev displays bypassed the glitch filter and the stall guard
 #   v1.68 saving a signature marks the session dump; new '# capture:' frame-window join key
 #   v1.67 Tilt (°) capture input for oblique poses; tilt_deg joins the placement tuple
@@ -133,7 +136,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.69'
+APP_VERSION = '1.70'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -898,13 +901,16 @@ class MainWindow(QMainWindow):
                              for b in bands]
         self._band_labels = ['{0:,}Hz / {1:.3f}µs'.format(b['freq_hz'], b['pulse_us'])
                               for b in bands]
-        # Sort display rows by first delay value descending so alternating
-        # pulse-width profiles (high/low interleaved) still render in delay order.
+        # Sort rows by first delay value ascending -- shortest-delay band first --
+        # so alternating pulse-width profiles (high/low interleaved) still render in
+        # delay order. Combined with invertY(True) on the heatmap plots, this puts
+        # the shortest-pulse/shortest-delay band at the top and the longest at the
+        # bottom, matching this project's standard grid orientation (pimd_rawlog.py
+        # header / CHANGELOG v1.13).
         self._band_display_order = sorted(
-            range(n_bands), key=lambda i: bands[i]['delays_us'][0], reverse=True)
+            range(n_bands), key=lambda i: bands[i]['delays_us'][0])
         self._display_band_labels = [self._band_labels[i] for i in self._band_display_order]
-        # Ascending delay order — used by the Stats table and Profile Builder table.
-        self._band_stats_order  = list(reversed(self._band_display_order))
+        self._band_stats_order  = list(self._band_display_order)
         self._stats_band_labels = [self._band_labels[i] for i in self._band_stats_order]
         self._has_threshold_v = all(
             'threshold_v' in b and len(b['threshold_v']) == n_cells for b in bands)
