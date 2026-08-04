@@ -1,3 +1,60 @@
+### mcu/pimd_mcu.py — v4.28 — pack-voltage + board-temp sense (ADC), 'P' telemetry, hard-latched low-voltage failsafe
+
+Motivated directly by an incident: the rig was left running unattended and two 18650 cells
+over-discharged past recovery, because there is no voltage-sense hardware on the board and no
+firmware concept of pack state at all (DESIGN §12: "no divider, no thermistor, no NTC;
+GP26-29 appear only as symbol pins"). Schematic sheet 2
+(`References/images/schematic-v604-sheet2.jpg`) shows all four RP2040 ADC-capable pins
+(GP26-29) already wired to onboard 10k pots (`POT-0`..`POT-3`) for bench bring-up, unused by
+this firmware until now — which lets the whole path below be exercised on the bench without a
+real pack divider or thermistor circuit.
+
+New `machine.ADC` reads on GP26 (pack voltage, `POT-0`) and GP27 (board temperature, `POT-1`);
+GP28/29 (`POT-2`/`POT-3`) are the spare fallback pins if GP26/27 turn out to carry something
+else on the real board (flagged for a schematic-sheet-1 check before flashing). Both channels
+are 64x-oversampled and serviced together at 1 Hz by a new `service_sensors()`, reusing the
+exact `ticks_ms()`/`ticks_diff()` idiom `acquire_mode2()` already used for
+`MIN_EMIT_MS`/`COMMAND_POLL_MS` — no new scheduler. `service_sensors()` is called from both the
+main loop and from inside `acquire_mode2`'s own `i==0` block, because the main loop's call
+doesn't run while control sits inside `acquire_mode2`'s internal `while` for the duration of a
+Mode 2 sweep. Every 60 s it emits a new unsolicited, additive telemetry line —
+`P<time_ms>,<pack_mV>,<board_temp_dC>` (board_temp_dC is deci-°C, x10 integer, matching the
+project's no-floats wire convention) — a prefix no PC tool currently checks for, the same
+property that made the `B` line (v4.11/v4.27) safe to add: `pimd_gui.py`, `pimd_classviz.py`,
+`pimd_delaycal.py` and `pimd_rawlog.py` all dispatch on `line[0]`/prefix with no catch-all
+`else`, so this breaks no consumer. `V` also gains three additive trailing fields
+(`pack_mV`, `board_temp_dC`, `lockout`) for the same reason — confirmed nothing in `src/`
+splits `V` by field count.
+
+**Low-voltage failsafe**, the higher-priority half: at the 21.0 V floor DESIGN §12 already
+documents as the working discharge limit (`PACK_VOLTAGE_TRIP_MV = 21_000`), three consecutive
+1 Hz debounced readings latch `pack_voltage_lockout` — forces `state = 'stop'`, calls the
+existing `set_safe_state()`, and permanently rejects `S`/`G`/`D` until a physical power-cycle
+clears the RAM-only flag. **Deliberately a hard latch, not an auto-resume or a soft re-arm
+command** — an automatic resume would repeat exactly the failure mode that damaged the cells
+(voltage creeps back up under no load once pulsing stops, a resume reloads the pack, it sags
+again). A new `pack_voltage_boot_check()` runs before `'Ready'` is even printed, so a rig
+powered on already below the floor never fires a single pulse. `A<n>` is deliberately left
+unblocked — verified by reading `acquire_raw_average()`: it never calls `duty_u16()` on either
+PWM, only reads at whatever duty `set_safe_state()` already zeroed, so it cannot re-arm the
+coil even though the command stays callable.
+
+Both ADC-to-physical mappings (`PACK_VOLTAGE_FULLSCALE_MV = 25_000`,
+`THERM_TEMP_FULLSCALE_DECIC = 1500`) are **placeholder linear scales** — the real analog front
+ends (pack divider, thermistor conditioning) don't exist yet; 0-3.3V↔0-25V and 0-3.3V↔0-150°C
+are the design target as specified by the operator. Flagged explicitly rather than glossed
+over: a raw NTC thermistor+divider is **not** linear in temperature (Beta/Steinhart-Hart
+curve) — if that ends up being the chosen part, this linear placeholder needs replacing with
+the correct curve or a lookup table, not just re-tuning the constant.
+
+Scope deliberately excludes any PC-tool change in this pass; `pimd_rawlog.py` already logs
+every raw serial line verbatim regardless of prefix, so it verifies the new `P` line with zero
+PC-side code changes. **Not yet verified live** — needs the bench pass in the implementation
+plan's checklist: a `POT-0`/`POT-1` sweep smoke test via `pimd_rawlog.py`, then trip/boot/
+recovery tests using `POT-0` in place of a real pack. (2026-08-04)
+
+---
+
 ### src/pimd_rawlog.py — v1.14 — settings persistence, matching the other PC apps
 
 `pimd_rawlog.py` was the only PC app without settings persistence — port, target/distance,

@@ -29,16 +29,29 @@
 # Other commands (both modes):
 #   A<n>  acquire N boxcar-averaged raw samples at held config (Mode 1 or idle only)
 #         -> R<time_ms>,<mean_uV>,<std_uV>,<n>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>
-#   V/v/? identify -> V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>
+#   V/v/? identify -> V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>,
+#                     <pack_mV>,<board_temp_dC>,<pack_voltage_lockout>
+#         (v4.28 appends the three trailing sensor/lockout fields. Additive: no parser
+#         in src/ splits V by field count, so this breaks no consumer.)
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #   B/b   diagnostic counters, reset on read
 #         -> B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>
 #         emit_block_* (v4.27) count Mode 2 emits whose print() blocked longer than
 #         EMIT_BLOCK_WARN_MS — i.e. the host stopped draining USB CDC. Non-zero means
 #         the sweep was paused and the rig's thermal load changed with it.
+#   (unsolicited, both modes) pack-voltage / board-temp telemetry, every SENSOR_REPORT_MS:
+#         -> P<time_ms>,<pack_mV>,<board_temp_dC>
+#         board_temp_dC is deci-degrees C (x10 integer). Both are PLACEHOLDER linear
+#         ADC full-scale mappings (v4.28) pending the real analog front ends — see
+#         PACK_VOLTAGE_FULLSCALE_MV / THERM_TEMP_FULLSCALE_DECIC below.
+#   (v4.28) LOW-VOLTAGE FAILSAFE: if pack_mV <= PACK_VOLTAGE_TRIP_MV for
+#         PACK_VOLTAGE_TRIP_CONSECUTIVE consecutive samples, firmware forces a stop,
+#         disables drive, and LATCHES — S/G/D are rejected until a physical power-cycle.
+#         No serial command can clear the latch (deliberate: see CHANGELOG v4.28).
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.28 pack-voltage + board-temp sense (ADC), periodic 'P' telemetry, hard-latched low-voltage failsafe
 #   v4.27 diagnostic: emit-block counters via 'B' (host-stall detection; emit path unchanged)
 #   v4.26 FIX acquire_mode2: post-emit USB IRQ burst mis-timed cell[i]'s CC write (channel-1 σ)
 #   v4.25 FIX acquire_mode2: outlier gate could permanently latch small-signal cells
@@ -75,9 +88,9 @@ import struct
 import select
 from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
-from machine import Pin, PWM, SPI, unique_id, disable_irq, enable_irq
+from machine import ADC, Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.27'
+FW_VERSION = '4.28'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -109,6 +122,21 @@ drl_pin = Pin(9, Pin.IN)
 adc_filtered_spi = SPI(1, baudrate=10_000_000, sck=scka_pin, miso=sdoa_pin)
 
 ltc2508_sel0 = Pin(12, Pin.OUT)
+
+# ---------------------------------------------------------------------------
+# Pack-voltage / board-temperature sense (RP2040 on-chip ADC, v4.28)
+# ---------------------------------------------------------------------------
+# GP26-29 (ADC0-3) are unused elsewhere in this firmware. Schematic sheet 2
+# wires all four to onboard 10k pots (POT-0..POT-3) for bench bring-up, so
+# these two assignments (POT-0/POT-1) can be exercised on the bench before
+# any real pack-voltage divider or thermistor circuit exists.
+# VERIFY against schematic sheet 1's RP2040 net names before flashing to a
+# board where GP26/27 carry something else — GP28/29 (POT-2/POT-3) are the
+# spare fallback pins if so.
+PACK_VOLTAGE_ADC_PIN = 26   # GP26 / ADC0, schematic sheet 2 "POT-0"
+THERM_ADC_PIN = 27          # GP27 / ADC1, schematic sheet 2 "POT-1"
+pack_voltage_adc = ADC(Pin(PACK_VOLTAGE_ADC_PIN))
+therm_adc = ADC(Pin(THERM_ADC_PIN))
 
 # ---------------------------------------------------------------------------
 # PWM scaling constants
@@ -155,6 +183,24 @@ OUTLIER_GATE_MIN = 164  # absolute gate floor in raw14 counts (≈100 mV, 1% FS)
                         # a 0 threshold and a negative mean a negative one — every
                         # sample rejected, cell latched at its warm-up value (v4.25;
                         # bit-truncation glitches are volts-scale, still caught).
+
+# ---------------------------------------------------------------------------
+# Pack-voltage / board-temperature sensing + low-voltage failsafe (v4.28)
+# ---------------------------------------------------------------------------
+ADC_OVERSAMPLE_N = 64          # raw ADC reads averaged per channel per sample
+SENSOR_SAMPLE_MS = 1000        # both channels re-sampled + failsafe re-checked, 1 Hz
+SENSOR_REPORT_MS = 60_000      # 'P' telemetry line emitted this often
+# PLACEHOLDER linear full-scale mappings — the real analog front ends (pack
+# divider, thermistor conditioning) do not exist yet. Replace once built and
+# bench-calibrated against a multimeter/reference thermometer. A raw NTC
+# thermistor+divider is NOT linear in temperature (Beta/Steinhart-Hart curve);
+# if that's the eventual part, THERM_TEMP_FULLSCALE_DECIC must be replaced
+# with the proper curve/lookup table, not just re-tuned.
+PACK_VOLTAGE_FULLSCALE_MV = 25_000     # 0-3.3V ADC <-> 0-25.000V pack
+THERM_TEMP_FULLSCALE_DECIC = 1500      # 0-3.3V ADC <-> 0.0-150.0 degC (deci-degC, x10 int)
+PACK_VOLTAGE_TRIP_MV = 21_000           # hard floor, mV (DESIGN.md §12 working discharge floor)
+PACK_VOLTAGE_TRIP_CONSECUTIVE = 3      # consecutive sub-floor SENSOR_SAMPLE_MS samples
+                                        # required to latch (debounce against ADC noise)
 
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
@@ -235,6 +281,16 @@ state = 'ready'               # 'ready' | 'mode1_running' | 'mode2_running' | 's
 active_profile_index = 0
 mode2_profile_changed = False
 dynamic_profile = None        # set by the D command; RAM only, lost on reset
+
+# Pack-voltage / board-temp sensing state (v4.28) — RAM only, lost on reset,
+# which is exactly the point: pack_voltage_lockout can only be cleared by a
+# physical power-cycle, never by any serial command (see CHANGELOG v4.28).
+pack_voltage_lockout = False
+pack_voltage_low_streak = 0
+last_pack_mV = 0
+last_board_temp_dC = 0
+last_sensor_sample_ms = ticks_ms()
+last_sensor_report_ms = ticks_ms()
 
 
 def get_profile(idx):
@@ -640,6 +696,17 @@ def acquire_mode2(profile):
                 if ticks_diff(now, last_poll_ms) >= COMMAND_POLL_MS:
                     check_for_commands(timeout_ms=0)
                     last_poll_ms = now
+                # v4.28: the main loop's service_sensors() call doesn't run while
+                # control sits in this function's own while loop (i.e. for the
+                # whole sweep), so it's serviced here too, at the same i==0 cadence
+                # point as the emit/poll above. A trip here exits the sweep
+                # immediately (break, then the while-loop condition below is
+                # already false) rather than waiting for the ~145 ms sweep to
+                # finish like a normal 'E' stop would — deliberate for the safety
+                # path.
+                service_sensors()
+                if pack_voltage_lockout:
+                    break
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +717,79 @@ def set_safe_state():
     sample_coil_pwm.duty_u16(2 ** 16 - 1)
     drl_pin.irq(handler=None)
     print('SAFE: Drive OFF / Sampling OFF / Interrupts OFF')
+
+
+# ---------------------------------------------------------------------------
+# Pack-voltage / board-temperature sense + low-voltage failsafe (v4.28)
+# ---------------------------------------------------------------------------
+def _adc_oversampled_u16(adc):
+    """Average ADC_OVERSAMPLE_N raw 16-bit reads from one ADC channel."""
+    total = 0
+    for _ in range(ADC_OVERSAMPLE_N):
+        total += adc.read_u16()
+    return total // ADC_OVERSAMPLE_N
+
+
+def read_pack_voltage_mv():
+    """Oversampled pack-voltage read, PLACEHOLDER linear scale (see
+    PACK_VOLTAGE_FULLSCALE_MV) pending the real divider hardware."""
+    return _adc_oversampled_u16(pack_voltage_adc) * PACK_VOLTAGE_FULLSCALE_MV // 65535
+
+
+def read_board_temp_dC():
+    """Oversampled board-temp read, PLACEHOLDER linear scale (see
+    THERM_TEMP_FULLSCALE_DECIC) pending the real thermistor/sensor hardware.
+    Units: deci-degC (x10 integer, no floats on the wire)."""
+    return _adc_oversampled_u16(therm_adc) * THERM_TEMP_FULLSCALE_DECIC // 65535
+
+
+def _pack_voltage_trip_check(pack_mV):
+    """Debounced low-voltage latch. Once tripped, pack_voltage_lockout stays
+    True until a physical power-cycle clears the RAM state — no serial
+    command re-arms it (see CHANGELOG v4.28: an auto/soft-resume risks
+    repeating the over-discharge incident that motivated this)."""
+    global pack_voltage_lockout, pack_voltage_low_streak, state
+    if pack_mV <= PACK_VOLTAGE_TRIP_MV:
+        pack_voltage_low_streak += 1
+    else:
+        pack_voltage_low_streak = 0
+    if pack_voltage_low_streak >= PACK_VOLTAGE_TRIP_CONSECUTIVE and not pack_voltage_lockout:
+        pack_voltage_lockout = True
+        state = 'stop'
+        set_safe_state()
+        print('LOCKOUT: pack voltage {0:d} mV <= floor {1:d} mV — pulsing '
+              'disabled, power-cycle required to clear'.format(
+                  pack_mV, PACK_VOLTAGE_TRIP_MV))
+
+
+def pack_voltage_boot_check():
+    """Run before 'Ready' / before any command can be accepted, so a rig
+    powered on already at or below the floor never fires a single pulse."""
+    global last_pack_mV, last_sensor_sample_ms, last_sensor_report_ms
+    for _ in range(PACK_VOLTAGE_TRIP_CONSECUTIVE):
+        last_pack_mV = read_pack_voltage_mv()
+        _pack_voltage_trip_check(last_pack_mV)
+    last_sensor_sample_ms = ticks_ms()
+    last_sensor_report_ms = ticks_ms()
+
+
+def service_sensors():
+    """Shared per-tick helper, called from both the main loop and
+    acquire_mode2's own loop (see each call site) so the sample/report
+    cadence below holds in both modes despite acquire_mode2 owning its own
+    internal loop for the whole duration of a Mode 2 sweep. Uses the same
+    ticks_ms/ticks_diff idiom as MIN_EMIT_MS/COMMAND_POLL_MS."""
+    global last_pack_mV, last_board_temp_dC, last_sensor_sample_ms, last_sensor_report_ms
+    now = ticks_ms()
+    if ticks_diff(now, last_sensor_sample_ms) >= SENSOR_SAMPLE_MS:
+        last_pack_mV = read_pack_voltage_mv()
+        last_board_temp_dC = read_board_temp_dC()
+        _pack_voltage_trip_check(last_pack_mV)
+        last_sensor_sample_ms = now
+    if ticks_diff(now, last_sensor_report_ms) >= SENSOR_REPORT_MS:
+        elapsed_ms = ticks_diff(now, base_time_ms)
+        print('P{0:d},{1:d},{2:d}'.format(elapsed_ms, last_pack_mV, last_board_temp_dC))
+        last_sensor_report_ms = now
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +828,11 @@ def check_for_commands(timeout_ms=1):
         cmd = line[0]
 
         if cmd in ('S', 's'):
+            if pack_voltage_lockout:
+                print('Command Input ERROR: S rejected — pack-voltage lockout latched '
+                      '(last {0:d} mV <= floor {1:d} mV); power-cycle to clear'.format(
+                          last_pack_mV, PACK_VOLTAGE_TRIP_MV))
+                return
             if state == 'mode2_running':
                 print('Command Input ERROR: S rejected while Mode 2 running (send E first)')
                 return
@@ -698,6 +843,11 @@ def check_for_commands(timeout_ms=1):
             state = 'stop'
 
         elif cmd in ('G', 'g'):
+            if pack_voltage_lockout:
+                print('Command Input ERROR: G rejected — pack-voltage lockout latched '
+                      '(last {0:d} mV <= floor {1:d} mV); power-cycle to clear'.format(
+                          last_pack_mV, PACK_VOLTAGE_TRIP_MV))
+                return
             if state == 'mode1_running':
                 print('Command Input ERROR: G rejected while Mode 1 running (send E first)')
                 return
@@ -734,6 +884,11 @@ def check_for_commands(timeout_ms=1):
                 mode2_profile_changed = True  # signals acquire_mode2 to restart
 
         elif cmd in ('D', 'd'):
+            if pack_voltage_lockout:
+                print('Command Input ERROR: D rejected — pack-voltage lockout latched '
+                      '(last {0:d} mV <= floor {1:d} mV); power-cycle to clear'.format(
+                          last_pack_mV, PACK_VOLTAGE_TRIP_MV))
+                return
             if state == 'mode2_running':
                 print('Command Input ERROR: D rejected while Mode 2 running (send E first)')
                 return
@@ -816,11 +971,12 @@ def check_for_commands(timeout_ms=1):
                 min_uV, max_uV))
 
         elif cmd in ('V', 'v', '?'):
-            print('V{0},{1},{2},{3},{4:d},{5:d},{6:d},{7:d}'.format(
+            print('V{0},{1},{2},{3},{4:d},{5:d},{6:d},{7:d},{8:d},{9:d},{10:d}'.format(
                 FW_VERSION, board_id_hex, NUM_PROFILES, active_profile_index,
                 sample_frequency_hz,
                 round(pulse_width_us * 1000), round(sample_delay_us * 1000),
-                down_sample))
+                down_sample,
+                last_pack_mV, last_board_temp_dC, int(pack_voltage_lockout)))
 
         elif cmd == 'L':
             for idx, p in enumerate(PROFILES):
@@ -863,6 +1019,7 @@ def check_for_commands(timeout_ms=1):
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+pack_voltage_boot_check()  # v4.28: latch before 'Ready' if already at/below the floor
 print('Ready')
 
 serial_poll = select.poll()
@@ -871,6 +1028,7 @@ serial_poll.register(stdin, select.POLLIN)
 try:
     while True:
         check_for_commands()
+        service_sensors()
         if state == 'mode1_running':
             measurement_cycle()
         elif state == 'mode2_running':
