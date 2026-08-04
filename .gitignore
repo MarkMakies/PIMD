@@ -57,7 +57,7 @@ src/data/profiles/cal_72_air_v3.json
 
 # Previous-epoch profile8b captures — kept on disk, not repo source
 # (their DESIGN.md §15 rows were dropped at Doc-rev 1.8)
-References/profile8b-*
+References/images/profile8b-*
 
 # Working analysis bundles — kept on disk, not repo source. Same rationale as
 # ML/ above: these are session working docs and generated figures, and their

@@ -2,7 +2,7 @@
 
 *A from-scratch, multi-band pulse-induction metal detector built for autonomous, position-tagged ground survey.*
 
-![Mixed ferrous + non-ferrous target — the 8×9 decay-space matrix splits into non-ferrous (blue, early decay) and ferrous (red, late decay)](References/profile8b-spanner-copper.jpg)
+![Mixed ferrous + non-ferrous target — the 8×9 decay-space matrix splits into non-ferrous (blue, early decay) and ferrous (red, late decay)](References/images/profile8b-spanner-copper.jpg)
 
 > Above: a single live frame with a steel spanner **and** a copper pipe under the coil. The two
 > materials separate *spatially* inside the decay-space matrix — non-ferrous (blue) collapses early,
@@ -123,7 +123,7 @@ A32                            one 32-sample boxcar average (R record)
 - **Front end / drive:** functional but a known rework target — a future revision will replace the TX switch and gate driver (planned: STP10NM60N + TC4420/TC4429) to retire the current FET being run past its rated SOA.
 - **Thermal:** a thermistor is now fitted to the TX damping resistor. Thermal drift settles to effectively zero once the resistor reaches ~80 °C, which is the dominant warm-up transient.
 
-![Schematic — PIMD rev 6.04](References/schematic-v604.jpg)
+![Schematic — PIMD rev 6.04](References/images/schematic-v604.jpg)
 
 ## Roadmap
 
