@@ -1,0 +1,25 @@
+"# targets_v3.csv 2026-07-26:  changed solder roll.  added rocks, quartz piece, water bottle.  reviewed and updated some existing targets",,,,,,,,,,,,
+# targets.csv — v1  commit (2026-07-14) — PIMD target registry,,,,,,,,,,,,
+"# v1 (2026-07-14): initial population from IMG_0878.JPEG, and fixed measurements from user",,,,,,,,,,,,
+# One row per physical object. target_id is stable and referenced by capture files — never rename or reuse an id.,,,,,,,,,,,,
+# Units: mm,Dims are the sorted bounding box  dim_a >= dim_b >= dim_c.,,,,,,,,,,,
+"# For solid sheets/discs, thickness lives in dim_c. wall_thickness_mm is for hollow sections only (tube/box/dome; for rings = radial wall); 0 = solid / not applicable.",,,,,,,,,,,,
+# shape_class: rod , tube , ring , disc , plate , dome , block , sphere , bolt , wire_coil , collection , composite , irregular
+# closed_loop: y = contains a macroscopic closed conductive ring path (bore/hole comparable to object size).,,,,,,,,,,,,
+#   Small fastener holes and suspension bails don't count. na = non-conductive material. unk = unknown.,,,,,,,,,,,,
+# magnet_test: strong , weak , none (owner-measured where reported; unambiguous pure-metal classes filled from material physics;,,,,,,,,,,
+target_id,short_name,shape_class,dim_a_mm,dim_b_mm,dim_c_mm,wall_thickness_mm,closed_loop,mass_g,magnet_test,material_class,plating_material,substrate
+Ag_jewellery_01,solid silver pendant,irregular,70,70,10,0,n,46,none,silver,na,na
+Cu_Zn_brass_block_01,brass block,block,85,34,30,5.4,y,369,none,brass,na,na
+Al_plate_01,aluminium plate (large),plate,170,120,10,0,n,362,none,aluminium,na,na
+Cu_Zn_brass_gear_01,brass gear,ring,55,55,25,20,y,282,none,brass,na,na
+Cu_pipe_01,copper pipe (long),tube,220,25,22,1.2,y,122,none,copper,na,na
+Fe_Cast_iron_trivet_01,cast iron trivet,disc,75,75,3,0,n,103,strong,cast_iron,na,na
+Fe_Zn_gal_rhs_01,gal RHS offcut,tube,135,25,25,1.4,y,143,strong,steel,zinc,steel
+Pb_pipe_01,lead pipe,tube,120,25,25,3.5,y,203,none,lead,na,na
+ferrite_toroid_01,ferrite toroid,ring,36,36,12,9,y,56,strong,ferrite,na,na
+Fe_SS_disc_01,stainless perforated disc,disc,85,85,0.7,0,n,35,strong,stainless,na,na
+Fe_spanner_01,adjustable spanner 250,irregular,210,60,15,0,n,271,strong,steel,na,na
+Fe_bolt_rusty_01,rusty old bolt,bolt,60,20,20,0,n,147,strong,steel,na,na
+NdFeB_magnet_nd_01,rare-earth magnet cylinder,rod,20,7.5,7.5,0,n,5,strong,ndfeb,nickel,ndfebUse
+

@@ -875,6 +875,212 @@ against the offline signed-delta replay. (2026-08-03)
 
 ---
 
+### findings — reading the v1.44 signed Mean-level Δ heatmap on a live brass-close capture
+
+Operator's own read of a brass-close-range capture (v1.44, Δt=132 s since baseline), checked
+point by point rather than taken on trust:
+
+- **"Top-left negative block moves with thermal/battery effects."** Partly right, but likely
+  secondary, not primary. The −14 to −38 mV block at 4.9-3.7 V appeared at only 132 s since
+  baseline; an earlier clean spanner+aluminium test with no drift confound (target introduced
+  immediately after baseline capture) showed comparable-or-larger negative deltas at the same
+  columns (−46 to −220 mV) from the target alone, and session drift rates measured elsewhere
+  this session would only account for ~8-15 mV over a 132 s window. So this block is most
+  likely dominated by the target's own real early-time (negative-going) response, with drift
+  contributing a real but secondary skew on top.
+- **"Diagonal blanks are averaging on both sides of zero."** Right in spirit, one precision
+  correction: it isn't the rolling *time* average within a cell mixing positive and negative
+  samples (each cell's rolling average is a steady value at its own fixed delay). It's that the
+  signed difference (current level minus baseline) genuinely passes through zero **across
+  cells** — the target's response is negative early in the decay and positive later, so there's
+  a real delay where it crosses, and whichever column lands closest reads a genuinely-near-zero,
+  correctly-measured difference, not a noise artefact. Confirmed against the raw numbers:
+  `25,000Hz/6.0us` @ 2.4V reads +0.00, sitting between −8.21 (3.7V) and +0.09 (1.5V).
+- **"Cells right of the crossing are stable until a target arrives; cells left of it need
+  constant adjustment."** Consistent with the calibration-delay table's own colouring pattern
+  seen throughout this session (nudging concentrated on the shorter-delay/higher-threshold
+  cells) — a threshold anchored on the steep part of the decay is far more sensitive to a small
+  timing/level shift than one anchored on the flat floor.
+- **"Cells reading 2-4 mV instead of 16-18 mV are driven lower by oscillation/op-amp behaviour,
+  settling to a ~16 mV bias with no drive."** The pattern is real, confirmed numerically in this
+  capture's own raw Latest-mean table — every row has a genuine local *minimum* below its
+  eventual floor, not a monotonic approach to it (e.g. `25,000Hz/9.0us`: 10, 3, 4 mV at
+  2.4/1.5/0.5V before settling at 16-17 mV further out; `6,250Hz/45.0us`: 4 mV at 3.7V before
+  settling at 16-17 mV). An op-amp/ringing overshoot-then-settle is a plausible, common analogue
+  mechanism that would produce this shape — but per CLAUDE.md this can't be confirmed or ruled
+  out from logs alone; it matches the data shape without being provable from here. A scope on
+  the preamp output around that part of the decay is the way to actually confirm the mechanism.
+  (2026-08-03)
+
+---
+
+### profile — test v4a-distributted.json — geometric delay ladder between bench-verified sample points
+
+Not previously recorded — the three existing `CHANGELOG.md` mentions of this file (the two
+entries above and the delaycal v1.43 entry) all reference it but none describe how it was built.
+
+For every band, the first and last `delays_us` are kept exactly as in `test v4h` — these are the
+earliest and latest sample points actually reached and validated on the bench via the
+instrumentation during hand calibration, not arbitrary picks. The 9 interior delays per band are
+a geometric progression between them (ratio `r = (last/first)^(1/10)`, i.e. `delay[i] =
+first * r^i`), giving equal log-spaced coverage of the whole bench-verified delay range per band,
+rather than the ad hoc/linear spacing `test v4h` had. Thresholds/`threshold_v` are unchanged from
+`test v4h`, pending the voltages this ladder actually reaches on the bench. (2026-08-03)
+
+---
+
+### src/pimd_rawlog.py — v1.00 — new standalone raw MCU logger, independent of pimd_delaycal.py
+
+Motivation: before starting training against `cal_110_full_range_v4.json` (10 bands x 11
+thresholds = 110 cells, geometric ladder out to 200 µs), the operator wants to analyse raw data
+to find which rows/columns can be dropped without losing information — a job that needs a
+ground-truth raw capture tool decoupled from `pimd_delaycal.py`'s own display/processing code,
+after this session's ratio-bug (v1.43) and sign-crossing (v1.44) fixes both turned out to be
+display-layer defects rather than hardware issues. A dumb, unopinionated logger removes that
+whole class of risk from the data going into the reduction analysis.
+
+New PyQt6 tool, same `QSerialPort`/115200-8N1 pattern as `pimd_delaycal.py`, same `E`/`D`/`Q5`/`G`
+wire sequence (§9/§11 unchanged, no new protocol behaviour) — but deliberately minimal: no
+tables, no metrics, no derived values. Load Profile parses a profile JSON (same shape
+`pimd_delaycal.py` exports/imports); Start sends `E` then the built `D...` command, waits for
+`D OK`, then `Q5`/`G`; every line read from serial is appended verbatim to a timestamped session
+file in `data/sessions/` (`rawlog_<timestamp>.txt`) as `<iso-timestamp> RAW <line>`, unmodified.
+A free-text field + "Log Note" button (Enter also submits) writes `<iso-timestamp> NOTE <text>`
+into the same file, interleaved in arrival order, so a later analysis pass can find exactly
+which raw lines fall inside a given target placement. Stop sends `E` and closes the file.
+
+**Verified:** UI construction and `_build_d_command()`'s output format checked offline (matches
+`pimd_delaycal.py`'s own D-command shape). **Not yet verified live** — the board's serial port
+was held by an active `pimd_delaycal.py` session at the time (`cal_110_full_range_v4.json`
+brass-block testing), so the connect/stream/log path itself needs a live smoke test next time
+the port is free. (2026-08-03)
+
+---
+
+### src/pimd_rawlog.py — v1.10 — target/distance picker, Place/Remove markers, settle + warm-up indicators, Resume Session
+
+Motivation: `pimd_rawlog.py` v1.00 could log a raw stream but gave the operator nothing to work
+with while capturing the `cal_110_full_range_v4.json` cell-reduction dataset (per
+`HANDOFF_cell_reduction.md`) — no structured way to record what was placed and how far from the
+coil, no feedback on when a segment had enough stable data to move on, no sense of whether the
+rig itself was warmed up yet, and no way to pick a multi-sitting capture session back up.
+
+Target/distance controls: a `Target:` combo populated from `src/data/targets/targets_v4.csv`
+(13 registered targets; comment lines are `#`-prefixed but some are CSV-quoted because they
+contain commas — `_load_targets()` strips both forms) plus a `Distance from coil (mm):` spinbox
+(0–500, step 5). Note: `targets_v4.csv`'s registry fields don't include `threshold_v` and neither
+does anything else in this tool — per the operator, delays are no longer voltage-aligned, so that
+profile field is vestigial and deliberately never read here; columns are identified purely by
+band index + position in `delays_us`.
+
+Place/Remove markers: `Place Target` / `Remove Target` buttons write self-contained `MARK` lines
+— `MARK place target_id=... short_name="..." shape_class=... material_class=... mass_g=...
+dim_a_mm=... dim_b_mm=... dim_c_mm=... distance_mm=...` / `MARK remove target_id=...` — embedding
+the registry's key fields inline so the raw log alone identifies what was in the field without
+needing the CSV alongside it. Buttons enforce a strict place→remove→place cycle and each
+transition resets the settle window (below) so a segment's reading is never contaminated by the
+previous segment's tail.
+
+Settle indicator ("enough data, move on"): own metric, not `pimd_classviz.py`'s code — a rolling
+per-channel std-dev over the last N `W`-line frames (window adjustable, default 20), reduced to a
+single mean-across-channels mV number, compared against an adjustable threshold (default 1.0 mV).
+Grey "Collecting N/M" while the window fills, amber "SETTLING σ=X.XX mV" above threshold, green
+"READY σ=X.XX mV" at/below — serves air and target segments identically, since it's a statement
+about local stability, not about what's in the field.
+
+Warm-up indicator ("is the rig ready to trust"): cumulative *firmware-clock* streaming time
+(summed `time_ms` deltas from `W` lines, not wall clock, so idle/stopped gaps don't silently
+count), against an adjustable target (default 240 s, DESIGN's ~4 min SoC warm-up figure as a
+starting point). Red "WARMING Ns/240s" below target, green "WARM ✓ (Ns)" at/above.
+
+Resume Session: a "Resume Session" button opens a file picker over `data/sessions/`
+(`rawlog_*.txt`); `_scan_session_file()` recovers the profile path from the file's own `META`
+line (now `shlex`-quoted on write since several profile filenames in this repo contain spaces —
+e.g. `test v4a.json` — an initial version of this without quoting silently truncated those paths
+on resume), the cumulative streamed seconds, and whether the last `MARK place`/`remove` pair is
+still open (to restore Place/Remove button state). Reopens the same log file in append mode (not
+a new file) and re-runs the same `E`→`D...`→`D OK`→`Q5`→`G` sequence Start already uses, then
+writes a `META resumed streamed_s=...` line.
+
+**Verified:** offscreen PyQt smoke test (targets CSV parses to 13 rows; profile load reports
+10×11=110 channels; synthetic `W`-line frames drive the settle indicator through
+Collecting→READY and the warm-up indicator's elapsed-time math; a full place→remove cycle
+produces correctly-tagged `MARK` lines with fields intact; `_scan_session_file()` round-trips
+both a closed and a still-open placement, correct streamed-seconds accounting, and a
+space-containing profile filename). Caught and fixed two real bugs this way: quoted-comment lines
+in `targets_v4.csv` weren't being filtered (naive `#`-prefix check missed `"# ...",,,` rows,
+corrupting the CSV header), and the original resume parser split `MARK` lines on whitespace,
+truncating any quoted multi-word field (`short_name="brass gear"` → `brass`) — nearly every
+target's `short_name` has a space, so this would have silently corrupted every resumed placement
+label. Both fixed and re-verified. **Not yet verified live** — same as v1.00, needs a real bench
+pass with the MCU connected; that's the operator's own pace, not something this session could do.
+(2026-08-03)
+
+---
+
+### src/pimd_rawlog.py — v1.11 — Last-line wrap fix, warm-up target floor lowered to 1s
+
+Two small usability fixes from first live UI feedback, before any bench testing: the "Last line"
+label showed the raw serial line unwrapped, which on a 110-cell profile's `W` record (110+
+comma-separated fields) blew out the window's horizontal size well past screen width —
+`lbl_last_line.setWordWrap(True)` fixes it. Separately, the warm-up target spinbox's floor was
+30 s; lowered to 1 s so the operator can effectively disable the warm-up gate (or test the
+indicator itself) without it refusing sub-30 s values. (2026-08-03)
+
+---
+
+### src/pimd_rawlog.py — v1.12 — actual fix for the Last-line window-width blowout
+
+v1.11's `setWordWrap(True)` didn't fix the reported problem — the operator confirmed the window
+was still blowing out horizontally. Root cause: a Mode 2 `W` record for a 110-cell profile is a
+single comma-separated line with no spaces anywhere (`W5,145.0,1000.0,1001.0,...`), and Qt's
+`QLabel` word-wrap only breaks at whitespace — a run with no whitespace has no break points, so
+wrap silently does nothing and the label still reports its full, enormous preferred width to the
+layout. Fix: stop relying on wrap at all. A new `_truncate_for_display()` caps the "Last line"
+label's text at `LAST_LINE_DISPLAY_MAX = 140` chars (`…(+N more chars)` suffix), which bounds the
+window width unconditionally regardless of whether the underlying line has anything to break on.
+The full untruncated line is still written to the session log file — this only affects the live
+status display. Verified offscreen with a synthetic 110-channel line (778 raw chars → 174
+displayed chars). (2026-08-03)
+
+---
+
+### src/pimd_rawlog.py — v1.13 — Acquire Target/Acquire Air, live raw-value grid
+
+Two operator-requested changes to the cell-reduction capture workflow.
+
+**Place/Remove Target renamed to Acquire Target/Acquire Air**, and the semantics changed to
+match: there is no longer a place-then-remove pairing to enforce. Each button just stamps the
+start of its own segment (`MARK acquire target target_id=... ...` / `MARK acquire air`) and
+resets the settle window; both buttons stay enabled the whole session, and pressing either one
+at any time — including right after Start, or straight from one target to another — simply
+starts that segment. This is simpler than the old state machine (no forced Remove-before-next-
+Place) and matches the actual bench workflow: "acquire this" is the only action, there's nothing
+to separately mark as removed. `_scan_session_file()`'s resume path now tracks the single most
+recent acquire marker (target or air) rather than an open/closed placement pair.
+
+**"Last line" panel replaced with a live raw-value grid.** The single-line display (already
+patched twice this session for the same underlying complaint — v1.11's word-wrap attempt and
+v1.12's truncation) is gone; in its place, `_format_grid()` lays the last streamed `W` frame out
+as a band x delay grid matching the profile's own structure, comma-separated with fixed 8-char
+right-aligned cells so digits line up column to column row to row. This is declared as this
+project's **standard grid orientation** (documented in the module header, for other tools to
+follow): rows are bands in profile order (increasing pulse width, shortest at the top); columns
+are delays within a band in profile order (increasing delay/time, shortest at the left) — so the
+top-left cell is shortest-pulse/shortest-delay and the bottom-right is longest-pulse/longest-
+delay. This holds without reordering because it's already how `cal_110_full_range_v4.json` (and
+every other profile in this repo) lists its bands and each band's `delays_us`, and matches the
+`col_index,band_index,...` ordering `pimd_classviz.py`'s session-dump colmap already uses.
+
+**Verified:** offscreen PyQt smoke test extended to cover grid orientation (checked against the
+profile's own band/delay ordering, not assumed), fixed-width cell alignment, an Acquire
+Air→Acquire Target→Acquire Air sequence producing three correctly-tagged `MARK` lines with no
+place/remove pairing errors, and resume recovering a still-open target acquisition as well as a
+trailing air acquisition. **Not yet verified live** — still needs a real bench pass with the MCU
+connected. (2026-08-03)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-07-31
