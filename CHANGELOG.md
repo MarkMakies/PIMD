@@ -1,3 +1,16 @@
+### src/pimd_delaycal.py — v1.45 — Std dev table Colour lo/hi: lo spinbox floor -999 mV (was 0)
+
+The "Colour lo/hi" pair that drives Absolute-mode colouring on the bottom (Std dev / metric)
+table shares its lo/hi spinboxes across every metric in the selector, including "Mean level" —
+the one metric that isn't a spread measure but the cell's raw signed mean reading (v1.44 gave it
+a diverging green/red-by-sign scale). `sp_stddev_lo_mv` was still floored at 0.0 mV from when
+every metric was an unsigned spread, so a negative mean reading clipped straight to the lo end
+(t=0) regardless of how far negative it actually was, losing all resolution below zero. Lowered
+the floor to -999.0 mV (matching the existing ±999 span used elsewhere for these spinboxes); the
+hi spinbox's floor is unchanged. (2026-08-04)
+
+---
+
 ### .claude/settings.json — config — worktree.bgIsolation set to "none"
 
 Background-job (bg-agent) sessions were auto-isolating every edit into a fresh git worktree,

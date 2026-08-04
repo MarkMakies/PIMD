@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.44
+# PIMD Delay Calibration v1.45
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -21,6 +21,7 @@
 #   G                                      — start Mode 2 streaming
 #
 # History (full detail in CHANGELOG.md):
+#   v1.45 Colour lo/hi: lo spinbox floor -999 mV (was 0), for the signed Mean level metric
 #   v1.44 "Mean level" Compare-over-time is now signed with a diverging colour scale, not abs()
 #   v1.43 FIX Compare-over-time for "Mean level": was a ratio vs baseline, now an absolute mV delta
 #   v1.42 new "Mean level" metric (sustained Compare-over-time); baseline capture logs per-cell values
@@ -91,7 +92,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QEvent, QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor, QFont  # noqa: E402
 
-APP_VERSION = '1.44'
+APP_VERSION = '1.45'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -827,7 +828,7 @@ class MainWindow(QMainWindow):
         manual_row.addSpacing(8)
         manual_row.addWidget(QLabel('Colour lo/hi:'))
         self.sp_stddev_lo_mv = QDoubleSpinBox()
-        self.sp_stddev_lo_mv.setRange(0.0, 999.0)
+        self.sp_stddev_lo_mv.setRange(-999.0, 999.0)
         self.sp_stddev_lo_mv.setDecimals(2)
         self.sp_stddev_lo_mv.setSingleStep(0.05)
         self.sp_stddev_lo_mv.setValue(0.50)
