@@ -1,3 +1,123 @@
+### findings — the sub-0.5 V plateau has a negative lobe under it; the 3 mV bottom is a rail, not the floor
+
+Bench session 2026-08-05, `pimd_gui` v4.14 (title bar), Mode 1, 100.0 µs pulse / DS 256, pack
+23.16 V ("clean window"), board 34.4 °C, GUI at 500 µV/div, on battery. Firmware version not
+captured this session. The operator reported the sweep at 3.125 kHz; the reference screenshot
+is 4.000 kHz / 100.0 µs / sd 30.000 µs. Delay figures below are as reported. Sample delay swept
+by hand across the region the 2026-08-03 entries left open.
+
+**Observed.** ~4.3 V at sd = 8 µs, falling to a **flat ~3 mV bottom** held across roughly
+0.5–1 µs around sd ≈ 14 µs, then rising to ~17 mV by sd ≈ 20 µs and sitting there unchanged all
+the way out to sd = 100 µs. Across that boundary the Mode 1 std dev drops from ~300 µV to
+**14–15 µV**, and the cell still responds clearly to every metal presented. Below the boundary
+the reading shows the usual thermal behaviour; above it, it does not. Both acquisition paths
+agree on the settled level — at sd = 30 µs the filtered path (SDOA) reads 16.674 mV / σ 15 µV
+while the raw boxcar (SDOB, `A32`) reads 16.269 mV / σ 709 µV — so the plateau is not a
+decimation-filter artefact. (That 709 µV is the firmware's per-sample σ over the 32 raw samples,
+not the σ of their mean, so it is directly comparable to §7's ±1400 µV single-sample figure and
+is better than it at this operating point.)
+
+**This refines the 2026-08-03 reading; it does not overturn it.** That entry had the sub-0.5 V
+columns "crossing below the RX chain's floor", with the mean thereafter reading the floor
+(~16–18 mV, the same in every band regardless of delay). An additive floor can only be
+approached from above. **A dip to 3 mV, below the 17 mV level, cannot be a floor effect** — it
+requires a signal component of about −14 mV or more negative. The earlier fine sweeps (a smooth
+monotonic 6 → 17 mV rise on the 25 kHz bands) were looking at the *recovery* side of a feature
+whose bottom they never reached.
+
+Three separate things are stacked in the trace, and separating them is most of the value here.
+
+1. **The ~17 mV level is a DC pedestal — the instrument zero, not signal.** The 2026-08-03
+   measurement is the proof: a level identical across delays from 20 µs to 250 µs and across
+   every band cannot be decay. The arithmetic is consistent with LT6203 input bias current
+   flowing out through R9 = 4.7k — near the ground rail the part's PNP input pair sources bias
+   current, and ~3.6 µA × 4.7k ≈ +17 mV, with the datasheet typical (6.5 µA) giving ~31 mV, so
+   the measured level sits inside the part's spread. **Inferred from the datasheet and the
+   measured level — not measured.** The cheap check is to add 4.7k in series with R9 (the safe
+   direction: it *reduces* clamp current, which §7 already flags as possibly under-estimated)
+   and see whether the pedestal moves to ~34 mV. If it does not, this model is wrong and the
+   pedestal is something else — amp Vos with unexpected gain, or ADC offset.
+2. **The 3 mV bottom is a hard rail.** The signal path is unipolar — single +12 V supply, 0–5 V
+   into the ADC — so the LT6203 output saturates a few mV above ground. The flat bottom is the
+   signature; a genuine minimum would turn around smoothly, and the operator confirmed it is
+   flat across several delay steps rather than a single touch. It is *not* an ADC zero code,
+   which would read exactly 0 µV. **The lobe's true depth is therefore unmeasurable through this
+   path** — at least −14 mV, and the width of the flat says more than that.
+3. **One sign reversal is expected behaviour for this front end, not a defect.** The RX network
+   is second order with two real poles (≈ R1·C fast, ≈ L/R1 slow). Released with energy in
+   *both* L and C — which a 265 V flyback guarantees — the response is a sum of two decaying
+   exponentials with opposite-sign residues, and that has exactly **one** zero crossing. A
+   critically damped release does it too; it is not evidence of wrong damping. **It is not
+   ringing** — ringing means repeated crossings, and §17.4 already located the real ring at
+   ~2.08 MHz, dead by 7–8 µs, whereas this lobe is ~7 µs wide (≈150 kHz half-period). Using §7's
+   stale inductance, L/R1 = 3.9 mH / 1.3k ≈ 3 µs is the right order for the slow pole. This is a
+   direct use for §7's outstanding "re-measure RX self-resonance to pin L and C" item.
+
+**Consequence for R1: damping is the wrong knob.** Reducing R1 pushes the two poles further
+apart — null earlier, reverse tail *longer*, which is worse for the quiet region past it.
+Raising it pulls them together — null later, tail shorter — until it crosses into real ringing.
+Neither removes the crossing. No front-end change proposed and none made.
+
+**What is not established.** Whether the lobe belongs to the coil network at all. The LT6203
+input is clamped hard for the first ~7 µs of every cycle at this duty (40 % at 4 kHz / 100 µs),
+and amplifier overload recovery produces mV-scale tails over µs that would look identical from
+the ADC's side. Nothing in the delay-sweep data distinguishes the two, and it cannot be settled
+from the record. The discriminating test does not need a scope: an amplifier artefact will not
+move when a target approaches. Scope detail to follow from the operator.
+
+**Operating note.** Any cell landing between roughly 13 and 20 µs at this band is reading a
+rail, not a signal — non-linear, sign-ambiguous and worthless as a calibration point. The locked
+`cal_63_air_bat_v3` never sweeps below 0.5 V so it is unaffected, but hand-edited ladders that go
+lower can land there; `pimd_delaycal` has a signal-detect *ceiling* (`sp_signal_v`, 4.9 V) and no
+floor, so nothing currently warns about it. (2026-08-05)
+
+---
+
+### findings — the recorded noise floors are slope × timing jitter, not amplifier noise
+
+Follow-up to the entry immediately above, same session.
+
+The σ drop across the boundary — ~300 µV below, 14–15 µV above — is not the noise improving. It
+is the **slope term going to zero**. §14.3 already models the soaked per-cell floor as
+slope × equivalent timing jitter (70–130 ps across most of the grid); this is the same model seen
+from the other end, at a delay where the slope against sample delay is ~0 and only the amplitude
+term survives.
+
+Consistency check, order of magnitude only: fitting τ_fast ≈ 0.9 µs to the 4.3 V @ 8 µs →
+~17 mV @ ~13 µs leg gives a slope near sd = 8 µs of ~4.8 mV/ns, and 300 µV / 4.8 mV/ns ≈ **63 ps**,
+just under §14.3's 70–130 ps band. The τ is fitted from three hand-read points and the 300 µV was
+not tied to a specific delay, so this is corroboration of the model, not a measurement of the
+jitter.
+
+**Why this matters more than it looks.** Every filtered-path noise figure in DESIGN §3 (≈ ±200 µV,
+and §7's "real-world 450 µV floor") was measured *on the slope*, so each is a mixture of two
+unrelated quantities. Measured with the slope removed, the same chain reads **14–15 µV at DS 256**
+— 13–30× better. The amplitude floor and the timing floor are separate specifications. The §14.8
+re-measurement backlog should record which one it is measuring: a noise figure without the slope
+it was taken on is not comparable to another one.
+
+**The same argument disposes of thermal drift in this region.** §14.1's 50 µV/s predicts ~9 mV
+over the reference screenshot's 180 s trace; the trace is flat to well inside 100 µV at
+500 µV/div — at least ~100× below prediction. Drift cannot couple into a reading whose slope
+against delay is zero, which would make the far side of the null intrinsically immune to the
+reference-age ceiling §14.1 calls a hard limit on any frozen-reference measurement. Read from one
+screenshot, not from a dedicated soak — worth measuring properly before it is relied on.
+
+**Open, and the reason the negative lobe is worth pursuing rather than wearing.** Crossing *times*
+are invariant under amplitude scaling, and the dominant confounder in §14.7/§17.13 is pack voltage
+*scaling* the decay (~11× across its range, against ~2.5–3× for soak). The clip destroys the
+lobe's depth but not its timing: the trace crosses the 17 mV pedestal cleanly on both sides of the
+lobe, and both crossings are in the linear region, so both are measurable now with no hardware
+change. From the same τ fit the slope at the crossing is ~200× shallower than at sd = 8 µs (order
+20 µV/ns), which against the measured 14 µV floor puts the crossing's own resolution below a
+nanosecond and implies ~1 mV of target signal would move it ~40 ns. That is roughly the *same*
+SNR as reading the 1 mV directly in the flat window — the attraction is not sensitivity but a
+coordinate that does not move with the pack. Whether the crossing carries target information at
+all is unmeasured, and is the same experiment that settles the coil-vs-amplifier question in the
+entry above. (2026-08-05)
+
+---
+
 ### src/pimd_gui.py — v4.14 — UI folded into the app, pack/temp gauges, session logs, full pulse/delay range
 
 Five changes in one pass, all in the Mode 1 GUI; no firmware or wire-protocol change (DESIGN
