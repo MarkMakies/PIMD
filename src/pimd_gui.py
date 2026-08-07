@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD GUI v4.16
+# PIMD GUI v4.17
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -32,6 +32,8 @@
 # pack/temp telemetry arrives.
 #
 # History (full detail in CHANGELOG.md):
+#   v4.17 FIX 'P' record parse also matched 'PACK:'/boot-banner messages (IndexError
+#         once per pack power-cycle); PACK: transitions now reach the alert row
 #   v4.16 board temperature is a real DS18B20 reading (fw v4.33) — sentinel-aware
 #         gauge and session log, placeholder-thermistor tooltip retired
 #   v4.15 MCU firmware version shown in the session block and written to the
@@ -74,7 +76,7 @@ from PyQt6.QtCore import QIODevice, QRectF, QTimer, QPointF, Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
-APP_VERSION = '4.16'
+APP_VERSION = '4.17'
 
 DEFAULT_PORT  = '/dev/ttyACM0'
 _HERE         = os.path.dirname(os.path.abspath(__file__))
@@ -1276,14 +1278,32 @@ class MainWindow(QMainWindow):
                 if n > 0:
                     self.series_raw_mean.removePoints(0, n)
 
-        elif line.startswith('P'):
+        elif line.startswith('P') and line[1:2].isdigit():
             # Unsolicited pack / board-temp telemetry (firmware v4.28+):
             # P<time_ms>,<pack_mV>,<board_temp_dC>
+            #
+            # The isdigit() guard is load-bearing (v4.17). A bare startswith('P')
+            # also matched every firmware MESSAGE beginning with P — 'PACK: rail
+            # absent …', 'PACK: present again …' and the 'Pulse Induction Metal
+            # Detector v…' boot banner — which then split on commas into an
+            # IndexError once per pack power-cycle. A record always has a digit
+            # after the tag (it is <time_ms>); a message never does.
             parts = line[1:].split(',')
             try:
                 self._update_sensors(int(parts[1]), int(parts[2]))
             except (IndexError, ValueError) as e:
                 print('Sensor packet parsing error:', e)
+
+        elif line.startswith('PACK:'):
+            # Pack presence / failsafe-arming transitions (firmware v4.31–v4.32).
+            # These were being eaten by the P branch above and surfacing only as a
+            # parse error, which means the GUI has never actually shown them —
+            # and v4.32 exists precisely so that an ARMED failsafe is
+            # distinguishable from a SUSPENDED one. Non-sticky: each line reports a
+            # transition that has already happened, and the pack gauge carries the
+            # standing state. A latched LOCKOUT is a different thing and keeps its
+            # own sticky branch below.
+            self._set_alert(line)
 
         elif line.startswith('V'):
             # Identify response. Fields 0 and 1 are the firmware version and the

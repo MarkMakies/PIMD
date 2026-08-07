@@ -1,3 +1,35 @@
+### src/pimd_gui.py — v4.17 — FIX the `P` record parse also matched `PACK:` messages, so the GUI has never shown a failsafe transition
+
+Reported from the bench: `Sensor packet parsing error: list index out of range`, appearing once
+per pack power-cycle. The trigger was diagnostic — power-cycling the pack is exactly what makes
+the firmware emit a `PACK:` line.
+
+`process_packet()` dispatched on `line.startswith('P')`, which is true of the `P<time_ms>,…`
+telemetry record *and* of every firmware message beginning with P: `PACK: rail absent (… mV) —
+USB power assumed, failsafe suspended…`, `PACK: present again at … — failsafe armed`, and the
+`Pulse Induction Metal Detector v…` boot banner. Each was split on commas, indexed, and threw.
+Now guarded with `line[1:2].isdigit()` — a record always carries `<time_ms>` immediately after
+its tag, a message never does. Pre-existing since v4.28 and unrelated to the DS18B20 work; it
+surfaced now only because v4.31/v4.32 gave the firmware more to say about the pack.
+
+**The parse error was the smaller half.** Those `PACK:` lines were being *consumed* by the P
+branch, so fixing the crash alone would have made them vanish silently — and v4.32 exists
+specifically so that an ARMED failsafe is distinguishable from a SUSPENDED one, which is the
+state you most need to be sure you are not in. They now reach the alert row. Deliberately
+**non-sticky**: each line reports a transition that has already completed, and the standing state
+is carried by the pack gauge. A latched `LOCKOUT` is a different kind of thing — a standing
+condition — and keeps its own sticky branch, unchanged, along with stopping the run.
+
+`DS18B20:` messages are deliberately left falling through: unlike pack arming, that state already
+has a GUI indicator, since the gauge blanks to `—` the moment a reading goes invalid.
+
+Checked against the real firmware strings copied from the v4.33 boot log: both record forms still
+parse, all three `PACK:` variants alert without error, the boot banner is ignored, `PACK:` alerts
+are non-sticky, and `LOCKOUT` still latches sticky and stops the run. The v4.16 sentinel tests
+still pass. (2026-08-07)
+
+---
+
 ### mcu/pimd_mcu.py — v4.33 — DS18B20 board temperature on GP6; the GP27 pot placeholder retired
 
 `board_temp_dC` has been on the wire since v4.28 and has never once carried a temperature. GP27
