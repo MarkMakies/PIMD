@@ -1,3 +1,47 @@
+### src/pimd_gui.py — v4.15 — the connected board's firmware version is on screen and in the log
+
+Asked for alongside a confirmation that the GUI pulls pack/temp early. It does, and has since
+v4.14: `connect_port()` sends `E` then `V` the moment the port opens, and `sensor_poll_timer`
+re-sends `V` every 10 s. That connect-time `V` is the whole reason the gauges populate promptly
+— the firmware's unsolicited `P` telemetry is only every 60 s, so without it a freshly connected
+board would show `—` for up to a minute. No change was needed there.
+
+The version turned out to cost nothing on the wire. The firmware has always answered `V` with
+`V<fw>,<board_id>,…` and the GUI has always split that line — it simply used indices 8..10 and
+threw fields 0 and 1 away. So this is a **display-only change: no firmware edit, no new command,
+no wire-format change**, and DESIGN §11's serial-format invariant is untouched.
+
+A `Firmware:` row now sits in the top-left session block under `Session:`, showing `v4.32` with
+the board ID in the tooltip, and `—` when nothing is connected. The parse deliberately sits
+**ahead of** the existing `len(parts) >= 11` guard, because fields 0 and 1 exist on every
+firmware revision while the pack/temp/lockout trailers need v4.28+ — against older firmware the
+version still displays and only the gauges stay blank. `_clear_fw_identity()` resets the row on
+disconnect: the version is a property of the open connection, and a stale one outliving it would
+be worse than no reading. The gauges are left holding their last value, as before.
+
+`setup_file_logging()` also writes `# fw_version: <N>` beside the existing `# pimd_gui v<N>`
+line, so a session CSV records which firmware produced it — previously recoverable only by
+correlating timestamps against this file. Falls back to `unknown` if Start is somehow reached
+before a `V` reply lands. The alert row moved from grid row 2 to row 3 to make space; no change
+to its behaviour. (2026-08-07)
+
+---
+
+### DESIGN.md — errata — §9 documents the `V` identify reply with 8 fields; firmware sends 11
+
+Noticed while wiring up the GUI's firmware readout. `DESIGN.md` §9 still describes the reply as
+`V<fw>,<board_id>,<num_profiles>,<active_idx>,<freq_hz>,<pulse_ns>,<delay_ns>,<downsample>` —
+the pre-v4.28 shape. Firmware v4.28 appended `pack_mV`, `board_temp_dC` and `lockout`, and both
+`mcu/pimd_mcu.py` and `src/pimd_gui.py` have depended on those three ever since; they are
+documented only in the two file headers.
+
+Harmless in practice — the append-only convention means nothing splits by field count — but §9
+is the reference a reader would trust, and it currently understates the record by three fields.
+Recorded here rather than fixed in place, per the rule that `DESIGN.md` is regenerated from this
+file. For the next consolidation pass (§18). (2026-08-07)
+
+---
+
 ### mcu/pimd_mcu.py — v4.32 — the pack absent→present transition always announces itself
 
 Found immediately on the first bench run of v4.31, and worth its own version because it is an

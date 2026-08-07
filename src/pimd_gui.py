@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD GUI v4.14
+# PIMD GUI v4.15
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -17,6 +17,8 @@
 #   R<time_ms>,<mean_uV>,<std_uV>,<n>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>
 #   P<time_ms>,<pack_mV>,<board_temp_dC>    — unsolicited sensor telemetry, ~60 s
 #   V<fw>,<board>,…,<pack_mV>,<board_temp_dC>,<lockout>
+#                                           — fw / board read from every reply;
+#                                             the trailing three need fw v4.28+
 #   W…                                      — Mode 2 stream record, ignored here
 #
 # Session logs land in data/sessions/ as `gui_<ts>.csv`, alongside this project's
@@ -25,6 +27,8 @@
 # pack/temp telemetry arrives.
 #
 # History (full detail in CHANGELOG.md):
+#   v4.15 MCU firmware version shown in the session block and written to the
+#         session-log header (read from the 'V' reply already sent on connect)
 #   v4.14 UI built in code (pimd111_ui.py retired); pack + board-temp gauges
 #         replace the raw-voltage bar; session logs to data/sessions/; ENT/SPC
 #         shortcuts dropped; pulse/delay ranges out to the profile maxima;
@@ -63,7 +67,7 @@ from PyQt6.QtCore import QIODevice, QRectF, QTimer, QPointF, Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
-APP_VERSION = '4.14'
+APP_VERSION = '4.15'
 
 DEFAULT_PORT  = '/dev/ttyACM0'
 _HERE         = os.path.dirname(os.path.abspath(__file__))
@@ -99,6 +103,10 @@ NS_PER_COUNT_INV = 125          # slider counts per µs (1 count = 8 ns)
 SENSOR_POLL_MS = 10_000         # 'V' poll for pack/temp between the firmware's
                                 # own 60 s unsolicited 'P' telemetry
 ALERT_CLEAR_MS = 10_000         # transient alert row auto-clear (LOCKOUT exempt)
+
+# Firmware-version label (v4.15). Set in three places — built, filled on 'V',
+# reset on disconnect — so the base text lives here rather than being retyped.
+FW_LABEL_TOOLTIP = 'MCU firmware version, from the V identify reply.'
 
 # ---------------------------------------------------------------------------
 # Pack state of charge
@@ -338,6 +346,11 @@ class MainWindow(QMainWindow):
         self.board_temp_dC = None
         self.pack_lockout = False
 
+        # MCU identity, from the same 'V' reply (fields 0 and 1). Cleared on
+        # disconnect — it is a property of the open connection, not of the app.
+        self.fw_version = None
+        self.board_id = None
+
         # Chart toggles for the raw boxcar-average path (off by default)
         self.show_raw_mean = False
 
@@ -464,14 +477,23 @@ class MainWindow(QMainWindow):
         self.pb_start.setEnabled(False)
         grid.addWidget(self.pb_start, 1, 2)
 
+        # Firmware version of the connected board (v4.15) — field 0 of the 'V'
+        # identify reply the GUI already sends on connect.
+        grid.addWidget(QLabel('Firmware:'), 2, 0)
+        self.lbl_fw = QLabel('—')
+        self.lbl_fw.setFont(font)
+        self.lbl_fw.setMinimumWidth(150)
+        self.lbl_fw.setToolTip(FW_LABEL_TOOLTIP)
+        grid.addWidget(self.lbl_fw, 2, 1)
+
         # Firmware complaints (rejected config, pack-voltage lockout) land here
         # rather than in the status bar, which the '*' stream rewrites ~20×/s.
         self.lbl_alert = QLabel('')
         self.lbl_alert.setFont(font)
         self.lbl_alert.setStyleSheet('color: rgb(224, 27, 36);')
         self.lbl_alert.setWordWrap(True)
-        grid.addWidget(self.lbl_alert, 2, 0, 1, 3)
-        grid.setRowStretch(2, 1)
+        grid.addWidget(self.lbl_alert, 3, 0, 1, 3)
+        grid.setRowStretch(3, 1)
         return grid
 
     def _build_slider_block(self):
@@ -966,6 +988,7 @@ class MainWindow(QMainWindow):
                                      'gui_' + ts.strftime('%Y%m%d_%H%M%S') + '.csv')
         self.file = open(self.log_path, 'a', buffering=1)   # line-buffered
         self.file.write('# pimd_gui v{0} — Mode 1 session\n'.format(APP_VERSION))
+        self.file.write('# fw_version: {0}\n'.format(self.fw_version or 'unknown'))
         self.file.write('# session_start_iso: {0}\n'.format(ts.isoformat(timespec='seconds')))
         self.file.write('# columns: time_ms,value_uV,stddev_uV,freq_hz,pulse_ns,'
                         'delay_ns,downsample\n')
@@ -1034,6 +1057,7 @@ class MainWindow(QMainWindow):
                 self.start_stop()
             self.sensor_poll_timer.stop()
             self.serial_open(False)
+            self._clear_fw_identity()
             self.pb_connect.setText('Not Connected')
             self.pb_connect.setStyleSheet(self.MY_YELLOW)
             self.pb_start.setEnabled(False)
@@ -1247,10 +1271,18 @@ class MainWindow(QMainWindow):
                 print('Sensor packet parsing error:', e)
 
         elif line.startswith('V'):
-            # Identify response. Fields 8..10 are pack_mV / board_temp_dC /
-            # lockout (firmware v4.28+); older firmware sends 8 fields and is
+            # Identify response. Fields 0 and 1 are the firmware version and the
+            # board ID — present on every revision, so they are read ahead of the
+            # field-count guard (v4.15). Fields 8..10 are pack_mV / board_temp_dC
+            # / lockout (firmware v4.28+); older firmware sends 8 fields and is
             # left with the gauges blank.
             parts = line[1:].split(',')
+            # Unlike the transient parse-error prints elsewhere here, a bad value
+            # would sit in the label indefinitely, so require it to look like a
+            # version before showing it.
+            if parts and parts[0].replace('.', '').isdigit():
+                self._update_fw_identity(parts[0],
+                                         parts[1] if len(parts) > 1 else None)
             if len(parts) >= 11:
                 try:
                     self._update_sensors(int(parts[8]), int(parts[9]),
@@ -1289,6 +1321,22 @@ class MainWindow(QMainWindow):
                     datetime.now().isoformat(timespec='seconds'), pack_mV, board_temp_dC))
             except Exception as e:
                 print('File write error (sensor line):', e)
+
+    def _update_fw_identity(self, fw_version, board_id=None):
+        """Show the MCU firmware version reported by the 'V' identify reply."""
+        self.fw_version = fw_version
+        self.board_id = board_id
+        self.lbl_fw.setText('v' + fw_version)
+        self.lbl_fw.setToolTip(FW_LABEL_TOOLTIP
+                               + ('\nBoard ID: ' + board_id if board_id else ''))
+
+    def _clear_fw_identity(self):
+        """Forget the board's identity on disconnect, so a stale version cannot
+        outlive the connection it came from."""
+        self.fw_version = None
+        self.board_id = None
+        self.lbl_fw.setText('—')
+        self.lbl_fw.setToolTip(FW_LABEL_TOOLTIP)
 
     def _set_alert(self, text, sticky=False):
         """Post (or clear) the alert row. Non-sticky text self-clears after
