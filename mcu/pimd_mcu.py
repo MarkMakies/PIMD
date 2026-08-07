@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.27, coil v4
+# Pulse Induction Metal Detector, v4.33, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
 #   SPI1 / filtered 32-bit (SDOA/SCKA/DRL, GPIO8/10/9)  — Mode 1
 #   SPI0 / raw 14-bit     (SDOB/SCKB/BUSY, GPIO0/2/15)  — Mode 2
+#   1-Wire / DS18B20 board temperature (DQ, GPIO6)      — both modes, v4.33
 #
 # Mode 1  — filtered/interrupt-driven acquisition
 #   S/s  start streaming '*' telemetry
@@ -41,10 +42,13 @@
 #         the sweep was paused and the rig's thermal load changed with it.
 #   (unsolicited, both modes) pack-voltage / board-temp telemetry, every SENSOR_REPORT_MS:
 #         -> P<time_ms>,<pack_mV>,<board_temp_dC>
-#         board_temp_dC is deci-degrees C (x10 integer). pack_mV is a REAL bench-
-#         calibrated reading as of v4.29 (22k/2k7 divider on GP26); board_temp_dC is
-#         still a PLACEHOLDER linear mapping pending the thermistor front end — see
-#         PACK_VOLTAGE_FULLSCALE_MV / THERM_TEMP_FULLSCALE_DECIC below.
+#         Both fields are REAL calibrated readings: pack_mV since v4.29 (22k/2k7
+#         divider on GP26, see PACK_VOLTAGE_FULLSCALE_MV), board_temp_dC since v4.33
+#         (DS18B20 1-Wire sensor on GP6, factory-calibrated to ±0.5 °C).
+#         board_temp_dC is deci-degrees C (x10 integer), and TEMP_INVALID_DC (-32768)
+#         means NO READING — sensor absent, not responding, or CRC-failing. A consumer
+#         must blank its display on that value, never plot it. It cannot collide with a
+#         real reading: the DS18B20's range is -55..+125 °C, i.e. -550..+1250 dC.
 #   (v4.28) LOW-VOLTAGE FAILSAFE: if pack_mV <= PACK_VOLTAGE_TRIP_MV for
 #         PACK_VOLTAGE_TRIP_CONSECUTIVE consecutive samples, firmware forces a stop,
 #         disables drive, and LATCHES — S/G/D are rejected until a physical power-cycle.
@@ -59,6 +63,7 @@
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.33 DS18B20 board temperature on GP6 (1-Wire); GP27 pot placeholder path retired
 #   v4.32 pack absent->present transition always announces itself, so 'failsafe armed' is observable
 #   v4.31 pack-absent suspend (<6 V = USB power) + re-arm hysteresis; battery swap no longer needs a reset
 #   v4.30 harden boot check against divider RC settling — settle delay + spaced boot samples (defensive)
@@ -102,7 +107,19 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import ADC, Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.32'
+# v4.33: 1-Wire for the DS18B20 board-temperature sensor. Guarded because the
+# detector must boot and run fully without it — a build lacking the module (it is
+# frozen into the official RP2040 MicroPython images, but that is a property of the
+# image, not of the chip) leaves temperature reported as TEMP_INVALID_DC and changes
+# nothing else. ds18x20 is deliberately NOT imported: its read_temp() issues
+# MATCH-ROM, writing 8 address bytes (~4.8 ms of blocking bit-bang) to address the
+# only device on the bus. See _ds_read_scratch().
+try:
+    import onewire
+except ImportError:
+    onewire = None
+
+FW_VERSION = '4.33'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -136,7 +153,7 @@ adc_filtered_spi = SPI(1, baudrate=10_000_000, sck=scka_pin, miso=sdoa_pin)
 ltc2508_sel0 = Pin(12, Pin.OUT)
 
 # ---------------------------------------------------------------------------
-# Pack-voltage / board-temperature sense (RP2040 on-chip ADC, v4.28)
+# Pack-voltage sense (RP2040 on-chip ADC, v4.28; board temp moved to 1-Wire at v4.33)
 # ---------------------------------------------------------------------------
 # GP26-29 (ADC0-3) are unused elsewhere in this firmware. Sheet 1 wires all four
 # to onboard 10k pots for bench bring-up. The pin->pot mapping runs BACKWARDS from
@@ -147,12 +164,34 @@ ltc2508_sel0 = Pin(12, Pin.OUT)
 #
 # (v4.29) GP26 now carries the REAL pack-voltage divider, not a pot: RV8 has been
 # removed from the board and a 22k/2k7 divider fitted from the +20V rail (J11 pin 2)
-# to its footprint, with 1u across the 2k7 and 1k/100n at the pin. GP27 is still on
-# RV7 (POT-2) pending the thermistor front end.
+# to its footprint, with 1u across the 2k7 and 1k/100n at the pin.
+#
+# (v4.33) GP27 is no longer read. It carried a bench pot (RV7) scaled by a placeholder
+# linear constant and reported on the wire as board_temp_dC — a pot position dressed as
+# a temperature. The planned analogue NTC front end for it was never built and is now
+# superseded by the DS18B20 on GP6 below, which is digital and factory-calibrated, so
+# the Beta/Steinhart-Hart curve the analogue path would have needed does not arise.
+# RV7 stays fitted on the board; the firmware simply ignores it. GP27/28/29 are spares.
 PACK_VOLTAGE_ADC_PIN = 26   # GP26 / ADC0 — pack divider (was RV8 / "POT-3")
-THERM_ADC_PIN = 27          # GP27 / ADC1 — still bench pot RV7 / "POT-2"
 pack_voltage_adc = ADC(Pin(PACK_VOLTAGE_ADC_PIN))
-therm_adc = ADC(Pin(THERM_ADC_PIN))
+
+# ---------------------------------------------------------------------------
+# DS18B20 board temperature — 1-Wire on GP6 (v4.33)
+# ---------------------------------------------------------------------------
+# GP6 was reserved for a panel meter that is not being fitted. It is free of every
+# timing-critical function: the drive/sample PWM pair is GPIO4/5 on slice 2 (DESIGN
+# §11), and GP6 is slice 3 used here as a plain open-drain GPIO, so the same-slice
+# phase-locking invariant is untouched.
+#
+# HARDWARE (required, not optional): an external 4.7k pull-up from DQ to +3V3. The
+# RP2040's internal pull-up is ~50-80k, which against even 50-100 pF of bus capacitance
+# gives a rise time of several µs — and the master samples a read slot ~15 µs in. It can
+# appear to work on a short lead and then fail intermittently, which is the worst way for
+# it to fail. The MicroPython driver sets the pad OPEN_DRAIN|PULL_UP regardless; that is
+# not a substitute. Sensor runs from +3V3 (NOT +5 V — DQ must not exceed the RP2040 rail)
+# in normal 3-wire mode, NOT parasite power (parasite needs an active strong pull-up
+# during conversion, which this pin cannot provide while the sweep is running).
+DS18B20_PIN = 6
 
 # ---------------------------------------------------------------------------
 # PWM scaling constants
@@ -201,10 +240,11 @@ OUTLIER_GATE_MIN = 164  # absolute gate floor in raw14 counts (≈100 mV, 1% FS)
                         # bit-truncation glitches are volts-scale, still caught).
 
 # ---------------------------------------------------------------------------
-# Pack-voltage / board-temperature sensing + low-voltage failsafe (v4.28)
+# Pack-voltage sensing + low-voltage failsafe (v4.28)
 # ---------------------------------------------------------------------------
-ADC_OVERSAMPLE_N = 64          # raw ADC reads averaged per channel per sample
-SENSOR_SAMPLE_MS = 1000        # both channels re-sampled + failsafe re-checked, 1 Hz
+ADC_OVERSAMPLE_N = 64          # raw ADC reads averaged per pack-voltage sample
+SENSOR_SAMPLE_MS = 1000        # pack re-sampled + failsafe re-checked, 1 Hz. Board temp
+                               # is NOT on this cadence — see DS18B20_INTERVAL_MS.
 SENSOR_REPORT_MS = 60_000      # 'P' telemetry line emitted this often
 # PACK: real hardware as of v4.29. 22k/2k7 divider (nominal ratio 9.1481) from the
 # +20V rail, which is the pack terminal voltage — D4 is a SHUNT reverse-polarity
@@ -225,11 +265,6 @@ SENSOR_REPORT_MS = 60_000      # 'P' telemetry line emitted this often
 # term is per-module, and it is 0.73% (221 mV at full scale), not a rounding error.
 # 1 LSB = 7.35 mV at the pack; 25.2 V (6S full) sits at 83.8% of range.
 PACK_VOLTAGE_FULLSCALE_MV = 30_083     # 0-VREF ADC <-> 0-30.083V pack (fully calibrated)
-# TEMP: still a PLACEHOLDER linear mapping — the thermistor front end does not exist
-# yet. A raw NTC thermistor+divider is NOT linear in temperature (Beta/Steinhart-Hart
-# curve); if that's the eventual part, THERM_TEMP_FULLSCALE_DECIC must be replaced
-# with the proper curve/lookup table, not just re-tuned.
-THERM_TEMP_FULLSCALE_DECIC = 1500      # 0-3.3V ADC <-> 0.0-150.0 degC (deci-degC, x10 int)
 PACK_VOLTAGE_TRIP_MV = 21_000           # hard floor, mV (DESIGN.md §12 working discharge floor)
 PACK_VOLTAGE_TRIP_CONSECUTIVE = 3      # consecutive sub-floor SENSOR_SAMPLE_MS samples
                                         # required to latch (debounce against ADC noise)
@@ -264,6 +299,37 @@ PACK_REARM_MV = 21_500     # a returning pack must reach THIS to clear the latch
                            # on return on its no-load recovery, re-arm, then sag straight
                            # back under load — the exact cycle the v4.28 hard latch exists
                            # to stop. Set to 21_000 for bare "above the floor", at that risk.
+
+# ---------------------------------------------------------------------------
+# DS18B20 timing + the hot-path budget that sets it (v4.33)
+# ---------------------------------------------------------------------------
+# 1-Wire is bit-banged, and each bit slot is ~70 µs with IRQs briefly off inside the
+# driver. That is CPU time, and CPU time only: the PWM pair and the LTC2508's
+# conversions are hardware and free-run through it. So the cost is purely how long the
+# firmware is not free to do something else, and the ONLY place that can be afforded is
+# the i==0 service point in acquire_mode2(), which already absorbs the ms-scale blocking
+# emit print() and where a delay lands as EXTRA settling for cell 0 (see the v4.24 note
+# in that loop) rather than as a corrupted read. Routing every 1-Wire access through
+# service_sensors() enforces that by construction — it is the only Mode 2 call site.
+#
+# Budget per reading: kick ~2.2 ms (reset + 2 bytes), read ~7.6 ms (reset + 2 bytes +
+# 9 bytes in). At 30 s that is ~10 ms per ~200 sweeps, i.e. one sweep in 200 running
+# ~5% long. Well inside the 3x window-span guard the PC tools apply, and in the
+# direction (more settling) that is benign.
+DS18B20_INTERVAL_MS = 30_000   # complete convert+read cycle this often. Deliberately NOT
+                               # SENSOR_SAMPLE_MS: board thermal time constants are
+                               # minutes, so 1 Hz would be 30x the hot-path exposure for
+                               # no information that the 60 s 'P' report could even carry.
+DS18B20_CONVERT_MS = 800       # wait at least this long after 0x44 before reading the
+                               # scratchpad. Datasheet max is 750 ms at 12-bit; the
+                               # conversion is NEVER waited on inline — the state machine
+                               # returns and is re-entered on a later service tick, so
+                               # this costs nothing but latency.
+TEMP_INVALID_DC = -32768       # board_temp_dC sentinel: NO READING (sensor absent, not
+                               # responding, or CRC-failing). Cannot collide with a real
+                               # reading — the part's range is -55..+125 °C = -550..+1250 dC.
+DS_IDLE = 0                    # state machine: nothing pending, waiting for the interval
+DS_CONVERTING = 1              # 0x44 issued, waiting out DS18B20_CONVERT_MS
 
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
@@ -345,7 +411,7 @@ active_profile_index = 0
 mode2_profile_changed = False
 dynamic_profile = None        # set by the D command; RAM only, lost on reset
 
-# Pack-voltage / board-temp sensing state (v4.28) — RAM only, lost on reset.
+# Pack-voltage sensing state (v4.28) — RAM only, lost on reset.
 # pack_voltage_lockout is still never clearable by any serial command; as of v4.31
 # the ONE thing that clears it without a reset is the pack physically going away and
 # a healthy one returning (see PACK_ABSENT_MV / PACK_REARM_MV).
@@ -354,9 +420,22 @@ pack_voltage_low_streak = 0
 pack_absent = False           # v4.31: rail below PACK_ABSENT_MV — USB-only, failsafe
                               # suspended because there is no pack to protect
 last_pack_mV = 0
-last_board_temp_dC = 0
 last_sensor_sample_ms = ticks_ms()
 last_sensor_report_ms = ticks_ms()
+
+# DS18B20 board-temperature state (v4.33). Starts INVALID rather than 0: until the
+# first conversion completes there is genuinely no reading, and 0 dC is a plausible
+# enough temperature to be believed.
+last_board_temp_dC = TEMP_INVALID_DC
+ds_bus = None                 # onewire.OneWire once constructed; None if unavailable
+ds_state = DS_IDLE
+ds_present = False            # last known sensor health — transitions are printed, and
+                              # only transitions, so a sensor failing during a Mode 2
+                              # sweep cannot spray the wire with per-attempt errors (a
+                              # print in that loop is the v4.27 emit-block hazard)
+ds_last_cycle_ms = ticks_ms()
+ds_convert_started_ms = ticks_ms()
+ds_scratch = bytearray(9)     # pre-allocated scratchpad buffer — see _ds_read_scratch()
 
 
 def get_profile(idx):
@@ -786,7 +865,7 @@ def set_safe_state():
 
 
 # ---------------------------------------------------------------------------
-# Pack-voltage / board-temperature sense + low-voltage failsafe (v4.28)
+# Pack-voltage sense + low-voltage failsafe (v4.28)
 # ---------------------------------------------------------------------------
 def _adc_oversampled_u16(adc):
     """Average ADC_OVERSAMPLE_N raw 16-bit reads from one ADC channel."""
@@ -802,11 +881,152 @@ def read_pack_voltage_mv():
     return _adc_oversampled_u16(pack_voltage_adc) * PACK_VOLTAGE_FULLSCALE_MV // 65535
 
 
-def read_board_temp_dC():
-    """Oversampled board-temp read, PLACEHOLDER linear scale (see
-    THERM_TEMP_FULLSCALE_DECIC) pending the real thermistor/sensor hardware.
-    Units: deci-degC (x10 integer, no floats on the wire)."""
-    return _adc_oversampled_u16(therm_adc) * THERM_TEMP_FULLSCALE_DECIC // 65535
+# ---------------------------------------------------------------------------
+# DS18B20 board temperature — 1-Wire on GP6 (v4.33)
+# ---------------------------------------------------------------------------
+# Everything below is called ONLY from service_sensors(). That is the placement rule
+# the whole design rests on — see the DS18B20_INTERVAL_MS comment block.
+def _ds_mark_present(present, why):
+    """Record sensor health, printing ONLY on a transition. Both messages name the
+    resulting state, following the v4.32 PACK: convention — the state you most need
+    to be sure of is the one that was reached silently."""
+    global ds_present, last_board_temp_dC
+    if present == ds_present:
+        return
+    ds_present = present
+    if present:
+        print('DS18B20: responding on GP{0:d} — board temperature live'.format(
+            DS18B20_PIN))
+    else:
+        last_board_temp_dC = TEMP_INVALID_DC
+        print('DS18B20: no reading on GP{0:d} ({1}) — board temperature '
+              'reported invalid, acquisition unaffected'.format(DS18B20_PIN, why))
+
+
+def _ds_kick_convert():
+    """Start a temperature conversion on every device on the bus (SKIP ROM + CONVERT T).
+    Returns immediately — the ~750 ms conversion is NEVER waited on inline. ~2.2 ms."""
+    if ds_bus is None:
+        return False
+    try:
+        if not ds_bus.reset():
+            _ds_mark_present(False, 'no presence pulse')
+            return False
+        ds_bus.writebyte(0xCC)      # SKIP ROM
+        ds_bus.writebyte(0x44)      # CONVERT T
+        return True
+    except Exception as e:
+        _ds_mark_present(False, 'bus error: {0}'.format(e))
+        return False
+
+
+def _ds_read_scratch():
+    """Read the scratchpad and return deci-degC, or None on any failure.
+
+    SKIP ROM (0xCC), not MATCH ROM: there is one device on this bus, and addressing it
+    by its 64-bit ROM code — which is what ds18x20.read_temp() does — writes 8 extra
+    bytes, ~4.8 ms of blocking bit-bang, to reach the only thing that could answer.
+
+    All 9 bytes are read rather than the 2 that carry the temperature. The extra 7
+    bytes cost ~4.2 ms and buy the CRC, which is the difference between a corrupted bit
+    showing up as a wrong temperature and it showing up as no temperature. On a line
+    running past a pulse-induction front end, that is worth 4 ms once every 30 s."""
+    global last_board_temp_dC
+    if ds_bus is None:
+        return None
+    try:
+        if not ds_bus.reset():
+            _ds_mark_present(False, 'no presence pulse')
+            return None
+        ds_bus.writebyte(0xCC)      # SKIP ROM
+        ds_bus.writebyte(0xBE)      # READ SCRATCHPAD
+        # Fill the pre-allocated buffer and read it back from the buffer, NOT from
+        # readinto()'s return value: it fills in place and different onewire.py
+        # revisions disagree on whether they also return it. Pre-allocated at module
+        # scope because this runs inside the Mode 2 loop, and a per-read bytearray is a
+        # heap allocation that can trigger a GC pass at an unpredictable moment.
+        ds_bus.readinto(ds_scratch)
+        buf = ds_scratch
+    except Exception as e:
+        _ds_mark_present(False, 'bus error: {0}'.format(e))
+        return None
+    if ds_bus.crc8(buf):
+        # crc8 over all 9 bytes (byte 8 is the CRC itself) is 0 when intact.
+        _ds_mark_present(False, 'scratchpad CRC fail')
+        return None
+    raw = (buf[1] << 8) | buf[0]
+    if raw & 0x8000:
+        raw -= 0x10000              # two's complement — the part reads to -55 °C
+    # Known footgun, guarded by sequencing rather than by a value check: the DS18B20's
+    # power-on scratchpad default is 0x0550, exactly +85.0 °C, so a scratchpad read that
+    # beats the first conversion returns a plausible hot reading instead of an error.
+    # This path is only ever reached DS18B20_CONVERT_MS after a CONVERT T that returned a
+    # presence pulse, so it cannot be hit except by the sensor resetting inside that
+    # window. Not value-filtered: +85.0 is a legal reading, and rejecting it would mean
+    # silently dropping a real over-temperature — the one reading you must not lose.
+    # 12-bit default: 1 LSB = 1/16 °C. Integer maths only (no floats on the wire, §9),
+    # and floor division is used deliberately in both directions: -0.05 °C reporting as
+    # -1 dC rather than 0 dC is the honest rounding for a sub-zero reading.
+    _ds_mark_present(True, '')
+    last_board_temp_dC = raw * 10 // 16
+    return last_board_temp_dC
+
+
+def service_ds18b20(now):
+    """One step of the convert/read state machine. Called from service_sensors() only.
+
+    Split into two transactions across service ticks so the 750 ms conversion is never
+    waited on: the longest thing this can ever block for is the ~7.6 ms scratchpad read.
+    A failure at either step falls back to IDLE and retries on the next interval — there
+    is no error latch, because a sensor that comes back should just start working."""
+    global ds_state, ds_last_cycle_ms, ds_convert_started_ms
+    if ds_bus is None:
+        return
+    if ds_state == DS_IDLE:
+        if ticks_diff(now, ds_last_cycle_ms) >= DS18B20_INTERVAL_MS:
+            ds_last_cycle_ms = now
+            if _ds_kick_convert():
+                ds_convert_started_ms = now
+                ds_state = DS_CONVERTING
+    elif ds_state == DS_CONVERTING:
+        if ticks_diff(now, ds_convert_started_ms) >= DS18B20_CONVERT_MS:
+            _ds_read_scratch()      # sets last_board_temp_dC, or marks absent
+            ds_state = DS_IDLE
+
+
+def ds18b20_init():
+    """Construct the bus and probe for the sensor, then kick the first conversion so
+    the first 'P' report carries a real number rather than the startup sentinel.
+
+    Runs AFTER pack_voltage_boot_check() — the "never fires a pulse below the floor"
+    guarantee stays first in the boot order, and nothing here is allowed to delay it.
+    Every failure path is non-fatal: no sensor means no temperature, not no detector."""
+    global ds_bus, ds_state, ds_last_cycle_ms, ds_convert_started_ms
+    ds_last_cycle_ms = ticks_ms()
+    if onewire is None:
+        print('DS18B20: onewire module not available in this MicroPython build — '
+              'board temperature reported invalid, acquisition unaffected')
+        return
+    try:
+        ds_bus = onewire.OneWire(Pin(DS18B20_PIN))
+    except Exception as e:
+        ds_bus = None
+        print('DS18B20: bus init failed on GP{0:d} ({1}) — board temperature '
+              'reported invalid, acquisition unaffected'.format(DS18B20_PIN, e))
+        return
+    # Boot announces its result UNCONDITIONALLY, unlike the steady-state path which
+    # prints only on transitions. ds_present starts False, so a sensor missing at boot
+    # is not a transition and _ds_mark_present() would say nothing at all — leaving the
+    # "no temperature sensor" state indistinguishable from a healthy silent one. That is
+    # the same trap v4.32 closed on the PACK: messages.
+    if _ds_kick_convert():
+        _ds_mark_present(True, '')
+        ds_convert_started_ms = ticks_ms()
+        ds_state = DS_CONVERTING
+    else:
+        print('DS18B20: not detected on GP{0:d} at boot — board temperature reported '
+              'invalid, acquisition unaffected (retrying every {1:d} s)'.format(
+                  DS18B20_PIN, DS18B20_INTERVAL_MS // 1000))
 
 
 def _pack_voltage_trip_check(pack_mV):
@@ -884,14 +1104,24 @@ def service_sensors():
     acquire_mode2's own loop (see each call site) so the sample/report
     cadence below holds in both modes despite acquire_mode2 owning its own
     internal loop for the whole duration of a Mode 2 sweep. Uses the same
-    ticks_ms/ticks_diff idiom as MIN_EMIT_MS/COMMAND_POLL_MS."""
-    global last_pack_mV, last_board_temp_dC, last_sensor_sample_ms, last_sensor_report_ms
+    ticks_ms/ticks_diff idiom as MIN_EMIT_MS/COMMAND_POLL_MS.
+
+    (v4.33) This is also the ONLY place 1-Wire is allowed to be touched, and that is
+    load-bearing rather than tidiness. Its Mode 2 call site is the i==0 service point,
+    which already absorbs the blocking emit print() and where a delay becomes extra
+    settling for cell 0 instead of a corrupted read. Calling any _ds_* helper from
+    anywhere else — above all from near read_raw_bytes_hold() — puts a ~7.6 ms
+    bit-banged blackout somewhere the sweep cannot afford it."""
+    global last_pack_mV, last_sensor_sample_ms, last_sensor_report_ms
     now = ticks_ms()
     if ticks_diff(now, last_sensor_sample_ms) >= SENSOR_SAMPLE_MS:
         last_pack_mV = read_pack_voltage_mv()
-        last_board_temp_dC = read_board_temp_dC()
         _pack_voltage_trip_check(last_pack_mV)
         last_sensor_sample_ms = now
+    # v4.33: board temperature is 1-Wire, not ADC, so it runs on its own much slower
+    # cadence and its own state machine. Placed AFTER the pack block deliberately — a
+    # pack trip must never wait behind a ~7.6 ms bit-banged scratchpad read.
+    service_ds18b20(now)
     if ticks_diff(now, last_sensor_report_ms) >= SENSOR_REPORT_MS:
         elapsed_ms = ticks_diff(now, base_time_ms)
         print('P{0:d},{1:d},{2:d}'.format(elapsed_ms, last_pack_mV, last_board_temp_dC))
@@ -1126,6 +1356,7 @@ def check_for_commands(timeout_ms=1):
 # Main loop
 # ---------------------------------------------------------------------------
 pack_voltage_boot_check()  # v4.28: latch before 'Ready' if already at/below the floor
+ds18b20_init()             # v4.33: after the pack check — the failsafe leads the boot order
 print('Ready')
 
 serial_poll = select.poll()

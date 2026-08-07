@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.28
+# PIMD — Usage Guide (USAGE.md) v1.29
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,11 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.29 2026-08-07 gui v4.14 → v4.16, mcu v4.32 → v4.33. §3's board-temp gauge: the
+                scale is no longer a placeholder — it is a DS18B20 on GP6 (fw
+                v4.33+), blanked when the sensor is unavailable, with the
+                v4.28–v4.32 bench-pot epoch called out so old session logs are
+                not misread.
 v1.28 2026-08-04 gui v4.13 → v4.14. §3 rewritten around the pack/board-temp gauges,
                 the wider pulse/delay range and its period-fit readout, session
                 logs moving to data/sessions/, and Connect/Start matching the
@@ -227,8 +232,11 @@ consumes Mode 2 streams (`W` records are silently ignored).
   data-quality zone they sit in, plus a board-temp bar. Fed by the firmware's
   unsolicited `P` telemetry and a 10 s `V` poll. A latched low-voltage lockout
   turns the gauge red, stops the run, and is spelled out in the alert line.
-  The temperature scale is a **placeholder** until the thermistor front end
-  exists — read it as a trend, not a calibrated figure.
+  The temperature is a real reading from **firmware v4.33+** — a DS18B20 on GP6,
+  factory-calibrated to ±0.5 °C, refreshed every 30 s — and the bar shows `—`
+  when the sensor is absent, unresponsive or CRC-failing. **Firmware v4.28–v4.32
+  sent a bench-pot placeholder on this field**, so the temperature column in any
+  session log from that epoch is not a temperature.
 - Rolling drift slope (µV/s) over the last 100 packets; V/div floor 200 µV.
 - Every `*` record is logged to a session CSV
   (`src/data/sessions/gui_<YYYYmmdd_HHMMSS>.csv`), opened on **Start** — a short

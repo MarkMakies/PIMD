@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD GUI v4.15
+# PIMD GUI v4.16
 # — Mode 1 display
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -21,12 +21,19 @@
 #                                             the trailing three need fw v4.28+
 #   W…                                      — Mode 2 stream record, ignored here
 #
+# board_temp_dC is deci-degrees C (x10 integer) from the DS18B20 on GP6 as of fw
+# v4.33, and TEMP_INVALID_DC (-32768) on that field means NO READING — sensor absent,
+# unresponsive or CRC-failing. It is blanked, never plotted and never logged as a
+# number; see _update_sensors().
+#
 # Session logs land in data/sessions/ as `gui_<ts>.csv`, alongside this project's
 # other session dumps: a short '#' header, then one line per '*' record (the
 # record verbatim, minus its '*'), with '# sensor:' comment lines interleaved as
 # pack/temp telemetry arrives.
 #
 # History (full detail in CHANGELOG.md):
+#   v4.16 board temperature is a real DS18B20 reading (fw v4.33) — sentinel-aware
+#         gauge and session log, placeholder-thermistor tooltip retired
 #   v4.15 MCU firmware version shown in the session block and written to the
 #         session-log header (read from the 'V' reply already sent on connect)
 #   v4.14 UI built in code (pimd111_ui.py retired); pack + board-temp gauges
@@ -67,7 +74,7 @@ from PyQt6.QtCore import QIODevice, QRectF, QTimer, QPointF, Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
-APP_VERSION = '4.15'
+APP_VERSION = '4.16'
 
 DEFAULT_PORT  = '/dev/ttyACM0'
 _HERE         = os.path.dirname(os.path.abspath(__file__))
@@ -137,6 +144,12 @@ PACK_ZONES = (
 PACK_WINDOW_LO_MV = 21_500      # lower edge of the clean window — marked on the gauge
 
 TEMP_GAUGE_MAX_C = 80.0         # board-temp gauge full scale
+TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
+                                # "no reading" sentinel (fw v4.33 sends -32768). Tested
+                                # as a threshold rather than for equality so any future
+                                # out-of-band code blanks the gauge too — and it cannot
+                                # catch a real reading, the DS18B20 bottoming out at
+                                # -55 °C, i.e. -550 dC.
 
 KEY_LABEL_STYLE = 'background-color: rgb(61, 56, 70);\ncolor: rgb(237, 51, 59);'
 
@@ -575,9 +588,11 @@ class MainWindow(QMainWindow):
         col.addWidget(self.gauge_pack)
         self.gauge_temp = BarGauge(TEMP_GAUGE_MAX_C, '{0:.1f} °C')
         self.gauge_temp.setToolTip(
-            'Board temperature from the firmware (P/V telemetry, fw v4.28+).\n'
-            'PLACEHOLDER linear ADC scale — the thermistor front end does not\n'
-            'exist yet, so treat this as a trend, not a calibrated temperature.')
+            'Board temperature from the firmware (P/V telemetry).\n'
+            'DS18B20 1-Wire sensor on GP6, factory-calibrated to ±0.5 °C\n'
+            '(fw v4.33+); reported to 0.1 °C and refreshed every 30 s.\n'
+            'Shows — when the sensor is absent, unresponsive or CRC-failing.\n'
+            'Firmware v4.28–v4.32 sent a bench-pot placeholder on this field.')
         col.addWidget(self.gauge_temp)
         col.addStretch(1)
         return holder
@@ -1305,20 +1320,31 @@ class MainWindow(QMainWindow):
                     self.start_stop()
 
     def _update_sensors(self, pack_mV, board_temp_dC, lockout=None):
-        """Apply a pack / board-temp reading to the gauges and the session log."""
+        """Apply a pack / board-temp reading to the gauges and the session log.
+
+        board_temp_dC may be the firmware's "no reading" sentinel (fw v4.33+, see
+        TEMP_INVALID_MAX_DC). That is resolved to None once, here, so neither the gauge
+        nor the log ever sees the raw sentinel: BarGauge already renders None as '—',
+        and the log gets the word 'none' rather than a number that a later reader would
+        have no way to tell from a temperature."""
         self.pack_mV = pack_mV
-        self.board_temp_dC = board_temp_dC
+        valid_temp = board_temp_dC > TEMP_INVALID_MAX_DC
+        self.board_temp_dC = board_temp_dC if valid_temp else None
         if lockout is not None:
             # 'V' says the latch has dropped — retire the sticky lockout alert.
             if self.pack_lockout and not lockout:
                 self._clear_alert(force=True)
             self.pack_lockout = lockout
         self.gauge_pack.set_reading(pack_mV, self.pack_lockout)
-        self.gauge_temp.set_value(board_temp_dC / 10.0)
+        # Sub-zero readings are legal (the part goes to -55 °C) and BarGauge clamps the
+        # bar fraction to [0, 1], so they show as an empty bar with the correct negative
+        # number printed. Deliberate: the number is the reading, the bar is the glance.
+        self.gauge_temp.set_value(board_temp_dC / 10.0 if valid_temp else None)
         if self.file:
             try:
                 self.file.write('# sensor: {0}, pack_mV={1}, board_temp_dC={2}\n'.format(
-                    datetime.now().isoformat(timespec='seconds'), pack_mV, board_temp_dC))
+                    datetime.now().isoformat(timespec='seconds'), pack_mV,
+                    board_temp_dC if valid_temp else 'none'))
             except Exception as e:
                 print('File write error (sensor line):', e)
 

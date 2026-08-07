@@ -1,3 +1,142 @@
+### mcu/pimd_mcu.py — v4.33 — DS18B20 board temperature on GP6; the GP27 pot placeholder retired
+
+`board_temp_dC` has been on the wire since v4.28 and has never once carried a temperature. GP27
+sat on bench pot RV7 scaled by `THERM_TEMP_FULLSCALE_DECIC`, so the field reported a pot position
+dressed as degrees — a number the file header, the DESIGN text and the GUI tooltip all warned
+about and which the gauge displayed anyway. The planned fix was an analogue NTC on GP27; that is
+superseded. A **DS18B20 is wired to GP6**, a pin previously reserved for a panel meter that is not
+being fitted. The part is digital and factory-calibrated to ±0.5 °C, so the Beta/Steinhart-Hart
+curve the analogue path would have needed — the reason the placeholder constant said it must be
+"replaced with the proper curve, not just re-tuned" — does not arise at all.
+
+**The whole design is about where the transaction is allowed to run.** 1-Wire is bit-banged and
+each bit slot is ~70 µs with IRQs briefly off inside the driver, so a scratchpad read is ~7.6 ms of
+blocking CPU. That is CPU time and only CPU time: the drive/sample PWM pair and the LTC2508's
+conversions are hardware and free-run straight through it, and GP6 is on PWM slice 3 used as a
+plain open-drain GPIO, so §11's same-slice phase-locking invariant (GPIO4/5, slice 2) is untouched.
+The one place ms-scale blocking is already known to be affordable is the `i == 0` service point in
+`acquire_mode2()` — it absorbs the blocking emit `print()` today, and per the v4.24 note a delay
+there lands as *extra settling* for cell 0 rather than as a corrupted read. So every 1-Wire access
+is routed through `service_sensors()`, which **is** that point: it is the function's only Mode 2
+call site, so the placement rule is enforced by construction rather than by comment. Nothing goes
+anywhere near `read_raw_bytes_hold()`.
+
+Three further choices fall out of the same budget. The 750 ms conversion is **never waited on
+inline** — `service_ds18b20()` is a two-step state machine that issues `CONVERT T` on one service
+tick (~2.2 ms) and reads the scratchpad on a later one (~7.6 ms), so the longest single block is
+the read. **SKIP ROM, not MATCH ROM**, which is why `ds18x20.py` is deliberately not used: its
+`read_temp()` addresses the device by its 64-bit ROM code, writing 8 extra bytes — ~4.8 ms of
+bit-bang — to reach the only thing on the bus that could answer. And the cadence is
+`DS18B20_INTERVAL_MS = 30_000`, not `SENSOR_SAMPLE_MS`: board thermal time constants are minutes,
+so 1 Hz would be 30× the hot-path exposure for information the 60 s `P` report cannot even carry.
+Net cost is ~10 ms per ~200 sweeps — one sweep in 200 running ~5 % long, well inside the 3× window
+span guard the PC tools apply, in the benign direction. All 9 scratchpad bytes are read rather than
+the 2 that carry the temperature: the extra 7 cost ~4.2 ms and buy the CRC, which is the difference
+between a corrupted bit arriving as a wrong temperature and arriving as no temperature. On a line
+running past this front end that is worth 4 ms every 30 s.
+
+**Failure is a first-class path, because the detector must not care.** The `onewire` import is
+guarded, bus construction is guarded, and every transaction is wrapped; a missing module, a missing
+sensor, a bus exception or a CRC failure all resolve to the same thing — `board_temp_dC` reports
+`TEMP_INVALID_DC` and acquisition is untouched. There is no error latch: the state machine returns
+to idle and retries on the next interval, so a sensor that comes back simply starts working, with
+no reset. Health messages print **only on transitions**, following the v4.32 `PACK:` convention,
+because a per-attempt print inside the Mode 2 loop is precisely the emit-block hazard v4.27 exists
+to measure. `ds18b20_init()` runs *after* `pack_voltage_boot_check()` — the "never fires a pulse
+below the floor" guarantee keeps the front of the boot order — and announces its result
+**unconditionally**, since `ds_present` starts `False` and a sensor missing at boot is therefore
+not a transition; without that the "no sensor" state would be indistinguishable from a healthy
+silent one, the same trap v4.32 closed. `service_ds18b20()` sits *after* the pack block in
+`service_sensors()` so a pack trip never waits behind a scratchpad read, and the 9-byte buffer is
+allocated once at module scope so the Mode 2 loop cannot trigger a GC pass on it.
+
+**Wire format (§11).** Field *counts* on `P` and `V` are unchanged, so no parser breaks. What is
+new is a sentinel: `board_temp_dC == -32768` means NO READING, and a consumer must blank rather
+than plot it. This is a semantic extension of a documented field and is recorded here rather than
+treated as free, following the precedent §9 sets for the `B` counters. It cannot collide with a
+real reading — the part's range is −55…+125 °C, i.e. −550…+1250 dC. `board_temp_dC` starts at the
+sentinel rather than 0, because before the first conversion there genuinely is no reading and 0 dC
+is plausible enough to be believed.
+
+Verified offline, the board not being on the bench: the raw→deci-degC conversion matches all ten
+datasheet reference values including both range endpoints and the two's-complement negatives
+(−25.0625 °C → −251 dC, floor-rounded in both directions deliberately); and a 20-check mock-bus
+exercise of the state machine confirms the convert/read split, SKIP-ROM-never-MATCH-ROM, CRC
+failure resolving to the sentinel and not to a wrong number, transition-only printing, unattended
+recovery, and exceptions never propagating into the sweep. The bench acceptance gate is unchanged
+and still outstanding: sweep interval must stay 0.1445–0.1455 s on the 63-cell profile measured on
+the *firmware* clock, and `B`'s `overrun_count` must not rise against a DQ-unplugged baseline.
+
+DESIGN now trails the code in three places, for the next consolidation pass rather than for direct
+edit: §8's SPI/pin map gains 1-Wire on GP6, §9's `P`/`V` `board_temp_dC` semantics gain the
+sentinel, and §7's "still to measure" list no longer needs a thermistor front end. (2026-08-07)
+
+---
+
+### src/pimd_gui.py — v4.16 — the temperature gauge stops trusting the field, and the tooltip stops lying
+
+Follows fw v4.33. `pimd_gui.py` is the only consumer of `board_temp_dC` anywhere — classviz,
+delaycal, rawlog and features do not read it — so this is the entire PC-side surface of the change.
+
+`_update_sensors()` resolves the firmware's no-reading sentinel exactly once, at the top, so
+neither the gauge nor the session log ever sees the raw `-32768`. The gauge gets `None`, which
+`BarGauge` has always rendered as `—`, so no gauge code changed. The log gets the word `none`
+rather than the number: a `-32768` sitting in a `# sensor:` line is indistinguishable from a
+temperature to any later reader, and these session CSVs are read long after the run. The test is a
+threshold (`TEMP_INVALID_MAX_DC = -10_000`) not an equality, so any future out-of-band code blanks
+too, and it cannot swallow a real reading — the part bottoms out at −55 °C, i.e. −550 dC.
+
+Sub-zero readings are now reachable and are left as-is: `BarGauge` clamps the bar fraction to
+[0, 1], so they show an empty bar with the correct negative number printed. That is the right split
+— the number is the reading, the bar is the glance. The tooltip's "PLACEHOLDER linear ADC scale —
+the thermistor front end does not exist yet" is replaced with what the field now is, and keeps one
+line naming fw v4.28–v4.32 as the versions that sent a bench pot on it, because session logs from
+that epoch exist and their temperature column is not a temperature.
+
+Checked against a stub: normal, sub-zero, both part endpoints and the sentinel all resolve
+correctly in gauge and log, with no raw sentinel leaking into either. (2026-08-07)
+
+---
+
+### findings — DS18B20 on GP6: the RP2040's internal pull-up is not adequate, and the 1-Wire cost is CPU-only
+
+Recorded because both questions have answers that are easy to get wrong in the reassuring
+direction — the internal pull-up in particular *appears* to work.
+
+**The external 4.7 kΩ pull-up from DQ to +3V3 is required, not belt-and-braces.** The RP2040's
+internal pull-up is ~50–80 kΩ. Against even 50–100 pF of bus capacitance that is a rise time of
+several µs, and the 1-Wire master samples a read slot ~15 µs in. On a short lead with one device it
+can work well enough to pass a bench test and then fail intermittently once the lead is dressed
+into the enclosure — which is the worst available failure mode. MicroPython's driver sets the pad
+`OPEN_DRAIN | PULL_UP` regardless, so the internal pull-up is *enabled* in normal operation; that
+is not a substitute for the external resistor. Use 2.2 kΩ if the lead is long. The sensor runs from
+**+3V3, not +5 V** — DQ is tied to its supply through the pull-up and must not exceed the RP2040
+rail — in **normal 3-wire mode, not parasite power**: parasite needs an active strong pull-up
+driven onto the line for the whole conversion, which this pin cannot do while the sweep is running.
+100 nF across VDD/GND at the sensor body, and the DQ lead routed away from the RX front end — it
+only switches for ~10 ms every 30 s, but it is a 3V3 digital edge near a front end whose measured
+noise floor is ~450 µV (§7).
+
+**The timing answer.** The instinctive worry about 1-Wire here is the 750 ms conversion, and it is
+the wrong worry — the conversion is a property of the *sensor*, not of the bus, and is simply not
+waited on. The real cost is the bit-banged transaction: ~70 µs per bit slot with IRQs briefly off,
+so ~2.2 ms to start a conversion and ~7.6 ms to read the scratchpad. Crucially that is CPU time
+only. The PWM pair and the LTC2508 conversions are hardware and free-run through it, so nothing in
+the acquisition is perturbed; what is deferred is the firmware's own ability to do the next thing.
+That makes placement the entire question, and the answer already existed in the loop: the `i == 0`
+service point absorbs the blocking emit `print()` today and the v4.24 note records that a delay
+there lands as extra settling for cell 0. GP6 itself is clean — PWM slice 3, used as plain GPIO,
+with the slice-2 drive/sample pair untouched.
+
+Also worth having written down: the DS18B20's power-on scratchpad default is `0x0550`, which is
+exactly **+85.0 °C** — a read that beats the first conversion returns a plausible hot number, not
+an error. That is guarded by sequencing (the read only ever happens 800 ms after a `CONVERT T`
+that got a presence pulse) and deliberately *not* by value-filtering: +85.0 is a legal reading, and
+rejecting it would mean silently dropping a real over-temperature, the one reading that must not be
+lost. (2026-08-07)
+
+---
+
 ### src/pimd_gui.py — v4.15 — the connected board's firmware version is on screen and in the log
 
 Asked for alongside a confirmation that the GUI pulls pack/temp early. It does, and has since
@@ -286,6 +425,100 @@ a 1 Hz housekeeping channel.
 4700 µF **25 V** part on `+20V`, and a fully-charged 6S pack is 25.2 V (§17.13 measured pack B
 at 25.04 V no-load). It runs at ~100 % of rating on a fresh pack, which ages an electrolytic
 quickly. A 35 V part is the obvious swap. Not acted on. (2026-08-07)
+
+---
+
+### findings — the calibrated ladder puts the air decay at ~60 mV where 3 mV was reported, and it settles without an undershoot
+
+Offline analysis, no bench time and no hardware change. Prompted by a request to plot the
+estimated decay and its crossings from 4 µs / ~5 V out to 250 µs / a few mV on the **150 µs**
+drive band. New tool `utilities/decay_model/decaymodel.py` (entry below) does the fitting; this
+entry is what it found.
+
+**The air decay was fitted to hard data that the previous two entries did not use.** The nine
+`delays_us` in each band of `cal_63_air_bat_v3` are delaycal-converged (0.3 mV, 8 ns grid)
+sample points at which the trace *actually reaches* the column's threshold voltage — nine
+(delay, volts) pairs on the real curve, per band, sitting in the tracked profile the whole time.
+Taking the four columns clear of clamp release (3.8 / 2.4 / 1.5 / 0.5 V at 8.360 / 9.240 /
+9.944 / 11.320 µs on the 100 µs band) and fitting the **critically damped** form
+`V = 17 mV + (a + b·t)·exp(−t/τ)` — the shape §7's measured R1 ≈ 1.3k should give — lands
+**τ = 0.920 µs with residuals of −0.14 / +0.76 / −0.84 / +0.23 %**. Three points to make about
+that number. It is a genuine test of the two-real-pole claim, not an assumption: four points, three
+parameters, and the form could have failed. It agrees with the τ_fast ≈ 0.9 µs the 2026-08-05
+entry fitted by hand from three points on a completely different data set. And it reproduces,
+*without being fitted to them*, the same session's held-back observations — model 17.116 mV at
+sd 20 µs against "~17 mV by 20 µs", 17.000 against SDOA's 16.674 mV at sd 30 µs, 17.000 at
+sd 100 µs against "unchanged".
+
+**Everything the two entries above record is reproduced except the undershoot.** The fitted
+curve is **monotonic**: it lands on the 17 mV pedestal from above and never crosses it. At
+sd 14 µs, where the session reports a flat 3 mV bottom, the calibrated decay is at **59.6 mV** —
+57 mV above the observation and 43 mV above the pedestal. No rescaling closes that: the
+amplitude factor required is ~400×, against the ~11× §17.13 allows across the *entire*
+pack-voltage range, and the same session's own sd 8 µs reading (4.3 V, model 4.11 V) rules out
+a delay offset. Nor does a negative term fix it while staying consistent — any second pole steep
+enough to reach the rail by 14 µs is several µs wide and takes ~25 µs to recover, contradicting
+both the hand-read 0.5–1 µs flat *and* the measured "17 mV by 20 µs". Fitting a two-pole model
+to all of it at once was tried first and degrades the ladder to ±12–24 %.
+
+**This does not overturn the observation; it narrows what the observation can be.** The
+2026-08-05 entry already listed, and could not settle, whether the lobe belongs to the coil
+network or is LT6203 overload recovery. This is independent support for the second: the coil
+network's own poles, pinned by the calibration and by the settling behaviour the same session
+measured, have no room for a −14 mV excursion at 14 µs. It remains **inferred from a fit, not
+measured** — a scope at the preamp output settles it, and so does the target test that entry
+already names (an amplifier artefact will not move when metal approaches). If the lobe *is* real
+and *is* the coil, then the calibrated ladder and the fit are both wrong in a way this analysis
+cannot see, and that is the more interesting outcome of the two.
+
+**Three consequences that do not depend on which way the lobe goes.**
+
+1. **Air carries no information past ~21 µs on this band.** The fitted curve is inside ±3σ of
+   the pedestal (±44 µV at the measured 14–15 µV floor) from sd 21.2 µs onward. Of the eleven
+   columns in `cal_110_full_range_v4`'s 150 µs band, **eight** — 21.88, 30.99, 43.89, 62.15,
+   88.02, 124.65, 176.53, 250 µs — sit in that region. They are not dead cells; they are cells
+   where the air baseline is flat and *every* millivolt is target. That is the same thing the
+   2026-08-03 close-target entry saw from the other side, and it is directly relevant to the
+   cell-reduction work: those eight columns are near-duplicates *in air* and only separate on a
+   target.
+2. **`cal_110_full_range_v4`'s interior threshold labels are wrong by a large factor, as its own
+   profile entry warned.** That ladder's `threshold_v` came across from `test v4h` "pending the
+   voltages this ladder actually reaches on the bench". Against the fit, the column labelled
+   0.5 V at 62.15 µs is on the pedestal; 0.5 V is actually reached near 11.5 µs. Only the first
+   two or three columns are on the decay at all. The delays are bench-verified and fine — it is
+   the voltage labels that should not be quoted.
+3. **The rail is closer than the free-air numbers suggest, and it is a non-ferrous problem.**
+   Scaling a target term to the one measured post-pedestal amplitude (+11.0 mV over floor at
+   22 µs, 2026-08-03 close capture) and giving it the ordinary sign convention (§17.6), a
+   *ferrous* target never crosses the pedestal — it sits above it and is still ~0.9 mV up at
+   sd 250 µs. A *non-ferrous* target crosses **down** through the pedestal (≈15.4 µs on this
+   band) and bottoms out under it, and at the measured coupling it reaches 5.2 mV — **19 % from
+   the 3 mV rail.** So the sign of the post-pedestal reading is itself a family discriminant,
+   and the cells at risk of clipping are the non-ferrous ones, at close range, in the same
+   delay window the 2026-08-05 entry already flagged as unusable. Both target curves are
+   illustrative — sign and amplitude anchored, time constants assumed — so treat the 15.4 µs
+   as a shape, not a number. (2026-08-05)
+
+---
+
+### utilities/decay_model/decaymodel.py — v1 — new offline decay/crossing model and plot
+
+New standalone tool, offline, read-only against the repo (reads the tracked profile JSONs,
+writes only its PNG). Fits the air decay to the calibrated `cal_63_air_bat_v3` ladder,
+extrapolates the rigid band shift to a 150 µs drive pulse (+0.24 µs, from the shrinking
+per-band slope that §14.6 flags as a coil-current plateau), overlays illustrative ferrous and
+non-ferrous target terms, and renders a three-panel figure across 4 → 250 µs sample delay:
+the whole span on log-log, the region where the three curves separate, and the late window
+with `cal_110_full_range_v4`'s 150 µs columns marked. Prints every number it derives, labelled
+measured or modelled.
+
+It exists because that separation is the whole point — the module docstring is an explicit
+measured/modelled/unresolved split, the fit consumes only the calibrated ladder, and the
+2026-08-05 session observations are **held back and used as a check**, which is what makes the
+agreement at sd 20/30/100 µs meaningful and the disagreement at sd 14 µs legible. The model is
+not drawn where it is not valid (below its own peak, across the clamp-release stretch), and the
+lobe is plotted as an observation sitting off the curve rather than fitted into it. Run:
+`.venv/bin/python utilities/decay_model/decaymodel.py [--pulse 150] [--out …]`. (2026-08-05)
 
 ---
 
