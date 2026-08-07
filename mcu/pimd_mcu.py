@@ -41,16 +41,28 @@
 #         the sweep was paused and the rig's thermal load changed with it.
 #   (unsolicited, both modes) pack-voltage / board-temp telemetry, every SENSOR_REPORT_MS:
 #         -> P<time_ms>,<pack_mV>,<board_temp_dC>
-#         board_temp_dC is deci-degrees C (x10 integer). Both are PLACEHOLDER linear
-#         ADC full-scale mappings (v4.28) pending the real analog front ends — see
+#         board_temp_dC is deci-degrees C (x10 integer). pack_mV is a REAL bench-
+#         calibrated reading as of v4.29 (22k/2k7 divider on GP26); board_temp_dC is
+#         still a PLACEHOLDER linear mapping pending the thermistor front end — see
 #         PACK_VOLTAGE_FULLSCALE_MV / THERM_TEMP_FULLSCALE_DECIC below.
 #   (v4.28) LOW-VOLTAGE FAILSAFE: if pack_mV <= PACK_VOLTAGE_TRIP_MV for
 #         PACK_VOLTAGE_TRIP_CONSECUTIVE consecutive samples, firmware forces a stop,
 #         disables drive, and LATCHES — S/G/D are rejected until a physical power-cycle.
 #         No serial command can clear the latch (deliberate: see CHANGELOG v4.28).
+#   (v4.31) PACK-ABSENT SUSPEND: below PACK_ABSENT_MV the rail is off and the MCU is
+#         running on USB, so there is no pack to protect — the failsafe suspends instead
+#         of latching, and releases when a pack returns at >= PACK_REARM_MV. Lets the
+#         pack be switched off or swapped without a physical MCU reset, and lets the
+#         board be USB-powered for programming with the pack switched on later.
+#         Still not a serial re-arm: it requires the pack to physically go and a
+#         healthy one to come back.
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.32 pack absent->present transition always announces itself, so 'failsafe armed' is observable
+#   v4.31 pack-absent suspend (<6 V = USB power) + re-arm hysteresis; battery swap no longer needs a reset
+#   v4.30 harden boot check against divider RC settling — settle delay + spaced boot samples (defensive)
+#   v4.29 pack divider built + bench-calibrated: FULLSCALE 25000 -> 30083 mV; POT pin comments corrected
 #   v4.28 pack-voltage + board-temp sense (ADC), periodic 'P' telemetry, hard-latched low-voltage failsafe
 #   v4.27 diagnostic: emit-block counters via 'B' (host-stall detection; emit path unchanged)
 #   v4.26 FIX acquire_mode2: post-emit USB IRQ burst mis-timed cell[i]'s CC write (channel-1 σ)
@@ -90,7 +102,7 @@ from sys import stdin
 from utime import sleep_ms, sleep_us, ticks_ms, ticks_us, ticks_diff
 from machine import ADC, Pin, PWM, SPI, unique_id, disable_irq, enable_irq
 
-FW_VERSION = '4.28'
+FW_VERSION = '4.32'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -126,15 +138,19 @@ ltc2508_sel0 = Pin(12, Pin.OUT)
 # ---------------------------------------------------------------------------
 # Pack-voltage / board-temperature sense (RP2040 on-chip ADC, v4.28)
 # ---------------------------------------------------------------------------
-# GP26-29 (ADC0-3) are unused elsewhere in this firmware. Schematic sheet 2
-# wires all four to onboard 10k pots (POT-0..POT-3) for bench bring-up, so
-# these two assignments (POT-0/POT-1) can be exercised on the bench before
-# any real pack-voltage divider or thermistor circuit exists.
-# VERIFY against schematic sheet 1's RP2040 net names before flashing to a
-# board where GP26/27 carry something else — GP28/29 (POT-2/POT-3) are the
-# spare fallback pins if so.
-PACK_VOLTAGE_ADC_PIN = 26   # GP26 / ADC0, schematic sheet 2 "POT-0"
-THERM_ADC_PIN = 27          # GP27 / ADC1, schematic sheet 2 "POT-1"
+# GP26-29 (ADC0-3) are unused elsewhere in this firmware. Sheet 1 wires all four
+# to onboard 10k pots for bench bring-up. The pin->pot mapping runs BACKWARDS from
+# the pin numbering, which v4.28's comments had wrong (they claimed GP26="POT-0"):
+#   GP26 = ADC0 = POT-3 = RV8      GP28 = ADC2 = POT-1 = RV6
+#   GP27 = ADC1 = POT-2 = RV7      GP29 = ADC3 = POT-0 = RV5
+# GP28/29 remain the spare fallback pins.
+#
+# (v4.29) GP26 now carries the REAL pack-voltage divider, not a pot: RV8 has been
+# removed from the board and a 22k/2k7 divider fitted from the +20V rail (J11 pin 2)
+# to its footprint, with 1u across the 2k7 and 1k/100n at the pin. GP27 is still on
+# RV7 (POT-2) pending the thermistor front end.
+PACK_VOLTAGE_ADC_PIN = 26   # GP26 / ADC0 — pack divider (was RV8 / "POT-3")
+THERM_ADC_PIN = 27          # GP27 / ADC1 — still bench pot RV7 / "POT-2"
 pack_voltage_adc = ADC(Pin(PACK_VOLTAGE_ADC_PIN))
 therm_adc = ADC(Pin(THERM_ADC_PIN))
 
@@ -190,17 +206,64 @@ OUTLIER_GATE_MIN = 164  # absolute gate floor in raw14 counts (≈100 mV, 1% FS)
 ADC_OVERSAMPLE_N = 64          # raw ADC reads averaged per channel per sample
 SENSOR_SAMPLE_MS = 1000        # both channels re-sampled + failsafe re-checked, 1 Hz
 SENSOR_REPORT_MS = 60_000      # 'P' telemetry line emitted this often
-# PLACEHOLDER linear full-scale mappings — the real analog front ends (pack
-# divider, thermistor conditioning) do not exist yet. Replace once built and
-# bench-calibrated against a multimeter/reference thermometer. A raw NTC
-# thermistor+divider is NOT linear in temperature (Beta/Steinhart-Hart curve);
-# if that's the eventual part, THERM_TEMP_FULLSCALE_DECIC must be replaced
+# PACK: real hardware as of v4.29. 22k/2k7 divider (nominal ratio 9.1481) from the
+# +20V rail, which is the pack terminal voltage — D4 is a SHUNT reverse-polarity
+# clamp, not a series diode, so there is no forward drop to compensate and no drift
+# with load current. Bench calibration 2026-08-07: 2.460 V at the ADC pin measured
+# against 22.59 V at the pack => ratio 9.18293 (+0.38% of nominal, i.e. R_top
+# ~22.094k, inside 1% tolerance — the build checks out). Second point 2.457 V /
+# 22.55 V gives 9.17786, agreeing to 0.055%: the divider is stable and correct.
+#
+# The reference is NOT 3.300 V. With the old FS=25000 still loaded, a pin measured at
+# 2.457 V reported 18740 mV, which solves for ADC_VREF = 3.2777 V — the RP2040-Zero's
+# 3V3 LDO is 0.67% LOW. (It is the ADC reference and is not a precision part.) That
+# single reading, taken against a KNOWN constant, is the full calibration: it absorbs
+# the divider ratio and the reference together.
+#   3.2777 V x 9.17786 = 30.083 V   ->   30_083 mV
+# Re-deriving from any future pair is the same one-liner: scale this constant by
+# V_dmm / V_reported. Redo it if the RP2040-Zero module is ever swapped — the LDO
+# term is per-module, and it is 0.73% (221 mV at full scale), not a rounding error.
+# 1 LSB = 7.35 mV at the pack; 25.2 V (6S full) sits at 83.8% of range.
+PACK_VOLTAGE_FULLSCALE_MV = 30_083     # 0-VREF ADC <-> 0-30.083V pack (fully calibrated)
+# TEMP: still a PLACEHOLDER linear mapping — the thermistor front end does not exist
+# yet. A raw NTC thermistor+divider is NOT linear in temperature (Beta/Steinhart-Hart
+# curve); if that's the eventual part, THERM_TEMP_FULLSCALE_DECIC must be replaced
 # with the proper curve/lookup table, not just re-tuned.
-PACK_VOLTAGE_FULLSCALE_MV = 25_000     # 0-3.3V ADC <-> 0-25.000V pack
 THERM_TEMP_FULLSCALE_DECIC = 1500      # 0-3.3V ADC <-> 0.0-150.0 degC (deci-degC, x10 int)
 PACK_VOLTAGE_TRIP_MV = 21_000           # hard floor, mV (DESIGN.md §12 working discharge floor)
 PACK_VOLTAGE_TRIP_CONSECUTIVE = 3      # consecutive sub-floor SENSOR_SAMPLE_MS samples
                                         # required to latch (debounce against ADC noise)
+# (v4.30) The divider is an RC, and at boot it is still charging. Source impedance
+# is 22k||2k7 = 2405 ohm against C_tap 1u + C_pin 100n, so tau = 2.65 ms; reaching
+# one LSB (7.3 mV) of the settled value takes 8.3 tau = 22 ms. Worse, GP26 sits under
+# the RP2040 pad's DEFAULT PULL-DOWN for the whole MicroPython boot, until
+# ADC(Pin(26)) is constructed a few ms before pack_voltage_boot_check() runs — so the
+# node is recovering from a depressed level exactly when the boot check samples it.
+# 100 ms is ~38 tau, i.e. total settling with large margin, and is paid once at boot.
+PACK_SENSE_SETTLE_MS = 100
+# Boot samples must ALSO be spaced in time. Back-to-back they take ~1-2 ms in total
+# and all three land inside the same transient, so the 3-sample debounce degenerates
+# into a single sample of the worst moment. 20 ms apart makes it a real debounce.
+PACK_VOLTAGE_BOOT_SAMPLE_MS = 20
+# (v4.31) Pack-absent detection and re-arm hysteresis. The MCU is USB-powered and
+# OUTLIVES the +20V rail — measured: the board ran normally with the rail decayed to
+# 3.85 V. So switching the pack off, or swapping cells, drops the sense reading to
+# near zero without the firmware having rebooted, and v4.30 and earlier read that as
+# a catastrophically flat pack and latched. Clearing it then needed a physical MCU
+# reset, which is not a reasonable price for changing a battery.
+PACK_ABSENT_MV = 6_000     # below this the rail is OFF and we are running on USB. This
+                           # is not a pack reading at all: a connected 6S pack cannot sit
+                           # at 1 V/cell, and the +15V rail dropped out ~12 V higher up,
+                           # so nothing is being discharged and there is nothing for the
+                           # failsafe to protect. Suspend rather than latch.
+PACK_REARM_MV = 21_500     # a returning pack must reach THIS to clear the latch, not
+                           # merely clear PACK_VOLTAGE_TRIP_MV. 500 mV of hysteresis, and
+                           # the DESIGN §12 clean-window lower edge, so it is a meaningful
+                           # level rather than an arbitrary one. Re-arming at the trip
+                           # itself would let a genuinely flat pack switched off and back
+                           # on return on its no-load recovery, re-arm, then sag straight
+                           # back under load — the exact cycle the v4.28 hard latch exists
+                           # to stop. Set to 21_000 for bare "above the floor", at that risk.
 
 # ---------------------------------------------------------------------------
 # Signal parameters — held config for Mode 1 / A<x> / * command
@@ -282,11 +345,14 @@ active_profile_index = 0
 mode2_profile_changed = False
 dynamic_profile = None        # set by the D command; RAM only, lost on reset
 
-# Pack-voltage / board-temp sensing state (v4.28) — RAM only, lost on reset,
-# which is exactly the point: pack_voltage_lockout can only be cleared by a
-# physical power-cycle, never by any serial command (see CHANGELOG v4.28).
+# Pack-voltage / board-temp sensing state (v4.28) — RAM only, lost on reset.
+# pack_voltage_lockout is still never clearable by any serial command; as of v4.31
+# the ONE thing that clears it without a reset is the pack physically going away and
+# a healthy one returning (see PACK_ABSENT_MV / PACK_REARM_MV).
 pack_voltage_lockout = False
 pack_voltage_low_streak = 0
+pack_absent = False           # v4.31: rail below PACK_ABSENT_MV — USB-only, failsafe
+                              # suspended because there is no pack to protect
 last_pack_mV = 0
 last_board_temp_dC = 0
 last_sensor_sample_ms = ticks_ms()
@@ -731,8 +797,8 @@ def _adc_oversampled_u16(adc):
 
 
 def read_pack_voltage_mv():
-    """Oversampled pack-voltage read, PLACEHOLDER linear scale (see
-    PACK_VOLTAGE_FULLSCALE_MV) pending the real divider hardware."""
+    """Oversampled pack-voltage read through the 22k/2k7 divider on GP26,
+    bench-calibrated linear scale (see PACK_VOLTAGE_FULLSCALE_MV)."""
     return _adc_oversampled_u16(pack_voltage_adc) * PACK_VOLTAGE_FULLSCALE_MV // 65535
 
 
@@ -747,8 +813,45 @@ def _pack_voltage_trip_check(pack_mV):
     """Debounced low-voltage latch. Once tripped, pack_voltage_lockout stays
     True until a physical power-cycle clears the RAM state — no serial
     command re-arms it (see CHANGELOG v4.28: an auto/soft-resume risks
-    repeating the over-discharge incident that motivated this)."""
-    global pack_voltage_lockout, pack_voltage_low_streak, state
+    repeating the over-discharge incident that motivated this).
+
+    (v4.31) One exception, and only one: if the rail drops below PACK_ABSENT_MV
+    the pack is GONE, not flat — we are on USB power. The failsafe is suspended
+    for as long as that holds, and released when a pack returns at or above
+    PACK_REARM_MV. This is still not a serial re-arm: it takes physically
+    removing the pack and presenting a healthy one."""
+    global pack_voltage_lockout, pack_voltage_low_streak, pack_absent, state
+    if pack_mV < PACK_ABSENT_MV:
+        # Rail off / USB-only. Neither latch nor clear here — a reading taken with
+        # no pack present says nothing about any pack. Just suspend and wait.
+        pack_voltage_low_streak = 0
+        if not pack_absent:
+            pack_absent = True
+            print('PACK: rail absent ({0:d} mV) — USB power assumed, failsafe '
+                  'suspended until a pack returns'.format(pack_mV))
+        return
+    if pack_absent:
+        # First real reading after the rail came back. (v4.32) EVERY path through
+        # here prints, and every message ends '— failsafe armed'. v4.31 printed only
+        # when there was a latch to clear, so the common case (USB-first boot, pack
+        # switched on later) transitioned in silence and left no way — from the log
+        # or from the wire — to tell an armed failsafe from a still-suspended one.
+        # That is the one state you most need to be sure you are not in.
+        pack_absent = False
+        if pack_mV >= PACK_REARM_MV:
+            if pack_voltage_lockout:
+                pack_voltage_lockout = False
+                print('PACK: present again at {0:d} mV — lockout cleared, '
+                      'failsafe armed'.format(pack_mV))
+            else:
+                print('PACK: present again at {0:d} mV — failsafe armed'.format(
+                      pack_mV))
+        else:
+            print('PACK: present again at {0:d} mV, below re-arm floor {1:d} mV — '
+                  'lockout state unchanged, failsafe armed'.format(
+                      pack_mV, PACK_REARM_MV))
+        # Either way the normal trip logic below resumes immediately, so a pack that
+        # comes back weak and keeps sagging still latches on its own merits.
     if pack_mV <= PACK_VOLTAGE_TRIP_MV:
         pack_voltage_low_streak += 1
     else:
@@ -766,7 +869,10 @@ def pack_voltage_boot_check():
     """Run before 'Ready' / before any command can be accepted, so a rig
     powered on already at or below the floor never fires a single pulse."""
     global last_pack_mV, last_sensor_sample_ms, last_sensor_report_ms
-    for _ in range(PACK_VOLTAGE_TRIP_CONSECUTIVE):
+    sleep_ms(PACK_SENSE_SETTLE_MS)   # v4.30: divider RC + pad pull-down release
+    for i in range(PACK_VOLTAGE_TRIP_CONSECUTIVE):
+        if i:
+            sleep_ms(PACK_VOLTAGE_BOOT_SAMPLE_MS)
         last_pack_mV = read_pack_voltage_mv()
         _pack_voltage_trip_check(last_pack_mV)
     last_sensor_sample_ms = ticks_ms()

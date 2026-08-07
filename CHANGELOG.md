@@ -1,3 +1,250 @@
+### mcu/pimd_mcu.py — v4.32 — the pack absent→present transition always announces itself
+
+Found immediately on the first bench run of v4.31, and worth its own version because it is an
+observability defect rather than a cosmetic one. The rig was booted USB-first with the pack
+switched on afterwards — the exact workflow v4.31 was written to support — and it worked: the
+boot at 3859 mV suspended instead of latching, and the pack coming back at 22 507 mV cleared
+`pack_absent` and left `lockout = 0`. But it did all of that **in silence**, because v4.31 only
+printed when there was an actual latch to clear, and there had never been one. The transition
+was read as a failure to re-arm.
+
+It was not a failure, but the reading was reasonable, and that is the problem: **a suspended
+failsafe and an armed one were indistinguishable from the log and from the wire.** `pack_absent`
+is not reported on `V` and the re-arm path printed conditionally, so the one state you most need
+to be certain you are not in — protection silently switched off — was the state you could not
+observe. Same class of defect as the invisible `LOCKOUT:` line recorded under v4.30.
+
+Every path through the absent→present branch now prints exactly once, and every message ends
+`— failsafe armed`, so the arming is stated rather than inferred:
+
+- `PACK: present again at <N> mV — failsafe armed` (no latch had been set)
+- `PACK: present again at <N> mV — lockout cleared, failsafe armed`
+- `PACK: present again at <N> mV, below re-arm floor 21500 mV — lockout state unchanged, failsafe armed`
+
+No logic change: thresholds, debounce, latch semantics and the trip path are all identical to
+v4.31, and `pack_voltage_lockout = False` moved inside the branch that tests it, which is a
+no-op. The `V` field for `pack_absent` remains not done — the print covers the transition, and
+adding a 12th field is still the better fix for the GUI's gauge reading 0.4 V / 0 % / red
+`LOCKOUT floor` while the pack is simply switched off. (2026-08-07)
+
+---
+
+### mcu/pimd_mcu.py — v4.31 — pack-absent suspend (< 6 V ⇒ USB power) and re-arm hysteresis; a battery swap no longer needs an MCU reset
+
+Requested after the v4.28 latch proved impractical to live with on the bench. The MCU is
+USB-powered and **outlives the `+20V` rail** — measured during the v4.30 investigation, where
+the board ran normally with the rail decayed to 3.85 V. So switching the pack off, or swapping
+cells, dropped the sense reading to near zero without the firmware rebooting; the failsafe read
+that as a catastrophically flat pack and latched, and clearing it needed a physical MCU reset.
+That is not a reasonable price for changing a battery, and it also blocked the ordinary workflow
+of powering the board over USB for programming and switching the pack on afterwards.
+
+`PACK_ABSENT_MV = 6_000`: below this the rail is **off**, not low. A connected 6S pack cannot
+sit at 1 V/cell, and the +15 V rail dropped out some 12 V higher up — so nothing is being
+discharged and there is nothing for the failsafe to protect. The check now suspends (clears the
+streak, emits one `PACK: rail absent` line) instead of latching, and takes no view on any pack
+while suspended, on the grounds that a reading taken with no pack present says nothing about a
+pack.
+
+`PACK_REARM_MV = 21_500`: release requires a returning pack to reach this, **not** merely to
+clear `PACK_VOLTAGE_TRIP_MV`. That is the hysteresis, and 21.5 V is the DESIGN §12 clean-window
+lower edge rather than an arbitrary margin. The reason it is not 21 000: re-arming at the trip
+itself would let a genuinely flat pack, switched off and straight back on, return on its no-load
+recovery, re-arm, and sag again under load — precisely the cycle the v4.28 hard latch was built
+to stop, and precisely how the cells were damaged in the first place. A pack returning below
+this leaves the latch untouched and normal trip logic resumes immediately, so a weak pack that
+keeps sagging still latches on its own merits.
+
+**This is not a serial re-arm.** No command clears the latch; it still takes the pack physically
+going away and a healthy one being presented. The trip threshold, the debounce, the boot check
+and the `S`/`G`/`D` rejection are all unchanged.
+
+Verified against a faithful port of the state machine over nine scenarios, all passing: battery
+swap mid-session · USB-only boot with the pack switched on later · genuine discharge to the
+floor still latching · a flat pack switched off and on **not** re-arming · a fresh pack fitted
+after a latch **does** re-arm · pack removed while already locked, returning healthy · weak pack
+returning at 21.4 V then sagging, latching on merit · normal running never tripping.
+
+One behaviour to expect rather than be alarmed by: switching the pack off makes the rail **decay
+through the 21 → 6 V band**, which takes longer than the 3-sample debounce, so a `LOCKOUT:` line
+is emitted on the way down before the absent threshold is reached. It self-clears on re-arm — the
+simulated decay sequence ends unlocked. Note also that the sweep does genuinely stop during a
+swap (`state = 'stop'`, `set_safe_state()`); the rail is gone, so that is unavoidable. What v4.31
+buys is restarting with `G`/`S` afterwards instead of power-cycling the MCU.
+
+Not done, deliberately: `pack_absent` is not on the wire. It would be a safe additive 12th field
+on `V` (the GUI tests `len(parts) >= 11`) and would let the pack gauge show "no pack" instead of
+0.4 V, SoC 0 % and a red `LOCKOUT floor` caption, which is what it will now display with the
+pack switched off. Left out to keep this change to the failsafe alone. (2026-08-07)
+
+---
+
+### mcu/pimd_mcu.py — v4.30 — harden `pack_voltage_boot_check()` against divider RC settling (defensive; original lockout root cause NOT established)
+
+Prompted by a lockout on a healthy 22.5 V pack: the rig came up latched, the gauge reading the
+correct voltage beside a `LOCKED OUT` caption. **The cause was never established, and this
+entry does not claim it.** What follows is a real weakness found while investigating, worth
+fixing on its own merits, plus an explicit record of what was ruled out — because the
+investigation produced two confident wrong answers before the measurements landed.
+
+The weakness is genuine. The v4.28 latch logic is unchanged and had been bench-proven against a
+pot, but a 10 kΩ pot wiper is a stiff, capacitor-free node that settles instantly, whereas the
+v4.29 divider is 22 k ∥ 2.7 k = 2405 Ω against C_tap 1 µF + C_pin 100 nF. **Measured τ = 2.9 ms**
+(predicted 2.65 ms, four independent fit points), needing ~22 ms to reach one LSB of settled.
+GP26 also sits under the RP2040 pad's default pull-down for the whole MicroPython boot, released
+only when `ADC(Pin(26))` is constructed — a few milliseconds before the boot check runs, since
+the module is compiled first and then executed, and everything between is definitions costing
+microseconds. So the boot check did sample a recovering node. Two fixes:
+
+1. `PACK_SENSE_SETTLE_MS = 100` (≈ 34 τ) slept before the first boot reading.
+2. `PACK_VOLTAGE_BOOT_SAMPLE_MS = 20` spacing the boot samples. This is the more important of
+   the two: back-to-back the three reads completed within ~2.8 ms and all landed inside the
+   same transient, so `PACK_VOLTAGE_TRIP_CONSECUTIVE = 3` had **degenerated into a single
+   sample taken at the worst available moment**. The debounce was decorative. That is a defect
+   regardless of what caused the original latch.
+
+**But it does not explain the observed lockout.** Reproducing the exact v4.29 path on the bench
+at a live 22.5 V pack — pull-down held 400 ms, released, then three back-to-back 64-conversion
+averages — gives 21 497 / 21 839 / 22 035 mV, repeatable across three trials, every read
+comfortably above the 21 000 mV trip. Verdict: *would not latch*. An earlier claim that the
+mechanism was confirmed rested on a 7.30 % depression measured with the rail decayed to 0.42 V
+and then scaled to 22.5 V; measured directly at the live voltage the depression is **5.13 %**,
+landing at 21 348 mV — 348 mV clear of the trip. **The extrapolation was unsound and the
+conclusion drawn from it was wrong.**
+
+Also ruled out, and recorded so it is not re-proposed: the MCU being USB-powered and outliving
+the pack rail. That is *true* — the board was later observed running normally with `+20V`
+decayed to 3.85 V — but it cannot explain this event, because the rig had been powered pack-first
+with USB disconnected and only plugged in afterwards. A fact about the board is not a cause.
+
+The one condition not reproducible from the REPL is a genuine cold start with `+20V` itself
+rising from zero; every bench measurement had the rail already up. That remains the leading
+hypothesis and nothing more. **The fault has not recurred since.** If it does, `pimd_rawlog.py`
+attached across a boot would capture the `LOCKOUT:` line and its mV value — the number lost the
+first time because the failsafe printed it to USB CDC with no host listening.
+
+The latch semantics are **untouched** — no threshold moved, no re-arm path added, the hard
+latch is still hard. A genuinely flat pack still latches, 100 ms later than before. This is a
+sleep at boot, not a scheduler, so §11 is unaffected.
+
+Worth recording for diagnosis, because it cost time: **the LOCKOUT line was invisible.** The
+firmware latched at boot and printed its message to USB CDC with no host attached, so the line
+was lost; the GUI connected afterwards and learned of the latch only from field 10 of the `V`
+poll, captioning the gauge `"22.51 V · LOCKED OUT"`. That caption was initially read as the
+alert text, which sent diagnosis after a phantom — a reading *above* the floor appearing in a
+latch message. It cannot happen: `_pack_voltage_trip_check()` zeroes the streak in the same
+call before testing it, so the printed value is provably ≤ `PACK_VOLTAGE_TRIP_MV`. The
+inconsistency was the tell that the number came from somewhere else. **A failsafe that reports
+only over a link that may not be attached when it fires is half-instrumented** — the boot-time
+latch reason is a candidate for latching into a variable that `V` can report, not just a print.
+
+Also corrected here: the v4.29 header history line said `FULLSCALE 25000 -> 30304`, the interim
+divider-only figure, where the version actually shipped 30083. (2026-08-07)
+
+---
+
+### mcu/pimd_mcu.py — v4.29 — pack-voltage divider built and bench-calibrated; FULLSCALE 25000 → 30083 mV; POT pin comments corrected
+
+The v4.28 sense path is no longer notional: the pack-voltage divider has been built and
+wired, so `PACK_VOLTAGE_FULLSCALE_MV` stops being a placeholder and becomes a measured
+constant. Hardware fitted (design detail in the findings entry below): **22 kΩ / 2.7 kΩ**
+from the `+20V` rail at J11 pin 2 to GP26/ADC0, **1 µF** across the 2.7 kΩ and **1 kΩ + 100 nF**
+at the pin, all mounted at the MCU end with the divider return on MCU-local ground.
+Bench calibration 2026-08-07: **2.460 V at the ADC pin against 22.59 V at the pack**, giving a
+measured ratio of **9.18293** — +0.38 % off the 9.14815 nominal, implying R_top ≈ 22.094 kΩ,
+inside 1 % tolerance, so the build itself is confirmed correct rather than merely working. A
+second point (2.457 V / 22.55 V → 9.17786) agrees to 0.055 %.
+
+**`PACK_VOLTAGE_FULLSCALE_MV = 30_083`**, which is the *fully* calibrated figure —
+divider ratio and ADC reference together. It was briefly 30_304 in this same version, from
+3.300 × 9.18293, i.e. divider-only with the reference assumed. That figure never ran on
+hardware and the version was amended rather than superseded. **The reference is not 3.300 V:**
+the first flash attempt didn't take, so the board was still running v4.28's FS = 25 000 when a
+pin measured at 2.457 V reported 18 740 mV — which solves directly for **ADC_VREF = 3.2777 V**,
+the RP2040-Zero's 3V3 LDO sitting **0.67 % low**. Re-running the firmware's full integer path
+(12-bit quantisation, MicroPython's `read_u16` scaling, `* FS // 65535` truncation) at that
+reference reproduces the observed 18 740 to within 2 mV. 3.2777 × 9.17786 = 30.083 V.
+
+Worth recording as method: a reading taken against a *known* constant is a complete
+calibration, because `reported = V_pin × FS_config / VREF` inverts for VREF with everything
+else measured. The accidental stale flash produced the paired `P`-line/DMM measurement this
+entry had listed as outstanding work. The LDO term is **0.73 %, 221 mV at full scale** — not a
+rounding error, and **per-module**, so this must be redone if the RP2040-Zero is ever swapped.
+
+The old 25 000 value was not merely uncalibrated, it was **unusable**: full scale sat *below*
+a full 6S pack (25.2 V charged; §17.13 measured pack B at 25.04 V no-load), so a fresh pack
+would have pegged the reading exactly where DESIGN §12's data-quality ceiling lives. At the
+bench point it would have reported 18 636 mV against a true 22 590 mV — a −3.95 V error, far
+enough below the 21 000 mV trip that the failsafe would have latched instantly on a healthy
+pack. Nothing was lost, because the channel had never been wired.
+
+**The failsafe was proven end-to-end on real hardware by the stale-flash incident**, which is
+the one good thing to come out of it: 18 740 mV ≤ the 21 000 mV trip, so the firmware latched,
+rejected `S`/`G`/`D`, and `pimd_gui.py` painted the lockout state and caption correctly. The
+whole v4.28 chain — ADC read, debounce, latch, `V`-line lockout field, GUI alert — ran against
+a live pack for the first time. It was only ever fed a wrong scale factor.
+
+Also corrected here, comment-only but riding along because it was flagged by v4.28's own
+"VERIFY against schematic sheet 1" instruction and the check **failed**: the pin→pot mapping
+runs backwards from the pin numbering. Sheet 1 wires **GP29→POT-0, GP28→POT-1, GP27→POT-2,
+GP26→POT-3**, so v4.28's "GP26 / ADC0, POT-0" and "GP27 / ADC1, POT-1" named the wrong pots.
+The *pins* were right (both are ADC-capable and both were pot-wired), so no behaviour was
+wrong — but the v4.28 bench procedure would have had the operator turning RV5/RV6 and seeing
+nothing move. GP26's pot **RV8 has now been removed** from the board and its footprint reused
+for the divider (pin 1 = GND, pin 2 = wiper/GP26, pin 3 = +3V3 left open); leaving it fitted
+would have put 10 kΩ across a 2.4 kΩ divider node and swamped the ratio. GP27 remains on RV7.
+`THERM_TEMP_FULLSCALE_DECIC` is untouched and still a placeholder. (2026-08-07)
+
+---
+
+### findings — the +20V rail is the correct pack-sense node, and the sense-divider error budget is dominated by the RP2040's own 3V3 reference
+
+Design pass behind the v4.29 divider above, from DESIGN §12 plus both schematic sheets. Three
+results worth keeping.
+
+**`+20V` is pack terminal voltage, with no diode drop to compensate.** D4 (1N4004) reads as a
+series element in the block description, but on sheet 1 it is a **shunt reverse-polarity
+clamp** — cathode on `+20V`, anode on GND, blowing F1 on reversal. So the sense node needs no
+forward-drop correction and, more importantly, does not drift with load current the way a
+series diode would between idle and streaming (a ~0.3 V, state-dependent error that would have
+been indistinguishable from the IR-drop effect §17.13 measured at 0.29 V). `+20V` is also
+downstream of SW3, so the divider draws nothing with the rig switched off. J11 pin 2 is the tap.
+
+**Sizing.** Ratio 1/9.148 puts full scale at 30.19 V nominal, so a 25.2 V pack sits at 83.5 %
+of range and the ADC pin cannot be over-driven until the input passes 30.2 V — above anything
+the board survives anyway. Thevenin 2.4 kΩ, drain 1.02 mA (10.5 mAh over a full 10.33 h
+session, 0.2 % of the pack), 23 mW in R_top. The pack-referred leakage error reduces to exactly
+**1 µA × R_top**, which is what caps R_top at ~22 kΩ rather than the 82 kΩ a drain-first choice
+would suggest. Filter poles at 66 Hz and 1.6 kHz give 237× rejection at a 5 kHz TX rate and
+5900× at 25 kHz, settling in 17 ms against the 1 Hz sample. Divider mounted at the MCU with
+only the stiff `+20V` lead crossing the board: putting R_top at the source end instead would
+have left a 2.4 kΩ node on a long wire beside a µV-scale front end.
+
+**Error budget, pack-referred at 25 V, after one-point calibration** — resistor *tolerance*
+does not appear, because a divider is perfectly linear and one-point calibration removes the
+ratio error across the whole range; only tempco survives. 3V3 LDO drift ±75 mV · resistor
+tempco mismatch (50 ppm/°C over 30 °C) ±38 mV · ADC leakage ±22 mV · RP2040 SAR DNL/INL ±30 mV ·
+quantisation ±7 mV → **RSS ≈ 92 mV**. That is comfortably sufficient for the 21.0 V failsafe,
+which is the whole reason v4.28 exists, but **marginal for placing the pack inside §12's
+21.5 / 23.3 / 24.0 V data-quality bands**, which want ±50 mV. The dominant term is the module's
+3V3 LDO serving as the ADC reference. If band placement is wanted from this channel, the fix is
+cheap and uses parts already on the board: divide the existing `5V-REF` (U5, LTC6655-5 —
+0.025 % initial, 2 ppm/°C) 10k/10k into spare GP29, and compute the pack ratiometrically. LDO
+drift then cancels entirely and RSS falls to ≈53 mV; it also lands the reference conversion at
+2.50 V, close to the pack's 2.75 V, so both sit on the same part of the SAR's transfer curve.
+Not built.
+
+Buffering with the spare LT6203 half was considered and rejected: U3 runs single-supply from
+**+12 V**, so its output could present 12 V to a 3.3 V ADC pin on any fault — not worth it for
+a 1 Hz housekeeping channel.
+
+**Unrelated observation on the same node, recorded because it was found here:** C18 is a
+4700 µF **25 V** part on `+20V`, and a fully-charged 6S pack is 25.2 V (§17.13 measured pack B
+at 25.04 V no-load). It runs at ~100 % of rating on a fresh pack, which ages an electrolytic
+quickly. A 35 V part is the obvious swap. Not acted on. (2026-08-07)
+
+---
+
 ### findings — the sub-0.5 V plateau has a negative lobe under it; the 3 mV bottom is a rail, not the floor
 
 Bench session 2026-08-05, `pimd_gui` v4.14 (title bar), Mode 1, 100.0 µs pulse / DS 256, pack
