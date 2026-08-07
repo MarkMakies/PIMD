@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Raw Logger v1.14
+# PIMD Raw Logger v1.15
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Deliberately dumb: loads a profile, streams it (Mode 2 dynamic profile,
@@ -28,6 +28,29 @@
 #   D<avg>;<freq_hz>,<pulse_us>,<d0>,...;… — define dynamic profile (same as delaycal)
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
+#   V                                      — identify; sent ONCE on connect (v1.15) to
+#                                            prime the sensor row before the first
+#                                            unsolicited 'P' arrives. Deliberately not
+#                                            polled periodically: this tool's whole point
+#                                            is that the logged stream is what the
+#                                            firmware sent unbidden, so nothing is
+#                                            injected once streaming is running. Pack and
+#                                            temperature then refresh from 'P' (~60 s),
+#                                            and a lockout announces itself on the wire.
+#
+# Records parsed on screen (v1.15). Everything is still written to the log file
+# verbatim regardless — parsing only feeds the sensor row, never the log:
+#   P<time_ms>,<pack_mV>,<board_temp_dC>   — unsolicited sensor telemetry, ~60 s
+#   V<fw>,<board>,…,<pack_mV>,<board_temp_dC>,<lockout>
+#                                          — fw / board id; the trailing three need
+#                                            firmware v4.28+
+#   PACK: / LOCKOUT / Command Input ERROR  — firmware messages, surfaced in the alert row
+#
+# board_temp_dC is deci-degrees C (x10 integer) from the DS18B20 on GP6 as of firmware
+# v4.33, and TEMP_INVALID_DC (-32768) on that field means NO READING — sensor absent,
+# unresponsive or CRC-failing. It is blanked on screen, never shown as a number; see
+# _update_sensors(). The pack SoC / zone maths is duplicated from pimd_gui.py rather
+# than imported, keeping each app standalone in the same way _build_d_command() is.
 #
 # Log format: one line per event, "<iso-timestamp> <RAW|NOTE|MARK|META> <text>",
 # interleaved in arrival order. RAW lines are copied byte-for-byte from the
@@ -50,6 +73,9 @@
 # bottom-right cell is the longest pulse width read at the longest delay.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.15 sensor row on screen — pack volts / SoC / zone, board temperature, firmware
+#         version and a firmware-alert line, at parity with pimd_gui.py; 'V' primed
+#         once on connect, sensors cleared on disconnect
 #   v1.14 settings persistence (port/target/distance/settle/warmup/geometry),
 #         matching the other PC apps
 #   v1.13 Place/Remove Target renamed to Acquire Target/Acquire Air (each
@@ -89,7 +115,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice  # noqa: E402
 from PyQt6.QtGui import QFontDatabase  # noqa: E402
 
-APP_VERSION = '1.14'
+APP_VERSION = '1.15'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_delaycal.py / pimd_classviz.py
 
@@ -109,6 +135,63 @@ TARGET_MARK_FIELDS = (
 )
 
 GRID_COL_WIDTH = 8   # chars per raw-µV cell -- covers signed 7-digit values
+
+# --------------------------------------------------------------------------
+# Pack / board-temperature display constants (v1.15).
+#
+# Duplicated from pimd_gui.py, not imported from it, for the same reason
+# _build_d_command() is duplicated from pimd_delaycal.py: every PC app in this
+# repo stands alone. The thresholds and captions must stay in step with
+# pimd_gui.py so the two apps never disagree about the same pack -- if you
+# retune one, retune both. Rationale for the numbers themselves lives in
+# pimd_gui.py / DESIGN §12 and is not restated here.
+#
+# The COLOURS deliberately differ: pimd_gui.py's are gauge fills behind dark
+# text, so it uses pale mint/yellow. Here they colour the text itself, where
+# those pales are illegible, so the clean-window and transition entries are
+# darkened to their readable equivalents. Same zones, same captions.
+# --------------------------------------------------------------------------
+N_CELLS = 6
+SOC_NOMINAL = [(4.20, 100), (4.15, 95), (4.11, 90), (4.06, 85), (4.02, 80),
+               (3.98, 75), (3.95, 70), (3.91, 65), (3.87, 60), (3.83, 55),
+               (3.80, 50), (3.77, 45), (3.75, 40), (3.72, 35), (3.70, 30),
+               (3.67, 25), (3.63, 20), (3.57, 15), (3.49, 10), (3.35, 5), (3.00, 0)]
+
+# (upper bound mV, text colour, short caption)
+PACK_ZONES = (
+    (21_000, '#f66151', 'LOCKOUT floor'),
+    (21_500, '#ff8c00', 'below window'),
+    (23_300, '#26a269', 'clean window'),
+    (24_000, '#c08800', 'transition'),
+    (99_999, '#ff8c00', 'above ceiling'),
+)
+
+TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
+                                # "no reading" sentinel (fw v4.33 sends -32768).
+                                # Threshold, not equality -- see pimd_gui.py.
+
+
+def pack_soc_pct(pack_mV):
+    """Loaded pack millivolts → SoC %, piecewise-linear on SOC_NOMINAL."""
+    if pack_mV is None:
+        return None
+    vcell = pack_mV / 1000.0 / N_CELLS
+    if vcell >= SOC_NOMINAL[0][0]:
+        return 100.0
+    if vcell <= SOC_NOMINAL[-1][0]:
+        return 0.0
+    for (v1, s1), (v2, s2) in zip(SOC_NOMINAL, SOC_NOMINAL[1:]):
+        if v2 <= vcell <= v1:
+            return s2 + (s1 - s2) * (vcell - v2) / (v1 - v2)
+    return 0.0
+
+
+def pack_zone(pack_mV):
+    """Pack millivolts → (text colour, short caption) per PACK_ZONES."""
+    for upper, colour, caption in PACK_ZONES:
+        if pack_mV <= upper:
+            return colour, caption
+    return PACK_ZONES[-1][1], PACK_ZONES[-1][2]
 
 
 def _build_d_command(profile):
@@ -197,6 +280,14 @@ class MainWindow(QMainWindow):
         self._streamed_s = 0.0
         self._last_w_ms = None
 
+        # Sensor / identity state (v1.15). All None until the firmware says
+        # otherwise, so the row reads '—' rather than a plausible-looking zero.
+        self._pack_mV = None
+        self._board_temp_dC = None      # None also means "sentinel seen", i.e. no reading
+        self._pack_lockout = False
+        self._fw_version = None
+        self._board_id = None
+
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -209,6 +300,36 @@ class MainWindow(QMainWindow):
         self.pb_connect.clicked.connect(self._on_connect_clicked)
         conn_row.addWidget(self.pb_connect)
         root.addLayout(conn_row)
+
+        # Sensor row (v1.15) -- the rig's standing state, at parity with
+        # pimd_gui.py's gauges. Rendered as text rather than painted gauges to
+        # stay in keeping with this tool: it is deliberately dumb, and a number
+        # you can read off and copy into a note beats a bar you have to eyeball.
+        sensor_row = QHBoxLayout()
+        self.lbl_pack = QLabel('Pack: —')
+        self.lbl_pack.setToolTip(
+            'Pack voltage, state of charge and zone, from the firmware\'s P/V\n'
+            'telemetry (22k/2k7 divider on GP26, fw v4.29+). SoC is a fuel-gauge\n'
+            'indicator read under load, not a calibrated runway number.\n'
+            'Refreshes every ~60 s while connected.')
+        sensor_row.addWidget(self.lbl_pack)
+        sensor_row.addSpacing(16)
+        self.lbl_temp = QLabel('Board: —')
+        self.lbl_temp.setToolTip(
+            'Board temperature from the firmware (P/V telemetry).\n'
+            'DS18B20 1-Wire sensor on GP6, factory-calibrated to ±0.5 °C\n'
+            '(fw v4.33+); reported to 0.1 °C and refreshed every 30 s.\n'
+            'Shows — when the sensor is absent, unresponsive or CRC-failing.')
+        sensor_row.addWidget(self.lbl_temp)
+        sensor_row.addSpacing(16)
+        self.lbl_fw = QLabel('FW: —')
+        self.lbl_fw.setToolTip('MCU firmware version, from the V identify reply.')
+        sensor_row.addWidget(self.lbl_fw)
+        sensor_row.addSpacing(16)
+        self.lbl_alert = QLabel('')
+        self.lbl_alert.setStyleSheet('color: #f66151;')
+        sensor_row.addWidget(self.lbl_alert, 1)
+        root.addLayout(sensor_row)
 
         profile_row = QHBoxLayout()
         self.pb_load_profile = QPushButton('Load Profile')
@@ -327,6 +448,7 @@ class MainWindow(QMainWindow):
             self.serial.close()
             self.pb_connect.setText('Connect')
             self.pb_start.setEnabled(False)
+            self._clear_sensors()
             self._log('Disconnected.')
             return
         port = self.le_port.text().strip()
@@ -342,6 +464,11 @@ class MainWindow(QMainWindow):
             self.pb_connect.setText('Disconnect')
             self.pb_start.setEnabled(self._profile is not None)
             self._log(f'Connected on {self.le_port.text().strip()}.')
+            # Prime the sensor row (v1.15). Without this the pack/temp fields sit
+            # blank for up to a minute, until the first unsolicited 'P' lands.
+            # Sent while the rig is idle, before any streaming, so it cannot
+            # interleave with the acquisition stream.
+            self.send_command('V')
         else:
             self._log(f'Failed to open {self.le_port.text().strip()}: '
                        f'{self.serial.errorString()}')
@@ -546,6 +673,64 @@ class MainWindow(QMainWindow):
                     self._update_settle(channels)
                     self._update_grid_display(channels)
 
+            elif raw.startswith('P') and raw[1:2].isdigit():
+                # Unsolicited pack / board-temp telemetry (firmware v4.28+):
+                # P<time_ms>,<pack_mV>,<board_temp_dC>
+                #
+                # The isdigit() guard is load-bearing, and is the bug pimd_gui.py
+                # v4.17 was cut to fix -- do not simplify it away. A bare
+                # startswith('P') also matches every firmware MESSAGE beginning
+                # with P: 'PACK: rail absent ...', 'PACK: present again ...' and
+                # the 'Pulse Induction Metal Detector v...' boot banner. Those
+                # split on commas into an IndexError once per pack power-cycle.
+                # A record always has a digit after the tag (it is <time_ms>);
+                # a message never does.
+                parts = raw[1:].split(',')
+                try:
+                    self._update_sensors(int(parts[1]), int(parts[2]))
+                except (IndexError, ValueError) as e:
+                    self._log(f'Sensor packet parse error: {e} -- {raw}')
+
+            elif raw.startswith('PACK:'):
+                # Pack presence / failsafe-arming transitions (firmware v4.31-v4.32).
+                # 'PACK: present again at N mV — lockout cleared ...' is the ONLY
+                # line that retires a latch, so it is matched explicitly. Note it
+                # contains the word "lockout" while meaning the opposite -- a
+                # substring test for 'lockout' across all firmware messages would
+                # latch on this one and invert the state.
+                if 'lockout cleared' in raw:
+                    self._pack_lockout = False
+                    self._refresh_sensor_labels()
+                self._set_alert(raw)
+
+            elif raw.startswith('V'):
+                # Identify reply. Fields 0/1 are firmware version and board ID and
+                # are present on every revision; fields 8..10 are pack_mV /
+                # board_temp_dC / lockout and need firmware v4.28+, so older
+                # firmware simply leaves the sensor row blank.
+                parts = raw[1:].split(',')
+                # A bad value would sit in the label indefinitely rather than
+                # scrolling past, so require it to look like a version first.
+                if parts and parts[0].replace('.', '').isdigit():
+                    self._update_fw_identity(parts[0],
+                                             parts[1] if len(parts) > 1 else None)
+                    if len(parts) >= 11:
+                        try:
+                            self._update_sensors(int(parts[8]), int(parts[9]),
+                                                 bool(int(parts[10])))
+                        except ValueError as e:
+                            self._log(f'Identify parse error: {e} -- {raw}')
+
+            elif raw.startswith('LOCKOUT') or raw.startswith('Command Input ERROR'):
+                # A rejected config, or the v4.28 low-voltage failsafe latching.
+                # Both need saying out loud. Only the two that actually name a
+                # latched lockout set the flag -- a rejected pulse config is just
+                # a complaint and must not colour the pack readout red.
+                if raw.startswith('LOCKOUT') or 'lockout latched' in raw:
+                    self._pack_lockout = True
+                    self._refresh_sensor_labels()
+                self._set_alert(raw)
+
             if self._awaiting_d_ready:
                 if raw.startswith('D OK'):
                     self._awaiting_d_ready = False
@@ -565,6 +750,74 @@ class MainWindow(QMainWindow):
                     self.pb_start.setEnabled(True)
                     self.pb_resume.setEnabled(True)
                     self.pb_load_profile.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Sensor row -- pack / board temperature / firmware identity (v1.15)
+    # ------------------------------------------------------------------
+    def _update_sensors(self, pack_mV, board_temp_dC, lockout=None):
+        """Apply a pack / board-temp reading to the sensor row.
+
+        board_temp_dC may be the firmware's "no reading" sentinel (see
+        TEMP_INVALID_MAX_DC). It is resolved to None once, here, so the display
+        never sees the raw sentinel and can never print -3276.8 °C as though it
+        were a temperature. The log file is untouched either way -- it already
+        holds the firmware's own line, sentinel and all, which is what a later
+        offline pass should be reading."""
+        self._pack_mV = pack_mV
+        valid_temp = board_temp_dC > TEMP_INVALID_MAX_DC
+        self._board_temp_dC = board_temp_dC if valid_temp else None
+        if lockout is not None:
+            self._pack_lockout = lockout
+        self._refresh_sensor_labels()
+
+    def _refresh_sensor_labels(self):
+        if self._pack_mV is None:
+            self.lbl_pack.setText('Pack: —')
+            self.lbl_pack.setStyleSheet('')
+        else:
+            colour, caption = pack_zone(self._pack_mV)
+            soc = pack_soc_pct(self._pack_mV)
+            if self._pack_lockout:
+                colour, caption = '#f66151', 'LOCKED OUT'
+            self.lbl_pack.setText(
+                f'Pack: {self._pack_mV / 1000.0:.2f} V · {soc:.0f}% · {caption}')
+            self.lbl_pack.setStyleSheet(f'color: {colour}; font-weight: bold;')
+
+        if self._board_temp_dC is None:
+            self.lbl_temp.setText('Board: —')
+        else:
+            self.lbl_temp.setText(f'Board: {self._board_temp_dC / 10.0:.1f} °C')
+
+    def _update_fw_identity(self, fw_version, board_id=None):
+        self._fw_version = fw_version
+        self._board_id = board_id
+        self.lbl_fw.setText(f'FW: v{fw_version}')
+        if board_id:
+            self.lbl_fw.setToolTip(
+                f'MCU firmware version, from the V identify reply.\nBoard ID: {board_id}')
+
+    def _clear_sensors(self):
+        """Forget everything the board told us, so a stale reading cannot outlive
+        the connection it came from."""
+        self._pack_mV = None
+        self._board_temp_dC = None
+        self._pack_lockout = False
+        self._fw_version = None
+        self._board_id = None
+        self._refresh_sensor_labels()
+        self.lbl_fw.setText('FW: —')
+        self.lbl_fw.setToolTip('MCU firmware version, from the V identify reply.')
+        self.lbl_alert.setText('')
+
+    def _set_alert(self, text):
+        """Post a firmware message to the alert row. Unlike pimd_gui.py these do
+        not self-clear: this is a logging tool that gets left running unattended,
+        and a PACK:/LOCKOUT event that scrolled away unseen is exactly the thing
+        you need to know about when you come back to the bench. The activity
+        pane below keeps the full timestamped history."""
+        self.lbl_alert.setText(text)
+        self.lbl_alert.setToolTip(text)
+        self._log(text)
 
     # ------------------------------------------------------------------
     # Grid display -- last streamed frame, band x delay layout (see the

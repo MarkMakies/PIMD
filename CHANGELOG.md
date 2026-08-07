@@ -1,3 +1,51 @@
+### src/pimd_rawlog.py — v1.15 — pack volts, board temperature, firmware version and firmware alerts on screen
+
+Reported from the bench: the raw logger shows no pack voltage or board temperature. Verified
+first against a real 2 m 45 s session (`rawlog_20260807_190829.txt`) that the data was being
+*captured* correctly — two `P` records, 60.084 s apart against the firmware's
+`SENSOR_REPORT_MS = 60_000`, carrying 22.138 V / 51.3 °C and 22.126 V / 50.0 °C, both real
+readings rather than the `TEMP_INVALID_DC` sentinel. So this was never a logging or firmware
+fault: the tool wrote every line faithfully and simply never looked at any of them. Its parser
+branched on `W` and `D OK` only, and there was no `P` branch anywhere in the file.
+
+Adds a sensor row under the port field, at information parity with `pimd_gui.py`'s gauges: pack
+volts with SoC % and zone caption, board temperature, firmware version (board ID on the tooltip),
+and an alert line for `PACK:` / `LOCKOUT` / `Command Input ERROR`. Rendered as **text, not
+painted gauges** — this tool is deliberately dumb, and a number you can read off and paste into a
+Note beats a bar you have to eyeball. The SoC/zone maths is duplicated from `pimd_gui.py` rather
+than imported, keeping each PC app standalone exactly as `_build_d_command()` already is; a
+parity test over 19–26 V confirms the two agree to the percent and the caption. Only the zone
+*colours* differ, and deliberately: the GUI's are pale fills sitting behind dark text, which are
+illegible as text colours, so the clean-window and transition entries are darkened.
+
+`V` is sent **once, on connect**, to prime the row rather than leave it blank for up to a minute
+until the first unsolicited `P`. It is deliberately not polled on a timer: the whole value of this
+tool is that the logged stream is what the firmware sent unbidden, so nothing is injected once
+streaming is running. Pack and temperature then refresh from `P` every ~60 s, and a lockout
+announces itself on the wire. Sensors are cleared on disconnect so a stale reading cannot outlive
+the connection that produced it. **The log file format is unchanged** — parsing feeds the display
+only, and every line is still written verbatim, sentinel and all, which is what an offline pass
+should be reading.
+
+Two traps taken directly from `pimd_gui.py` v4.17's scars. The `P` branch is guarded with
+`raw[1:2].isdigit()`, because a bare `startswith('P')` also matches `PACK:` messages and the
+`Pulse Induction Metal Detector v…` boot banner. And the lockout latch is matched narrowly
+(`LOCKOUT:` or the literal `lockout latched`) rather than by a substring test for `lockout`,
+which would have caught `PACK: present again at … mV — lockout cleared …` and latched the state
+that line exists to retire — an inversion caught during review, before it reached the bench.
+That message now explicitly *clears* the latch.
+
+Tested headlessly by feeding lines through the real `read_from_serial()` dispatch with a stubbed
+port: the session's own two `P` records render correctly; the boot banner and all `PACK:`
+variants leave the pack reading untouched and raise no parse error; the `-32768` sentinel blanks
+the field while a genuine −55 °C still displays; `V` primes all fields and 8-field pre-v4.28
+firmware leaves them blank; a plain rejected config alerts without latching while `LOCKOUT:` and
+a latch-naming `ERROR` both latch; the `W` grid path is unaffected. Replaying all 671 `RAW` lines
+of the real session leaves the last record's 22.13 V / 50.0 °C on screen with zero parse errors.
+(2026-08-07)
+
+---
+
 ### src/pimd_gui.py — v4.17 — FIX the `P` record parse also matched `PACK:` messages, so the GUI has never shown a failsafe transition
 
 Reported from the bench: `Sensor packet parsing error: list index out of range`, appearing once
