@@ -1,3 +1,54 @@
+### utilities/decay_model/decaymodel.py — v5 — model refitted to the scope; below-rail reconstruction; file halved
+
+**The model is now measured rather than inferred.** v1–v4 fitted air to the calibrated `cal_63`
+ladder, which only samples the volt-scale region, then extrapolated past it — the failure already
+recorded on 2026-08-07, where fits agreeing with that ladder to ≤ 2 % predicted anywhere from
++64 to −400 mV at sd 14.7 µs. v5 drops the ladder and fits the 2026-08-08 scope capture of the
+LT6203 input, which covers the whole decay including the part the ADC cannot see.
+
+Two real poles with opposite-sign residues plus the measured quiescent DC,
+`s(t) = A·exp(−t/τf) − B·exp(−t/τs)`:
+
+| | |
+|---|---|
+| τ_fast | **1.125 µs** |
+| τ_slow | **2.270 µs** (ratio 2.02) |
+| ζ | **1.06 — mildly overdamped** |
+| residual vs the scope | **RMS 0.87 mV**, max 2.70 mV, over 894 points |
+| single zero crossing | sd 13.92 µs modelled, ~14.0 µs measured |
+
+**The component values it implies are an independent check, not an input, and they land.** With
+R1 = 1.3 k: **C = 579 pF, L = 4.41 mH, √(L/C) = 2762 Ω → R_crit = 1381 Ω**, against DESIGN §7's
+*measured* 1300–1400 Ω critical-damping value, and L close to the stale 3.9 mH. Two quantities
+measured years apart by different means agreeing to a few per cent is the reason to trust this
+fit. It also supersedes the "ζ = 1.00" of 2026-08-07 for the reason given there: that came from
+assuming the critically-damped form and fitting τ = 2RC to it, which cannot report anything else.
+
+**Below-rail reconstruction added.** The scope measures the input, where nothing is clipped, so
+multiplying by the input→ADC gain (1.149, from the two quiescent levels) gives what the ADC
+*would* have recorded with no output floor. Air really reaches **−16.9 mV in ADC terms** — against
+a recorded 2.441 mV — and is below the rail for **4.21 µs, sd 14.23–18.44**. The figure draws that
+explicitly, shaded, so the difference between what the instrument records and what the front end
+does is visible rather than argued.
+
+The chart is rebuilt around that: full span in ADC terms with the reconstruction and the three
+measured classes; the null with the hidden region shaded; and a residual panel, which shows the
+one place the model is imperfect — it runs a mean **−0.59 mV** below the measured tail over sd
+25–98 µs, i.e. the slow pole is slightly too fast. Left as-is and reported rather than patched
+with a third term.
+
+**Comments cut roughly in half** at the same time: **1023 → 489 lines**, 35 comment lines. The
+removed material was historical justification that has since been settled and is recorded here —
+why the anchors went, why the plateau path exists, what each earlier version got wrong. What is
+kept is the load-bearing kind: why the probe column is chosen from the data, why roles come from
+`material_class`, why smoothing trims its ends. Three fixes fell out of the rebuild, all
+artefacts of my own plotting rather than the data: the MCLK ring was not masked in the wide
+capture, `np.convolve(mode="same")` tapered the trace ends toward zero and invented a step, and
+smoothing spanned the masked ring gap. Verified across model-only, bracketed-session and
+plateau-fallback runs. (2026-08-08)
+
+---
+
 ### findings — a ferrous target fills the null in completely, and railed cells under-report target deltas
 
 Follow-up to the entry below, same scope session and settings (DHO1204, CH1 = LT6203 input,
@@ -122,6 +173,88 @@ on that edge and would capture the kick. (2026-08-08)
 
 ---
 
+### findings — first dense sweep: the lobe resolved, the polarity split located, and the ladder is ~0.4 µs off for this pack state
+
+`rawlog_20260808_145702.txt`, 100 µs / 2 kHz, 68 cells, fw 4.33, 711 frames, pack **24.13 → 24.04 V**.
+First capture with the bracketed logger (`pimd_rawlog` v1.16) and the dense sweep: air / copper
+pipe / air / steel spanner / air, 20 frames each, all `complete=yes`, **targets at 0 mm** (resting
+on the coil). Every segment read from its own brackets — no inference.
+
+**Air, resolved.** Clamped through sd 7.168 µs; 4950.9 mV at 7.568; **44.4 mV at 14.264 → 9.1 at
+14.864**; bottoms at **2.437–2.441 mV across sd 15.46–16.66 µs**; 3.66 at 17.26; 5.19 at 21.6;
+10.18 at 23.6; 15.27 at 30.8; settles at **16.472 mV** from ~37 µs and holds to 311.7 µs.
+
+Three numbers that were previously estimates are now measurements:
+
+- **The air pedestal crossing is at sd ≈ 14.64 µs** (log-interpolated between the two bracketing
+  cells), against the session's own settled level of 16.472 mV rather than the §14 constant.
+- **The rail flat is ≥ 1.2 µs wide** — three consecutive cells at 2.437/2.441/2.441 mV with σ
+  exactly 0. The 2026-08-05 hand-read estimate off a live trace was 0.5–1 µs; it is wider than
+  that. Note 17.264 and 19.760 µs also have σ = 0 but sit at 3.662 and 4.272 mV — 6 and 7 LSB of
+  the 610.35 µV raw quantum, so those are quantisation-locked, not saturated.
+- **Air does not reach the pedestal until ~37 µs**, far later than the ~21 µs the v1 model implied.
+
+**The polarity split is located, and it is a window, not a column.** Steel and copper carry
+opposite signs across **sd 7.968–12.304 µs**, widest at **9.568 µs: steel +46.5 mV, copper
+−74.4 mV**. Past that the copper delta itself **crosses zero at sd ≈ 12.425 µs** and both targets
+read positive thereafter. That crossing is a per-material coordinate the 2026-08-07 capture could
+not see at all — it had two usable pre-rail cells and this has 26.
+
+**Copper overtakes steel at ~44 µs** and stays ahead: at sd 311.7 µs copper is **+1.375 mV** over
+air against steel's **+0.036 mV**, on a 0.08 mV air σ. Same ordering as 2026-08-07 (crossover
+~77 µs there, at 60 mm) — the crossover moves with coupling, which is worth a controlled distance
+series rather than an inference from two points.
+
+**Actionable: the ladder is positioned ~0.4 µs early for this pack state.** The crossing region
+was placed against the 2026-08-07 measured rail of 14.712 µs, but at 24.13 V the rail sits at
+15.46–16.66 µs and the crossing at 14.64 µs — so the fine 0.16 µs cells end at 14.224 and the
+crossing falls in the **0.600 µs gap** to the first rail-region cell. It was still bracketed to
+0.6 µs, which is why the number exists at all, but the region should follow the pack. The
+2026-08-07 session ran at **22.04 V**; ~2 V of pack moved the features ~1–2 µs later, which is
+larger than the crossing region is wide. `MEASURED_RAIL_US` in the generator is therefore a
+pack-state-specific constant, not a band constant, and should be re-derived per epoch — or the
+region widened to cover the range. **Not changed here**; it needs a deliberate decision about
+which pack state the profile is centred on.
+
+Also note the capture used a superseded 68-cell ladder (the live file is now 66) and its `META`
+name field reads `late / target` from the v2 shadowing bug, so the log cannot identify its own
+ladder. Reconstructed and verified as `sweep_100us_asbuilt_20260808.json` — 68 cells, clamped and
+railed cells landing exactly where the regions predict — so the capture stays analysable.
+(2026-08-08)
+
+---
+
+### utilities/decay_model/decaymodel.py — v4 — roles from `material_class`, probe column chosen from the data, figure text de-hard-coded
+
+Running v3 against the first dense capture surfaced four defects, three of which produced wrong
+output rather than an error.
+
+1. **Ferrous/non-ferrous roles were assigned by insertion order.** This session presented copper
+   first, so copper was painted with the ferrous colour and the crossover search looked for a sign
+   change in the wrong direction and returned `nan`. Roles now come from the log's own
+   `material_class` field, which `pimd_rawlog` already writes into every target marker. A target
+   with no `material_class` is reported and treated as non-ferrous for colouring only.
+2. **The probe column for the plateau fallback was hard-coded to index 3.** That is a good
+   post-rail cell in `cal_110`'s 150 µs band and a **clamped** cell in the 100 µs sweep — constant,
+   no excursion to find, so the whole session became one active run and there were no air frames
+   left, crashing. The column is now chosen from the data as the best excursion-to-MAD ratio among
+   unclamped, non-constant columns.
+3. **Figure text was hard-coded to the first dataset** — "targets at 60 mm", "2026-08-07 session",
+   and a fixed rail value. All now derived from the session: distance and material from the MARK
+   fields, date from the first frame, rail and crossing from the data.
+4. **`order[2]` assumed exactly two target classes**, crashing on a single-target session.
+
+Also adds the air pedestal crossing to the printout — the coordinate the dense ladder exists to
+measure — computed against the session's own settled level rather than `PEDESTAL_MV`, since that
+constant is a 2026-08-03/05 figure and this session settles at 16.472 mV. The polarity-split
+search judges significance against the **settled-region** noise, not air's per-frame σ at the
+cell: on the steep pre-rail slope that σ is slope × timing jitter (26 mV here, §14.3) and a
+3σ gate on it rejects a genuine +46 / −74 mV split. Verified against four inputs — the real
+bracketed session, a plateau fixture (end markers stripped), a single-target fixture, and
+model-only. (2026-08-08)
+
+---
+
 ### utilities/decay_model/make_sweep_profile.py — v3 — cal_110 anchors dropped, crossing region tightened, junctions guarded; both profiles regenerated
 
 **The anchors are gone, and the rule that put them there was wrong.** v1/v2 forced the eleven
@@ -198,6 +331,44 @@ measured feature, and inventing one would be the same error as cal_110's thresho
 Regenerating at 100 µs gives 72 valid cells, all 11 anchors present, drive duty 13107 fixed, last
 cell sd 311.736 µs → `pulse+delay+0.904` = 412.6 µs of 500. `--pulse 150` still reproduces v1's
 output exactly (shift 0.000). (2026-08-08)
+
+---
+
+### utilities/decay_model/decaymodel.py — v3 — `--session` prefers the log's acquire/end brackets; plateau detection becomes the fallback
+
+Completes the loop opened by `pimd_rawlog` v1.16. `load_session()` now has two segmentation
+modes and picks by what the log contains, so a recorded extent is never quietly replaced by an
+inferred one:
+
+- **bracketed** — taken whenever the log has any `MARK acquire end` line. Each acquisition is
+  read verbatim between its own start and end markers, repeated segments of one label are
+  concatenated (two air captures either side of a target become one air set), and nothing is
+  inferred at all.
+- **plateau** — the v2 behaviour, kept unchanged for pre-v1.16 logs, which have no end markers
+  and where the extent genuinely has to be recovered from the probe cell.
+
+The mode is returned, printed in the header, and stated on the figure, so the two can never
+disagree silently — a log either has brackets or it does not.
+
+**The bracketed path checks the log against itself rather than trusting it.** The end marker
+states `frames=`; the reader counts the frames actually inside the bracket and warns on any
+mismatch, because silently believing either number would be the same class of mistake the
+brackets exist to remove. It also warns on `complete=no` (keeping the data, labelled short, with
+the reason), on an end marker naming a different target than its start, on end markers with no
+start, and on a start left open at EOF — which is **skipped**, not guessed at.
+
+Frame selection is `start < t <= end`: the start marker is written before any frame is counted
+and the end marker just after the last one, so that half-open form recovers exactly the captured
+set. Verified by re-marking the 2026-08-07 session at the plateau boundaries and running both
+paths over it — **the bracketed reader reproduces the plateau means exactly** (61 and 70 frames,
+`allclose` on all 11 cells), which is the check that says the new path is right rather than
+merely different. The integrity warnings were each provoked deliberately and confirmed to fire,
+and the unclosed-start case confirmed to skip the segment rather than include a partial one.
+
+Also adds `--profile` (default `cal_110_full_range_v4`) so a session streamed with
+`sweep_150us_decay_v1` can be read with the right channel layout — v2 had the profile name
+hard-coded, which would have mis-sliced the channel vector for any other profile. No change to
+the model, the fit, or the figure's construction. (2026-08-08)
 
 ---
 
@@ -828,7 +999,199 @@ quickly. A 35 V part is the obvious swap. Not acted on. (2026-08-07)
 
 ---
 
+### findings — the RX network is critically damped and the undershoot is not it; damping is the wrong knob for a second reason
+
+Follow-up to the "CORRECTION: the negative lobe is real" entry below, answering "was the model wrong because we are still
+underdamped?" Offline, no bench time. Three separate results.
+
+**1. Why the v1 extrapolation failed: it was unconstrained, not merely inaccurate.** Fitting
+`A·exp(−t/τ_f) − B·exp(−t/τ_s)` to the same four calibrated columns with τ_s pinned at a series
+of values gives fits that agree with the data to **≤ 2 %** while predicting anything from
+**+64 mV to −400 mV** at sd 14.7 µs:
+
+| τ_s (µs) | τ_f (µs) | worst residual | predicted V(14.7 µs) |
+|---:|---:|---:|---:|
+| 1.5 | 1.50 | 9.3 % | +64 mV |
+| 2.0 | 2.00 | 8.0 % | +19 mV |
+| 3.0 | 2.99 | 2.6 % | −180 mV |
+| 5.0 | 2.75 | 2.0 % | −302 mV |
+| 8.0 | 2.47 | 2.0 % | −336 mV |
+| 30.0 | 2.27 | 2.1 % | −400 mV |
+
+A ~2 % difference in fit quality moves the extrapolation by 460 mV. Sums of exponentials are
+famously ill-conditioned and four points over 0.88 decades cannot separate them; the
+critically-damped form v1 chose (+38.6 mV) is one member of that family, not the answer, and the
+measurement (at or below the 2.441 mV rail) sits inside the family's spread. **The v1 entry
+should have quoted the spread and did not.** The lesson is not "fit harder" — it is that this
+region needs samples, and it does not have them: between clip release and the rail,
+`cal_110_full_range_v4` places exactly **two** columns on the 150 µs band (7.904 and 10.912 µs)
+and two on the 100 µs band (7.528 and 10.496 µs). Two points cannot constrain a decay.
+
+**2. The network is critically damped, and the arithmetic closes on itself.** For the parallel
+RLC (R1 shunting the coil, C its self-capacitance): α = 1/(2RC), ω₀ = 1/√(LC),
+ζ = α/ω₀ = √(L/C)/(2R), and at ζ = 1 the response is `(a + b·t)·exp(−t/τ)` with τ = 2RC — which
+is the form that fitted the ladder to ±0.84 %. Taking the measured τ = 0.920 µs and
+R1 = 1.30 kΩ: **C = τ/2R = 354 pF**, ω₀ = 1/τ = 1.087×10⁶ rad/s (**f₀ = 173 kHz**),
+**L = 1/(ω₀²C) = 2.39 mH**, so **√(L/C) = 2600 Ω** and **R_crit = ½√(L/C) = 1300 Ω** — against
+DESIGN §7's independently *measured* 1300–1400 Ω, and against the fitted R1 of 1300 Ω. **ζ = 1.00.**
+Two of those numbers were measured on the bench years apart by different means and they agree, so
+this is a real check, not a tautology. It also puts a value on §7's outstanding "re-measure RX
+self-resonance to pin L and C" item: **354 pF / 2.39 mH, inferred from the decay rather than from
+a resonance**, and worth confirming against the direct measurement when it happens. (The stale
+figures were 311 pF / 3.9 mH — the capacitance was close; the inductance was not.)
+
+**3. The undershoot cannot be the coil, by a factor of 7000.** The coil transient decays with
+τ = 0.92 µs from ~4.7 V at clip release (sd 7.9 µs). By sd 21.9 µs that is 15.2 time constants,
+leaving **1.2 × 10⁻³ mV**. The measured deviation from the settled level there is **−8.45 mV** —
+7341× more than the network can still supply. By sd 43.9 µs, where air has only just reached the
+pedestal, the coil term is 5 × 10⁻¹⁴ mV. Underdamping would not rescue this: at ζ = 0.9 the ring
+is 75 kHz and each half-cycle is attenuated ×1.5 × 10⁻³, so the visible consequence is one small
+undershoot ~3 µs after the crossing and nothing after — not a lobe bottoming at 15 µs and taking
+until 44 µs to clear. **So the answer to "are we still underdamped" is no, and the reasoning that
+R1 is the wrong knob (2026-08-05 entry) survives the correction intact — for a stronger reason
+than the one given then.**
+
+**4. And it is not a linear network response at all.** From the recovery, −8.45 mV at sd 21.88 µs
+to −0.97 mV at sd 30.99 µs, the undershoot's own time constant is **τ ≈ 4.2 µs**, 4.6× the coil's.
+A linear network released at t = 0 has every mode present from t = 0, so that component
+back-extrapolates to **−114 mV at sd 10.912 µs — 13 % of the 876 mV signal there** — whereas the
+ladder fit agrees with measurement to ~3 % at that delay. **The component was not there yet.**
+A term that switches on late is the signature of a recovery from saturation, not of an RLC being
+released. That is consistent with the LT6203 overload-recovery hypothesis and inconsistent with
+any passive coil-network explanation, but it is a deduction from two fitted points and a 3 %
+agreement across two epochs, so it is **suggestive, not settled** — the scope at the preamp output
+is still the instrument that decides. Note also that target-sensitivity does **not** discriminate
+here: overload recovery depends on how hard the stage was overloaded, so a target that changes the
+drive changes the recovery too, which is why the +7.12 mV the spanner adds at sd 21.9 µs is weaker
+evidence than it looks. (2026-08-07)
+
+---
+
+### findings — CORRECTION: the negative lobe is real, it is in air, and it is on every band
+
+Supersedes the conclusion of the entry below it (2026-08-05, "the calibrated ladder puts the air
+decay at ~60 mV where 3 mV was reported"). That entry argued from a ladder fit that the coil
+network had no room for the reported undershoot and leaned toward amplifier recovery. The
+2026-08-07 session measures air directly across the whole delay sweep and **the undershoot is
+there, in air, on all ten bands.** The argument was wrong; the fit that produced it was fine
+inside its own range and simply does not extrapolate.
+
+Source: `src/data/sessions/rawlog_20260807_194234.txt`, Mode 2 W5 stream over
+`cal_110_full_range_v4` (10 bands × 11 delays), fw 4.33, 4.07 Hz, 562 frames, 138 s.
+
+**What air actually does on the 150 µs / 2 kHz band** (n = 222 frames, σ ≤ 0.18 mV on every
+post-rail cell): 4698.9 mV at sd 7.904 µs → 891.7 at 10.912 → **2.441 at 15.448** → 7.40 at
+21.880 → 14.88 at 30.992 → 16.14 at 43.888, then a slow sag to 15.86 at 250 µs. The fit
+predicted 30 mV at 15.448 µs. On the 100 µs band air reads **2.441 mV at sd 14.712 µs** — the
+2026-08-05 session's "flat 3 mV bottom around sd 14 µs", reproduced to the delay. Every band
+bottoms out between 2.441 and 4.272 mV somewhere in sd 11.7–16.0 µs, and the bottom moves only
+weakly with pulse width (12.3 µs at 4 µs drive, 15.4 µs at 150 µs drive) — a feature nearly
+fixed in absolute time after turn-off, which is worth explaining but is not explained here.
+
+**2.441 mV is the rail, and the evidence is now direct.** Its σ is exactly 0.000 across every
+frame of every class — air, spanner and copper all read the identical code. 2441 µV is 4 × the
+raw path's 610.35 µV LSB (5 V / 8192), so it is not an ADC zero code either. **The 15.448 µs
+column of the 150 µs band is a dead cell: it cannot respond to any target.** Same for the
+100 µs band's 14.712 µs column.
+
+**Where the fit does and does not hold.** At sd 10.912 µs the fit gives 848 mV against 892
+measured (−5 %), and it is ±0.84 % on the four columns it was fitted to (sd 8.4–11.3 µs). Past
+~11 µs it diverges hard. So the correct statement is narrow: *the calibrated ladder constrains
+the decay only over the volt-scale region it samples, and says nothing about what happens below
+0.5 V.* The 2026-08-05 entry's supporting arguments — that ~400× rescaling would be needed, that
+a two-pole negative term wide enough to reach the rail could not recover by 20 µs — were
+reasoning from that same over-extended fit and should not be relied on. What remains open is
+unchanged and still needs a scope at the preamp output: whether the lobe is the coil network or
+LT6203 overload recovery. **This session does not settle it** — see below, it argues weakly the
+other way.
+
+**Targets: the polarity convention lives entirely on the pre-rail cells.** Two targets at 60 mm,
+window means over the plateau of each presentation:
+
+| sd (µs) | air | Δ steel spanner (271 g) | Δ copper pipe (122 g) |
+|---:|---:|---:|---:|
+| 7.904 | 4698.9 | **+10.8** | **−15.1** |
+| 10.912 | 891.7 | **+24.8** | **−12.7** |
+| 15.448 | 2.441 | +0.000 | +0.000 |
+| 21.880 | 7.40 | +7.12 | +2.46 |
+| 30.992 | 14.88 | +3.46 | +1.29 |
+| 43.888 | 16.14 | +1.95 | +1.15 |
+| 62.152 | 16.13 | +1.19 | +0.91 |
+| 88.016 | 16.04 | +0.63 | +0.81 |
+| 124.648 | 15.97 | +0.35 | +0.63 |
+| 176.528 | 15.90 | +0.15 | +0.51 |
+| 250.000 | 15.86 | +0.09 | +0.40 |
+
+Three results in that table. **(1)** §17.6's ferrous-positive / non-ferrous-negative convention
+holds on the two pre-rail columns and *only* there — steel +25 mV, copper −13 mV at 10.9 µs.
+**(2)** Past the rail **both targets read positive**, so sign is not a discriminant in the late
+window; the 2026-08-05 entry's suggestion that a non-ferrous target would cross down through the
+pedestal is not what happens. **(3)** The late window discriminates by *decay rate* instead:
+steel falls 73× from 21.9 to 250 µs while copper falls only 6.2×, so **copper overtakes steel at
+~77 µs** and at 250 µs is 4.3× more visible (+0.40 vs +0.09 mV). A long thick copper tube having
+the longer eddy time constant is ordinary PI physics; the point is that it makes the 88–250 µs
+columns non-ferrous-selective, which is the opposite of what those columns were assumed to be
+worth.
+
+**The targets do move the readings around the lobe, which bears on the open coil-vs-amplifier
+question.** At 21.880 µs — the first cell off the rail — the spanner adds +7.12 mV on a 7.40 mV
+air baseline, nearly a doubling. An amplifier-recovery artefact should be indifferent to metal.
+That is *suggestive*, not decisive: 21.9 µs is past the bottom, and nothing can be learned at the
+bottom itself because that cell is railed for every class. A scope is still the instrument that
+settles it.
+
+**Method note that changed a number, not just a procedure.** `MARK acquire` records the state
+*from that point on*, so the marks locate presentations but do not bracket them — in this session
+the second `Fe_spanner_01` mark lands ~9 s after the spanner was already away. Segmenting on the
+marks as written mixes ~30 s of air into the spanner window and reports Δ at 21.88 µs as
+**+3.5 mV against the wrong baseline, sign-flipped depending on which air segment is used**,
+versus **+7.12 mV** from the presentation plateau. The tool therefore uses the marks only to name
+each excursion and takes the window from the probe cell's own plateau. Worth considering a
+paired place/remove marker in `pimd_rawlog` — not proposed as a change here. (2026-08-07)
+
+---
+
+### utilities/decay_model/decaymodel.py — v2 — `--session` overlay of measured air/ferrous/non-ferrous
+
+Adds `load_session()`: reads a `pimd_rawlog` session, segments it into air and one window per
+target presentation, and returns per-class means for one band, which the three existing panels
+then overlay as solid measured traces. The v1 modelled curves stay on the figure but are demoted
+to thin dashed — they are the reference the measurement broke, and the header now says so rather
+than presenting them as prediction. Panel titles, annotations and axis limits switch to the
+measured story when `--session` is given; without it the tool renders exactly as v1 did.
+
+The W-line parse mirrors `pimd_rawlog._parse_w_line` rather than importing it — that module pulls
+in PyQt6 at import time and this tool is offline. Window detection is the substantive part and is
+documented in the function docstring: marks locate, the data delimits (see the findings entry
+above for why that distinction changes the answer), each presentation is trimmed to the top 80 %
+of its own excursion to drop the operator's approach/withdraw ramps and the 32-deep rolling
+average's ~8 s smear, seed searches are narrow and skip already-claimed frames so a strong
+target's tail cannot out-peak a weaker one, and air is everything outside the windows plus a
+guard, after a 20 s skip for the §17.13 stream-start transient. Run:
+`.venv/bin/python utilities/decay_model/decaymodel.py --session src/data/sessions/rawlog_20260807_194234.txt --out …`. (2026-08-07)
+
+---
+
 ### findings — the calibrated ladder puts the air decay at ~60 mV where 3 mV was reported, and it settles without an undershoot
+
+**SUPERSEDED 2026-08-07 — see "CORRECTION: the negative lobe is real, it is in air, and it is on every band" above.** Read this header
+before quoting anything below it.
+
+- **Wrong:** "the coil network's own poles have no room for a −14 mV excursion at 14 µs", and
+  the supporting arguments (the ~400× rescaling, the recovery-time contradiction). Direct
+  measurement of air shows the undershoot on every band, reaching the 2.441 mV rail at sd
+  14.7 µs on this very band.
+- **Wrong:** consequence 1, "air carries no information past ~21 µs". Measured air is still
+  recovering at sd 21.9 µs (7.40 mV) and 31.0 µs (14.88 mV) and only reaches the pedestal
+  around 44 µs — and then sags 16.14 → 15.86 mV out to 250 µs, a 0.28 mV slope against a
+  0.07 mV σ, so it is not flat there either. The pedestal is a level the air approaches, not
+  one it sits on.
+- **Wrong:** consequence 3's sign claim. Both targets read positive past the rail; non-ferrous
+  does not cross down through the pedestal.
+- **Stands:** the τ = 0.920 µs critically-damped fit and its ±0.84 % residuals over sd
+  8.4–11.3 µs, the pedestal's existence, and consequence 2 — `cal_110_full_range_v4`'s interior
+  threshold labels are wrong, now confirmed directly (measured 891 mV at sd 10.912 µs, so 0.5 V
+  falls near 11.5 µs, not the 62 µs its label implies).
 
 Offline analysis, no bench time and no hardware change. Prompted by a request to plot the
 estimated decay and its crossings from 4 µs / ~5 V out to 250 µs / a few mV on the **150 µs**
