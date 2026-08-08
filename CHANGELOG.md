@@ -1,3 +1,26 @@
+### References/images — the three `profile8b-*` captures are tracked; the README image was broken on GitHub
+
+`README.md` has always opened with `profile8b-spanner-copper.jpg` as its lead figure, but
+`.gitignore` excluded `References/images/profile8b-*`, so the file existed only on the author's
+disk and **GitHub rendered a broken image** — the first thing a visitor to the repository saw.
+The markdown was never at fault. Rule dropped and all three captures committed.
+
+**The rule was not arbitrary, and the reason it existed still applies to the content.** Its
+comment recorded these as *previous-epoch* captures whose DESIGN.md §15 rows were deliberately
+dropped at Doc-rev 1.8. Publishing them fixes the README but does not make them current: they
+predate the enclosure, the 6S supply and both `cal_63` epochs, so the 8×9 matrix in that figure
+is not what the rig produces today. It is being used as an illustration of *what the display
+looks like*, which it still serves, rather than as evidence about the present instrument — worth
+knowing before anyone cites it as data. The other two (`profile8b-spanner.jpg`,
+`profile8b-copper-pipe.jpg`) are committed alongside it so the directory is not half-ignored,
+which is the state that produced this bug.
+
+No DESIGN.md change: §15 rows for previous-epoch assets were removed by a deliberate decision at
+Doc-rev 1.8 and reinstating them is a consolidation-pass call, not a side effect of fixing an
+image link. (2026-08-08)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-08
