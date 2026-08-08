@@ -1,3 +1,82 @@
+### utilities/decay_model/make_sweep_profile.py — v3 — cal_110 anchors dropped, crossing region tightened, junctions guarded; both profiles regenerated
+
+**The anchors are gone, and the rule that put them there was wrong.** v1/v2 forced the eleven
+`cal_110_full_range_v4` delays of the matching band into the ladder so captures would stay
+"directly comparable" to `rawlog_20260807_194234.txt`. Measured, that bought nothing. Sampling the
+2026-08-07 air curve onto the anchor-free ladder and interpolating back to the anchor delays
+recovers them to **≤ 0.05 mV past sd 20 µs** and **0.000 mV from 62 µs out**, against target
+deltas of 0.09–7.1 mV. The one large residual, **+2.7 mV at sd 10.912 µs**, sits on the steep
+slope where that cell's own frame-to-frame σ is **7.8 mV** — the interpolation error is inside the
+cell's own noise. The railed cell cannot be interpolated meaningfully and carries no information
+anyway.
+
+Against that, the anchors cost **10 cells at 150 µs and 11 at 100 µs, ~15 % of the ladder**, and
+crowded it: `15.448 → 15.600 µs` was a 0.152 µs gap inside a region whose step is 0.600 µs, so one
+of that pair was wasted. They also coupled this profile to another profile — the coupling that
+broke silently when the 150 µs file was hand-retargeted to 100 µs and kept the wrong band's
+anchors (0 of 11 correct). **And the comparability claim was overstated when written:** that
+session ran 110 cells at 4.07 Hz with a 7.9 s rolling window against this profile's 7.6 Hz and
+4.2 s, on a different pack state and soak, and DESIGN §10's `(profile_name, profile_sha8)` guard
+exists precisely because cross-profile comparison is not automatically valid.
+
+**The freed cells went into the crossing region**, which is the one that decides the crossing
+time — the pack-independent coordinate. It goes from **11 cells at 0.240 µs to 17 at 0.160 µs**
+(1.5× finer) and now runs up to the rail region instead of stopping at 14.810 µs and leaving the
+plunge to be covered at 0.600 µs. Net 66 cells (was 72), ~132 ms, ~7.6 Hz, 4.2 s rolling window.
+
+**`MIN_GAP_FRAC` guards region junctions.** Region boundaries do not land on each other's grids,
+and the first build after dropping the anchors put the crossing region's last cell 0.040 µs before
+the rail region's first — 4× tighter than the finer of the two steps, i.e. exactly the defect the
+anchors used to cause. A cell is now dropped if it sits closer than 0.75 × the finer local step to
+its neighbour. The region boundaries were then aligned so every junction gap equals the finer
+step, and the guard stops firing — it is a safety net, not a workaround, and it is checked by the
+per-region cell counts in the printout.
+
+**One bug found by the validation pass, worth recording because it is the same defect this work
+flagged in a hand-edited file.** v2 parameterised the profile name, and the per-region reporting
+loop then shadowed `name`, so both regenerated JSONs were written with
+`"name": "late / target"` — the last region's label. `pimd_rawlog` copies that field into every
+session's `META … name=` line, so every capture would have been mislabelled. Fixed (loop variable
+renamed) and now **asserted in the generator** before the file is written, so it cannot regress
+silently.
+
+Both profiles regenerated and validated end to end: 66 cells each, correct `name`, no off-grid
+delays, gaps 0.160–41.936 µs, every cell passing the firmware's own `compute_pulse_duties` /
+`pulse_duties_valid`, `D` line 471/473 chars round-tripping losslessly through the MCU parser, no
+`threshold_v`, and worst-case `pulse+delay+0.904` of 412.6 µs (100 µs) and 463.4 µs (150 µs)
+against the 500 µs period. (2026-08-08)
+
+---
+
+### utilities/decay_model/make_sweep_profile.py — v2 — `--pulse` / `--freq`; regions positioned against the band's measured rail
+
+The v1 generator hard-coded 150 µs: the pulse width, the output name, and the eleven
+`cal_110_full_range_v4` anchors. Retargeting it to another band by hand-editing the JSON — which
+is what happened to `sweep_150us_decay_v1.json`, now on disk as `sweep_100us_decay_v1.json` with
+`pulse_us` changed to 100.0 — leaves three things wrong that the file itself cannot show you:
+
+1. **The internal `name` still reads `sweep_150us_decay_v1`.** `pimd_rawlog` writes that field
+   into every session's `META profile=… name=…` line, so every capture would be stamped with the
+   wrong band.
+2. **The ladder is still positioned for the 150 µs band.** The measured air minimum is at
+   sd 14.712 µs at 100 µs drive against 15.448 µs at 150 µs, so the fine steps land ~0.74 µs late
+   — the crossing region's 0.24 µs resolution is spent just past where the crossing is.
+3. **The anchors are the wrong band's.** `0 of 11` of cal_110's 100 µs delays appear in the
+   hand-edited file, so it is no longer a superset and captures are not directly comparable to
+   the 100 µs band data already measured.
+
+v2 takes `--pulse` and `--freq`, derives the output name and path from the pulse width, pulls the
+anchors from the matching `cal_110_full_range_v4` band, and shifts all six regions rigidly by the
+difference between that band's measured rail position and the 150 µs reference
+(`MEASURED_RAIL_US`, from the 2026-08-07 session). It **refuses** to generate for a pulse width
+with no measured rail rather than guessing an offset — the regions are positioned against a
+measured feature, and inventing one would be the same error as cal_110's threshold labels.
+Regenerating at 100 µs gives 72 valid cells, all 11 anchors present, drive duty 13107 fixed, last
+cell sd 311.736 µs → `pulse+delay+0.904` = 412.6 µs of 500. `--pulse 150` still reproduces v1's
+output exactly (shift 0.000). (2026-08-08)
+
+---
+
 ### src/pimd_rawlog.py — v1.16 — FIX the grid could force the window off-screen; acquisitions become fixed-length and bracket themselves
 
 Two changes, both surfaced by loading `sweep_150us_decay_v1` (72 delays on one band).
@@ -55,6 +134,63 @@ read anything. The settings key is now `capture_frames`, falling back to the old
 so an existing `rawlog_settings.json` keeps its value. Verified headless (offscreen Qt) across
 completion, supersede, stop, resume, and pre-v1.16 back-compat. No firmware or wire-protocol
 change — DESIGN §9/§11 untouched. (2026-08-08)
+
+---
+
+### profile — sweep_150us_decay_v1.json — single-band 150 µs ladder built to model the decay, not to detect
+
+New profile in `src/data/profiles/`, plus the generator that produced it
+(`utilities/decay_model/make_sweep_profile.py` v1 — the ladder's rationale lives in code, so it
+can be re-derived rather than re-guessed). **One band, 2 kHz / 150 µs, 72 delays, averages 32** (66 as of v3 — anchors dropped, crossing region tightened).
+Not a calibration and not a detection profile.
+
+**The problem it solves.** `cal_110_full_range_v4`'s 150 µs band places exactly **two** columns
+between clip release and the rail — 7.904 and 10.912 µs. Everything else on that band is clamped,
+railed, or pedestal. Two points cannot constrain a decay, and the 2026-08-05/08-07 analyses failed
+for exactly that reason: fitting the four calibrated cal_63 columns with τ_s pinned at different
+values produced fits agreeing with the data to ≤ 2 % that predicted anywhere from **+64 mV to
+−400 mV** at sd 14.7 µs. The fix is samples, not a better model. This ladder puts **26 cells in
+7.9–15.4 µs** where cal_110 has 2.
+
+**Six regions, each sized to the feature it has to resolve** — deliberately not one geometric
+rule, since a single geometric ladder is what under-sampled 8–15 µs in the first place:
+
+| region | cells | span | what it is for |
+|---|---:|---|---|
+| clamp exit | 6 | 7.040–7.840 µs | clip release on this band is currently **unmeasured** — cal_110 has no cell here at all, and the figure in use is the 100 µs band's 7.392 µs plus an extrapolated shift |
+| decay / τ | 12 | 7.904–12.304 µs | 0.4 µs steps ≈ 0.43 τ, ~5 e-folds across the region — enough to pin τ and to separate `(a+bt)·exp` from one exponential from two |
+| crossing | 11 | 12.400–14.800 µs | the pedestal crossing, never sampled (892 mV at 10.912, railed by 15.448). Crossing *time* is the pack-independent coordinate, so this is the highest-value region |
+| rail width | 9 | 15.000–19.800 µs | the lobe's depth is unmeasurable through a unipolar path, but the **width of the flat bounds it** — the 2026-08-05 observation was hand-read off a live trace and has never been measured |
+| recovery | 10 | 20.496–44.520 µs | τ ≈ 4.2 µs currently rests on **two** points; ten decide whether it is one exponential or several — one mechanism or more than one |
+| late / target | 14 | 48.000–312.472 µs | pedestal sag and the discrimination window, where copper overtakes steel near 77 µs. **Extended past cal_110's 250 µs stop** — the rep rate allows ~349 µs and copper was still +0.40 mV at 250 |
+
+**~~It is a strict superset of the band it replaces.~~ SUPERSEDED 2026-08-08** — the anchors were
+dropped in `make_sweep_profile.py` v3 and this profile regenerated without them. Measured, they
+were worth ≤ 0.05 mV past sd 20 µs while costing ~15 % of the ladder; see that entry. The
+comparability claim was also overstated: sweep rate, rolling-window duration, pack state and soak
+all differ from that session regardless of delay alignment.
+
+**Why 72 cells is affordable on one band when 110 across ten bands cost 246 ms.** The firmware's
+`needs_settling` is `at_boundary or dd != cells[prev][2]` — with one frequency and one pulse width
+the drive duty is identical for every cell (19660) including the wrap-around, so
+`BOUNDARY_PRIME`/`SETTLE_FLOOR_US` never fire. There is no per-pulse energy step for settling to
+absorb; only the sample compare value moves. Estimated sweep ~144 ms (~6.9 Hz) at cal_110's
+measured 2.24 ms/cell, giving a ~4.6 s rolling window at averages 32 — **shorter** than cal_110's
+7.9 s, so less drift inside the average, not more. **Estimate, not measured — confirm on the
+bench.**
+
+**Validated offline against the firmware's own arithmetic.** `compute_pulse_duties` and
+`pulse_duties_valid` are reproduced verbatim in the generator: all 72 cells pass, all land on the
+8 ns grid, and the `%.3f` µs wire format round-trips losslessly through the MCU's own `D` parser.
+The `D` line is 517 chars against cal_110's ~780, which already works. Worst-case cell is
+sd 312.472 µs → sample duty 60734/65535, `pulse + delay + 0.904` = 463.4 µs of the 500 µs period.
+
+**No `threshold_v`, deliberately.** The field is vestigial for streaming (`pimd_rawlog` never
+reads it, `pimd_classviz` guards on its absence). cal_110's copy was carried over unverified and
+is wrong by a large factor — its "0.5 V" column at 62 µs sits on the pedestal, because 0.5 V is
+reached near 11.5 µs. Inventing a fresh ladder here would repeat that error. **Consequence:
+`pimd_delaycal` will refuse to import this profile** ("Profile has no threshold_v field"), which
+is correct — it is a characterisation sweep, not a calibration. (2026-08-08)
 
 ---
 
