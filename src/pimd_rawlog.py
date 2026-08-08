@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Raw Logger v1.15
+# PIMD Raw Logger v1.16
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Deliberately dumb: loads a profile, streams it (Mode 2 dynamic profile,
@@ -11,12 +11,14 @@
 # display bug just fixed in pimd_delaycal.py (v1.43/v1.44) and gives a
 # ground-truth raw record for later offline analysis. Structured "Acquire
 # Target" / "Acquire Air" markers (from a target registry + distance field)
-# stamp the start of each segment in the log so a later analysis pass can
-# segment the raw stream by exactly which lines fall inside which
-# acquisition; a free-text Note field remains for anything else worth
+# BRACKET each segment in the log -- pressing one starts a capture of
+# `Capture frames` streamed frames and the matching "acquire end" marker is
+# written automatically when that count is reached (v1.16) -- so a later
+# analysis pass reads the extent of each acquisition off the log instead of
+# inferring it; a free-text Note field remains for anything else worth
 # flagging. A settle indicator (rolling per-channel std dev, own metric,
-# independent of pimd_classviz.py) tells the operator when a segment has
-# enough stable data to move on, and a warm-up indicator (cumulative
+# independent of pimd_classviz.py) tells the operator when the signal is
+# steady enough to press Acquire, and a warm-up indicator (cumulative
 # firmware-clock streaming time) tells them when the rig itself is ready to
 # trust. A live grid shows the last streamed frame in the same band x delay
 # layout the profile itself defines. Sessions can be stopped and resumed
@@ -73,6 +75,10 @@
 # bottom-right cell is the longest pulse width read at the longest delay.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.16 FIX the last-frame grid could force the window wider than the screen
+#         (QLabel size hint); grid moved to a non-wrapping scroll pane.
+#         Settle window becomes Capture frames: an acquisition now takes a
+#         fixed frame count and auto-stamps its own end marker
 #   v1.15 sensor row on screen — pack volts / SoC / zone, board temperature, firmware
 #         version and a firmware-alert line, at parity with pimd_gui.py; 'V' primed
 #         once on connect, sensors cleared on disconnect
@@ -115,7 +121,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice  # noqa: E402
 from PyQt6.QtGui import QFontDatabase  # noqa: E402
 
-APP_VERSION = '1.15'
+APP_VERSION = '1.16'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_delaycal.py / pimd_classviz.py
 
@@ -135,6 +141,18 @@ TARGET_MARK_FIELDS = (
 )
 
 GRID_COL_WIDTH = 8   # chars per raw-µV cell -- covers signed 7-digit values
+SETTLE_WINDOW_FRAMES = 20   # rolling window the settle figure is measured over.
+                            # Fixed, and deliberately NOT the Capture-frames
+                            # value (v1.16): the two answer different questions
+                            # -- settle is "is it steady enough to press
+                            # Acquire yet", capture is "how much do I then
+                            # take". Tying them meant a 2000-frame capture gave
+                            # a settle figure that needed ~5 minutes to fill
+                            # before it read anything at all.
+GRID_MAX_ROWS = 12   # tallest the grid pane grows before it scrolls vertically.
+                     # One row per band; the deepest tracked profile is 10
+                     # (cal_110_full_range_v4), so 12 clears it with headroom
+                     # without letting a hand-edited profile eat the window.
 
 # --------------------------------------------------------------------------
 # Pack / board-temperature display constants (v1.15).
@@ -274,9 +292,10 @@ class MainWindow(QMainWindow):
         self._awaiting_d_ready = False
 
         self._targets = _load_targets()
-        self._acquiring = None   # None, or {'mode': 'target', ...} / {'mode': 'air'}
+        self._acquiring = None   # None, or {'mode': 'target'|'air', 'frames', 'want', ...}
+        self._acquiring_name = ''
 
-        self._settle_buf = collections.deque(maxlen=20)
+        self._settle_buf = collections.deque(maxlen=SETTLE_WINDOW_FRAMES)
         self._streamed_s = 0.0
         self._last_w_ms = None
 
@@ -381,19 +400,24 @@ class MainWindow(QMainWindow):
         root.addWidget(self.lbl_acquiring)
 
         settle_row = QHBoxLayout()
-        settle_row.addWidget(QLabel('Settle window (frames):'))
-        self.sb_settle_window = QSpinBox()
-        self.sb_settle_window.setRange(5, 200)
-        self.sb_settle_window.setValue(20)
-        self.sb_settle_window.valueChanged.connect(self._on_settle_window_changed)
-        settle_row.addWidget(self.sb_settle_window)
+        settle_row.addWidget(QLabel('Capture frames:'))
+        self.sb_capture_frames = QSpinBox()
+        self.sb_capture_frames.setRange(5, 2000)
+        self.sb_capture_frames.setValue(20)
+        self.sb_capture_frames.setToolTip(
+            'How many streamed frames one acquisition takes.\n'
+            'Pressing Acquire Target/Air starts the count; the end marker is\n'
+            'written automatically when it completes.\n'
+            'Independent of the settle figure beside it, which always reads over\n'
+            f'the last {SETTLE_WINDOW_FRAMES} frames.')
+        settle_row.addWidget(self.sb_capture_frames)
         settle_row.addWidget(QLabel('Settle <= (mV):'))
         self.sb_settle_mv = QDoubleSpinBox()
         self.sb_settle_mv.setRange(0.05, 50.0)
         self.sb_settle_mv.setSingleStep(0.05)
         self.sb_settle_mv.setValue(1.0)
         settle_row.addWidget(self.sb_settle_mv)
-        self.lbl_settle = QLabel('Collecting 0/20')
+        self.lbl_settle = QLabel(f'Collecting 0/{SETTLE_WINDOW_FRAMES}')
         settle_row.addWidget(self.lbl_settle, 1)
         root.addLayout(settle_row)
 
@@ -419,9 +443,30 @@ class MainWindow(QMainWindow):
         note_row.addWidget(self.pb_log_note)
         root.addLayout(note_row)
 
-        self.lbl_grid = QLabel('No frame yet.')
-        self.lbl_grid.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        root.addWidget(self.lbl_grid)
+        # Grid pane (v1.16). The prose header is a word-wrapping QLabel; the
+        # numbers live in a read-only, NON-WRAPPING QPlainTextEdit.
+        #
+        # Why not a QLabel for the numbers (which is what v1.13 used): a QLabel
+        # reports its full text extent as its size hint, and a layout cannot
+        # shrink below that -- so the window's minimum width grew with the
+        # profile's delay count and could not be dragged back. One band of 72
+        # delays is ~720 monospace chars, several times a 3440 px screen. That
+        # is also why v1.11's word-wrap and v1.12's truncation were both dead
+        # ends: wrapping needs break points a comma-separated numeric row does
+        # not have, and truncation bounds the width by throwing away the data
+        # you opened the pane to read. A QPlainTextEdit has a small minimum
+        # width regardless of content and scrolls horizontally instead, so the
+        # full row stays readable AND the window stays resizable. Selectable
+        # text is a free bonus at the bench.
+        self.lbl_grid_header = QLabel('No frame yet.')
+        self.lbl_grid_header.setWordWrap(True)
+        root.addWidget(self.lbl_grid_header)
+        self.txt_grid = QPlainTextEdit()
+        self.txt_grid.setReadOnly(True)
+        self.txt_grid.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.txt_grid.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self._set_grid_rows(1)
+        root.addWidget(self.txt_grid)
         self.lbl_log_path = QLabel('Log file: —')
         root.addWidget(self.lbl_log_path)
 
@@ -529,27 +574,91 @@ class MainWindow(QMainWindow):
         self._settle_buf.clear()
         self._update_settle_label()
 
+    def _close_acquisition(self, reason):
+        """Stamp `MARK acquire end` for the open acquisition, if any.
+
+        Added v1.16, and it is the point of the change. Before this, an acquire
+        marker recorded the state *from that point on* with nothing to close it,
+        so the log said when a segment began and never when it ended. Analysis
+        then had to guess the extent, and guessing wrong is not a small error:
+        in rawlog_20260807_194234 a second Fe marker landed ~9 s after the
+        spanner was already away, and segmenting on the markers as written mixed
+        ~30 s of air into the target window and roughly halved its delta
+        (+3.5 mV against +7.12 mV from the real plateau). A bracketed segment
+        removes that whole class of mistake from the record rather than leaving
+        each analysis pass to re-derive it.
+
+        `frames` is what was actually captured and `complete` says whether the
+        requested count was reached, so a run cut short by a stop, a disconnect
+        or an impatient second press is still usable -- it is labelled, not
+        silently short."""
+        if not self._acquiring or not self._log_file:
+            return
+        a = self._acquiring
+        got, want = a['frames'], a['want']
+        fields = [f'mode={a["mode"]}']
+        if a['mode'] == 'target':
+            fields.append(f'target_id={a["target_id"]}')
+        fields += [f'frames={got}', f'requested={want}',
+                   f'complete={"yes" if got >= want else "no"}',
+                   f'reason={reason}']
+        self._write_log('MARK', 'acquire end ' + ' '.join(fields))
+        self._acquiring = None
+        return got, want
+
+    def _begin_acquisition(self, mark_text, acquiring, screen_name):
+        """Common path for both Acquire buttons: close any open segment, write
+        the start marker, arm the frame counter, and reset the settle buffer so
+        the figure on screen describes this capture rather than the run-up to it.
+
+        The start marker is written HERE, after the close, rather than by the
+        callers before it -- otherwise a second press emits the new segment's
+        start before the previous segment's end, and the log stops being
+        readable as brackets, which is the one property this is all for."""
+        self._close_acquisition('superseded')
+        self._write_log('MARK', mark_text)
+        acquiring['frames'] = 0
+        acquiring['want'] = self.sb_capture_frames.value()
+        self._acquiring = acquiring
+        self._acquiring_name = screen_name
+        self.lbl_acquiring.setText(f'Capturing {screen_name}: 0/{acquiring["want"]} frames')
+        self._log(f'Acquiring {screen_name} -- capturing {acquiring["want"]} frames')
+        self._reset_settle_buf()
+
     def _on_acquire_target_clicked(self):
         if not self._log_file or not self._targets:
             return
         target = self._targets[self.cb_target.currentIndex()]
         distance_mm = self.sb_distance_mm.value()
-        self._write_log('MARK', f'acquire target {_mark_field_string(target, distance_mm)}')
-        self._acquiring = {'mode': 'target', 'target_id': target['target_id'],
-                            'short_name': target['short_name'], 'distance_mm': distance_mm}
-        self.lbl_acquiring.setText(
-            f'Acquiring: {target["short_name"]} ({target["target_id"]}) @ {distance_mm:g} mm')
-        self._log(f'Acquiring target: {target["short_name"]} @ {distance_mm:g} mm')
-        self._reset_settle_buf()
+        self._begin_acquisition(
+            f'acquire target {_mark_field_string(target, distance_mm)}',
+            {'mode': 'target', 'target_id': target['target_id'],
+             'short_name': target['short_name'], 'distance_mm': distance_mm},
+            f'{target["short_name"]} ({target["target_id"]}) @ {distance_mm:g} mm')
 
     def _on_acquire_air_clicked(self):
         if not self._log_file:
             return
-        self._write_log('MARK', 'acquire air')
-        self._acquiring = {'mode': 'air'}
-        self.lbl_acquiring.setText('Acquiring: air (baseline).')
-        self._log('Acquiring air (baseline).')
-        self._reset_settle_buf()
+        self._begin_acquisition('acquire air', {'mode': 'air'}, 'air (baseline)')
+
+    def _count_acquisition_frame(self):
+        """One streamed frame against the open acquisition; closes it at the
+        requested count. Counting frames rather than seconds is deliberate --
+        the sweep rate depends on the profile's cell count (6.9 Hz for the
+        72-cell 150 µs sweep, 4.1 Hz for cal_110), so a frame budget means the
+        same number of samples per cell whatever is loaded, which is what the
+        offline averaging actually consumes."""
+        if not self._acquiring:
+            return
+        self._acquiring['frames'] += 1
+        got, want = self._acquiring['frames'], self._acquiring['want']
+        name = self._acquiring_name
+        if got < want:
+            self.lbl_acquiring.setText(f'Capturing {name}: {got}/{want} frames')
+            return
+        self._close_acquisition('count-reached')
+        self.lbl_acquiring.setText(f'Captured {name}: {got} frames -- done.')
+        self._log(f'Capture complete: {name}, {got} frames')
 
     # ------------------------------------------------------------------
     # Start / stop / resume streaming
@@ -620,6 +729,16 @@ class MainWindow(QMainWindow):
         self._update_warmup_label()
 
         acquiring = info['open_acquisition']
+        if acquiring is not None:
+            # A resumed segment has no live frame counter (the frames it already
+            # captured are in the old file, not this run), so it is re-armed for
+            # a fresh full count from here. The earlier part stays bracketed in
+            # the log by its own markers.
+            acquiring['frames'] = 0
+            acquiring['want'] = self.sb_capture_frames.value()
+            self._acquiring_name = ('air (baseline)' if acquiring['mode'] == 'air'
+                                    else acquiring.get('short_name',
+                                                       acquiring.get('target_id', 'target')))
         self._acquiring = acquiring
         if acquiring is None:
             self.lbl_acquiring.setText('Not yet acquiring -- press Acquire Target or Acquire Air.')
@@ -642,6 +761,9 @@ class MainWindow(QMainWindow):
             self.send_command('E')
         self._awaiting_d_ready = False
         if self._log_file:
+            # Before the file goes away: a capture interrupted by Stop is
+            # recorded as short rather than left dangling (v1.16).
+            self._close_acquisition('stopped')
             self._write_log('META', 'stopped')
             self._log_file.close()
             self._log_file = None
@@ -672,6 +794,7 @@ class MainWindow(QMainWindow):
                     self._update_warmup(time_ms)
                     self._update_settle(channels)
                     self._update_grid_display(channels)
+                    self._count_acquisition_frame()
 
             elif raw.startswith('P') and raw[1:2].isdigit():
                 # Unsolicited pack / board-temp telemetry (firmware v4.28+):
@@ -823,28 +946,47 @@ class MainWindow(QMainWindow):
     # Grid display -- last streamed frame, band x delay layout (see the
     # module header's "Grid convention" note)
     # ------------------------------------------------------------------
+    def _set_grid_rows(self, n_rows):
+        """Height the grid pane to its content, clamped to GRID_MAX_ROWS.
+
+        Without this the QPlainTextEdit would claim a text-editor's default
+        height and push the activity pane down; with it the pane is as tall as
+        the profile needs (one line for a single-band sweep, ten for
+        cal_110_full_range_v4) and scrolls vertically beyond the clamp."""
+        rows = max(1, min(int(n_rows), GRID_MAX_ROWS))
+        fm = self.txt_grid.fontMetrics()
+        # frame + document margins + a horizontal scrollbar's worth of room,
+        # so the last row is never hidden behind the scrollbar it triggers.
+        chrome = (2 * self.txt_grid.frameWidth() + 8
+                  + self.txt_grid.horizontalScrollBar().sizeHint().height())
+        self.txt_grid.setFixedHeight(rows * fm.lineSpacing() + chrome)
+
     def _update_grid_display(self, channels):
         if self._profile is None:
             return
         n_bands = len(self._profile['bands'])
         header = (f'Last frame (raw line #{self._line_count}) -- {n_bands} band(s) top-to-bottom '
                   f'by increasing pulse width, delays left-to-right by increasing time, raw µV:')
-        self.lbl_grid.setText(f'{header}\n{_format_grid(self._profile, channels)}')
+        self.lbl_grid_header.setText(header)
+        self._set_grid_rows(n_bands)
+        # Preserve the horizontal scroll position across frames -- the pane
+        # repaints several times a second, and resetting it would make a
+        # scrolled-to column impossible to watch.
+        hbar = self.txt_grid.horizontalScrollBar()
+        pos = hbar.value()
+        self.txt_grid.setPlainText(_format_grid(self._profile, channels))
+        hbar.setValue(pos)
 
     # ------------------------------------------------------------------
     # Settle indicator (own metric: rolling per-channel std dev -> mV)
     # ------------------------------------------------------------------
-    def _on_settle_window_changed(self, n):
-        self._settle_buf = collections.deque(self._settle_buf, maxlen=n)
-        self._update_settle_label()
-
     def _update_settle(self, channels):
         self._settle_buf.append(channels)
         self._update_settle_label()
 
     def _update_settle_label(self):
         n = len(self._settle_buf)
-        window = self.sb_settle_window.value()
+        window = SETTLE_WINDOW_FRAMES
         if n < window:
             self.lbl_settle.setText(f'Collecting {n}/{window}')
             self.lbl_settle.setStyleSheet('color: gray;')
@@ -919,7 +1061,11 @@ class MainWindow(QMainWindow):
             if 0 <= target_idx < self.cb_target.count():
                 self.cb_target.setCurrentIndex(target_idx)
             self.sb_distance_mm.setValue(     s.get('distance_mm',    self.sb_distance_mm.value()))
-            self.sb_settle_window.setValue(   s.get('settle_window',  self.sb_settle_window.value()))
+            # 'settle_window' is the pre-v1.16 name for the same spinbox; read
+            # it as a fallback so an existing settings file keeps its value.
+            self.sb_capture_frames.setValue(int(s.get('capture_frames',
+                                                s.get('settle_window',
+                                                      self.sb_capture_frames.value()))))
             self.sb_settle_mv.setValue(       s.get('settle_mv',      self.sb_settle_mv.value()))
             self.sb_warmup_s.setValue(        s.get('warmup_s',       self.sb_warmup_s.value()))
             w = int(s.get('window_w', 1000))
@@ -936,7 +1082,7 @@ class MainWindow(QMainWindow):
             'port':           self.le_port.text(),
             'target_idx':     self.cb_target.currentIndex(),
             'distance_mm':    self.sb_distance_mm.value(),
-            'settle_window':  self.sb_settle_window.value(),
+            'capture_frames': self.sb_capture_frames.value(),
             'settle_mv':      self.sb_settle_mv.value(),
             'warmup_s':       self.sb_warmup_s.value(),
             'window_w':       self.width(),
@@ -960,6 +1106,7 @@ class MainWindow(QMainWindow):
             self.send_command('E')
             self.serial.waitForBytesWritten(200)
         if self._log_file:
+            self._close_acquisition('session-closed')
             self._write_log('META', 'session closed')
             self._log_file.close()
         if self.serial.isOpen():
@@ -985,9 +1132,15 @@ def _parse_w_line(raw):
 def _scan_session_file(path):
     """Scans a rawlog_*.txt session file to recover resume state: the profile
     path from the last META line, cumulative streamed seconds (summed
-    positive time_ms deltas across RAW W... lines), and the most recent
-    MARK acquire (target or air) -- there's no place/remove pairing to
-    track, each acquire marker simply is the current state from that point."""
+    positive time_ms deltas across RAW W... lines), and any acquisition still
+    open at the end of the file.
+
+    Segments are bracketed as of v1.16: `MARK acquire target|air` opens one and
+    `MARK acquire end` closes it, so "still open" means the file ends mid-capture
+    (a stop, a crash, or a session closed early). Logs written before v1.16 have
+    no end markers, and for those the last acquire marker reads as open to the
+    end of the file -- which is exactly what it meant at the time, so old
+    sessions still resume correctly."""
     profile_path = None
     streamed_s = 0.0
     last_w_ms = None
@@ -1021,6 +1174,12 @@ def _scan_session_file(path):
                             k, v = tok.split('=', 1)
                             fields[k] = v
                     open_acquisition = fields
+                elif text.startswith('acquire end'):
+                    # v1.16: segments are bracketed, so a completed capture is
+                    # NOT still open. Without this a resume would re-arm a
+                    # segment the operator had already finished and start
+                    # appending fresh frames to it.
+                    open_acquisition = None
                 elif text.startswith('acquire air'):
                     open_acquisition = {'mode': 'air'}
 

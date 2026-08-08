@@ -1,3 +1,63 @@
+### src/pimd_rawlog.py — v1.16 — FIX the grid could force the window off-screen; acquisitions become fixed-length and bracket themselves
+
+Two changes, both surfaced by loading `sweep_150us_decay_v1` (72 delays on one band).
+
+**1. FIX: the last-frame grid set the window's minimum width, and it could not be dragged back.**
+`lbl_grid` was a `QLabel`, and a QLabel reports its full text extent as its size hint — a layout
+cannot shrink below that. One band of 72 delays is ~720 monospace characters, several times a
+3440 px screen, and with the window origin saved at x=1957 most of it was off the right-hand
+edge. Measured after the fix: **window minimum width 778 px**, and identical for
+`cal_110_full_range_v4` (10 bands × 11) — the width is now independent of the profile.
+
+The numbers moved to a read-only, **non-wrapping** `QPlainTextEdit`, which has a small minimum
+width whatever it contains and scrolls horizontally instead; the prose header stayed a QLabel and
+now word-wraps. This is the third attempt at this bug and the first that addresses the mechanism:
+v1.11 turned on word-wrap (a comma-separated numeric row has no break points), v1.12 truncated the
+text (bounds the width by discarding the data you opened the pane to read). Height is set from the
+band count and clamped at `GRID_MAX_ROWS = 12`, so the pane is 38 px for a single-band sweep and
+164 px for cal_110 rather than claiming a text editor's default. Horizontal scroll position is
+preserved across frames — the pane repaints several times a second and resetting it would make a
+scrolled-to column impossible to watch. Values are now selectable, which is a free side effect
+worth having at the bench.
+
+**2. "Settle window (frames)" becomes "Capture frames", and an acquisition ends itself.** Pressing
+Acquire Target/Air now starts a capture of exactly that many streamed frames and writes
+`MARK acquire end mode=… [target_id=…] frames=N requested=M complete=yes|no reason=…`
+automatically when the count is reached. The operator's model is the one that changed: the settle
+figure tells you when it is steady enough to press, and the press then takes a defined number of
+samples to average offline — rather than opening a segment of indefinite extent.
+
+**This closes a defect in the record, not just an inconvenience.** A `MARK acquire` recorded the
+state *from that point on* with nothing to close it, so the log said when a segment began and
+never when it ended, leaving every analysis pass to infer the extent — and inferring wrong is not
+a small error. In `rawlog_20260807_194234` the second Fe marker landed ~9 s after the spanner was
+already away; segmenting on the markers as written mixes ~30 s of air into the target window and
+reports Δ at sd 21.88 µs as **+3.5 mV**, sign-flipping depending on which air segment is used,
+against **+7.12 mV** from the actual plateau. Bracketed segments remove that class of mistake from
+the log itself.
+
+Details that matter: `frames`/`requested`/`complete` record what was *actually* captured, so a run
+cut short by a second press, a Stop or a window close is labelled short rather than silently
+truncated (`reason=superseded|stopped|session-closed`). The start marker is written **after** the
+previous segment's end, inside `_begin_acquisition`, not by the callers before it — writing it
+first emits the new segment's start ahead of the old one's end and the log stops reading as
+brackets, which is the whole point; verified by walking a synthetic log and asserting the nesting
+depth stays in {0,1} and returns to 0. `_scan_session_file` treats `acquire end` as closing, so a
+resume does not re-arm a finished segment; **logs written before v1.16 have no end markers and
+still resume exactly as they did**, since "last acquire marker, open to EOF" is what they meant at
+the time. A resumed open segment is re-armed for a fresh full count, because the frames it already
+captured are in the previous file.
+
+**The settle indicator is now decoupled from the spinbox** (`SETTLE_WINDOW_FRAMES = 20`, fixed).
+They answer different questions, and tying them was actively broken once the capture range went to
+2000: a 500-frame capture gave a settle figure that needed ~5 minutes at 6.9 Hz to fill before it
+read anything. The settings key is now `capture_frames`, falling back to the old `settle_window`
+so an existing `rawlog_settings.json` keeps its value. Verified headless (offscreen Qt) across
+completion, supersede, stop, resume, and pre-v1.16 back-compat. No firmware or wire-protocol
+change — DESIGN §9/§11 untouched. (2026-08-08)
+
+---
+
 ### src/pimd_rawlog.py — v1.15 — pack volts, board temperature, firmware version and firmware alerts on screen
 
 Reported from the bench: the raw logger shows no pack voltage or board temperature. Verified
