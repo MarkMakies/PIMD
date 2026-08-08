@@ -1,3 +1,7 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-08
+
 ### utilities/decay_model/decaymodel.py — v5 — model refitted to the scope; below-rail reconstruction; file halved
 
 **The model is now measured rather than inferred.** v1–v4 fitted air to the calibrated `cal_63`
@@ -2722,7 +2726,7 @@ connected. (2026-08-03)
 
 ---
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+---
 
 ## Archive — consolidated 2026-07-31
 
@@ -10286,4 +10290,3 @@ if present.
 title updated.
 
 ---
-
