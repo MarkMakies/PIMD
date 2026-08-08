@@ -1,3 +1,127 @@
+### findings — a ferrous target fills the null in completely, and railed cells under-report target deltas
+
+Follow-up to the entry below, same scope session and settings (DHO1204, CH1 = LT6203 input,
+CH2 = MCLK, sd 15.5 µs, 2 kHz / 100 µs). Adjustable spanner 250 (steel, 271 g) resting **on** the
+coil; 83 CH1 traces averaged over 169 s, trace-to-trace scatter 0.60 mV. Figure and CSV in
+`References/scope/spanner_fills_the_null_20260808.png` / `spanner_vs_air_20260808.csv`.
+
+**The lobe carries target signal, so it is coil physics — the question is now closed from both
+ends.** The entry below showed the lobe exists *before* the amplifier; this shows it *responds to
+metal*. No-spanner air swings negative from sd 14.3 to 17.8 µs and bottoms at **−15.0 mV**; with
+the spanner on the coil the trace **never crosses zero at all**, with a minimum of **+15.5 mV**.
+The difference peaks at **+48 mV around sd 13.6 µs** and is still +16 mV at sd 22. An instrument
+artefact — amplifier recovery, clock feedthrough, anything downstream of the coil — cannot do
+that.
+
+**New, and it bites the corpus: where air is railed, the ADC under-reports the target delta.**
+Comparing the true delta at the amplifier input against what the sweep recorded through the same
+window:
+
+| sd (µs) | air (ADC) | Δ recorded by the ADC | Δ at the amplifier input |
+|---:|---:|---:|---:|
+| 14.86 | 9.12 mV | +40.7 mV | ~+43 mV |
+| 15.46 | 2.44 (railed) | +24.0 | ~+33 |
+| 16.06 | 2.44 (railed) | +12.6 | ~+27 |
+| 17.26 | 3.66 | **+6.3** | **~+22** |
+| 21.61 | 5.19 | +19.6 | ~+16 |
+
+The mechanism is simple and one-directional: Δ = target − air, and when the air baseline is
+clipped up to the 2.44 mV floor the subtrahend is too large, so **the delta is always
+under-stated, by up to ~3.5×**. Previous entries called these cells "worthless as a calibration
+point" and "not dead cells, just cells where every millivolt is target". Both understate it —
+those cells actively **compress** measured target amplitude, and anything derived from them
+(band means, crossing widths, any amplitude feature) inherits a non-linear, target-strength-
+dependent bias. This is a reason to exclude railed cells from feature maths, not merely to avoid
+calibrating on them.
+
+**A corollary that softens the operating note:** the rail is an *air* problem. A strong ferrous
+target lifts the whole trace clear of it, so the same cell that is dead in air is perfectly live
+on a close target — which is exactly what the 2026-08-03 close-target run saw from the other side.
+The right test for whether a cell is usable is therefore whether **air** is railed there, not
+whether the cell ever reads low.
+
+**Two corrections to my own working, both caught in the analysis and both mine.** (1) The polling
+script computed the time axis without `xorig`, mislabelling the spanner traces by +3 µs; the
+pairing was correct but the first comparison table I produced was labelled wrong and was
+discarded. (2) I first quoted the air bottom as −19.8 mV using a ±90 ns mask around the MCLK
+edge. The edge ring is **asymmetric** — sharp before the edge, ~250 ns of tail after it — so
+±90 ns still included ringing. With a ±250 ns mask the bottom is **−15.0 mV** (−13.7 smoothed
+across the gap), which is what the operator read off the screen directly. The masking width is
+now recorded on the figure.
+
+**Paired reference captured, and the earlier caveat is now closed with a number.** The first
+comparison used a no-spanner trace from ~30 minutes earlier, because the spanner was already in
+place when the watch began. The spanner was then lifted and 83 air traces taken in the same run,
+minutes after the spanner set, at identical settings. **The paired air agrees with the earlier
+reference to RMS 1.5 mV, max 3.6 mV** across the whole window — against a target effect of up to
+49 mV, so the unpaired conclusion was safe by better than 13×. Paired numbers, which supersede
+the earlier ones only in precision: air bottoms **−14.75 mV at sd 15.79 µs** with zero crossings
+at **14.29 and 18.00 µs**; spanner bottoms **+15.45 mV** with **no zero crossing**; largest
+difference **+48.9 mV at sd 13.57 µs**. Run-to-run scatter 0.31 mV (air) and 0.60 mV (spanner),
+so every number above is far outside the noise. Both states are in
+`spanner_vs_air_20260808.csv` along with the earlier reference.
+
+Still open, and now the obvious next probe: whether the MCLK-edge ring exists in the circuit as
+well as between scope channels. If it does, the ADC samples on that edge and captures the kick.
+(2026-08-08)
+
+---
+
+### findings — SETTLED by scope: the negative lobe is at the amplifier INPUT, and so is the pedestal
+
+Rigol DHO1204 over LAN (192.168.2.161, raw SCPI on 5555), `pimd_gui` Mode 1, 2 kHz / 100 µs,
+sample delay 15.5 µs. **CH1 = LT6203 input (post-R8); CH2 = MCLK, whose rising edge is the ADC
+sample instant** — so scope t = 0 is sd 15.5 µs and the whole trace reads directly in sample
+delay. Scope state was saved before and restored after; timebase and CH1 range were changed for
+the wide captures and put back. Traces kept in `References/scope/`.
+
+**This closes the question open since 2026-08-05: it is the front end, not the amplifier.** The
+negative excursion is present *before* the LT6203, so it cannot be output overload recovery. At
+the input it spans **sd 14.3 → 17.8 µs** (zero crossings, ~3.5 µs wide) and bottoms at
+**≈ −15 mV**. Both entries below that leaned on "amplifier recovery" as the likely explanation —
+including the one that argued the coil poles had no room for it — are wrong on that point.
+
+**The −31.4 mV apparent minimum is not signal, and the operator called it before the analysis
+did.** It is a **70 ns FWHM** spike sitting exactly on CH2's ~10 ns MCLK edge — three orders of
+magnitude faster than the 3.5 µs feature it sits inside — i.e. crosstalk from the adjacent
+channel, not circuit behaviour. Masking ±90 ns around the edge leaves a smooth lobe bottoming at
+−14 to −15 mV. Worth keeping in mind for any future scope work at this node: the trigger channel
+carries a fast logic edge and the interesting signal is tens of mV.
+
+**The ~16.5 mV pedestal is also a front-end DC level.** The input's quiescent value out past
+sd 60 µs is **+14.34 mV**, against the ADC's 16.472 mV pedestal — the offset exists *before* the
+amplifier. That retires the 2026-08-05 entry's alternatives: it is not amplifier Vos and not ADC
+offset. It is consistent with that entry's preferred mechanism (input bias current through the
+front-end resistance), which was explicitly flagged there as "inferred from the datasheet and the
+measured level — not measured". It is measured now, at the node. The pedestal-to-quiescent ratio
+is 1.15, so the path is near unity gain — but that is two anchor points from captures ~2 h and
+one pack-state apart, so treat it as an order check, not a calibration.
+
+**Why the output rails.** The input swings ~29 mV below its own quiescent level. At near-unity
+gain that puts the output well under the LT6203's ~2.44 mV output floor, which is exactly the
+railed value the sweep measures over sd 15.46–16.66 µs. The rail width does not match the input
+excursion cell-for-cell, which is expected: the ADC sweep is the raw path two hours earlier at a
+different pack voltage, and the sweep samples the region at only three delays.
+
+**What this implies about damping, and a correction to the 2026-08-07 arithmetic.** A ~3.5 µs
+lobe at the input fits a slow real pole of ~2–3 µs alongside the fast decay — which is what
+L/R1 gives (3.9 mH / 1.3 k ≈ 3 µs), i.e. the **two-real-poles-with-opposite-sign-residues** shape
+the 2026-08-05 entry proposed. The 2026-08-07 entry's "ζ = 1.00" came from *assuming* the
+critically-damped form and fitting τ = 2RC to it; with L = 3.9 mH and C = 354 pF the network is
+slightly **overdamped** (α = 1.09×10⁶, ω₀ = 8.51×10⁵, ζ ≈ 1.28, poles at τ ≈ 0.57 and 2.44 µs),
+and the 2.44 µs pole is the right scale for the observed lobe. That conclusion still rests on the
+stale 3.9 mH, so §7's "re-measure RX self-resonance to pin L and C" is now the gating measurement
+for the whole front-end model rather than a loose end. **What survives from 2026-08-07 unchanged:
+the undershoot is not fixed by changing R1, and damping remains the wrong knob** — the lobe is
+the network's own slow pole, not a ringing artefact.
+
+Open and now cheap to answer, since the rig is instrumented: whether the lobe carries target
+information at the input (present a target and watch this node), and whether the MCLK-edge
+crosstalk exists in the circuit as well as between scope channels — if it does, the ADC samples
+on that edge and would capture the kick. (2026-08-08)
+
+---
+
 ### utilities/decay_model/make_sweep_profile.py — v3 — cal_110 anchors dropped, crossing region tightened, junctions guarded; both profiles regenerated
 
 **The anchors are gone, and the rule that put them there was wrong.** v1/v2 forced the eleven
