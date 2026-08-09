@@ -584,9 +584,6 @@ regulation across the whole usable discharge.
   **ADC_VREF = 3.2777 V** — the RP2040-Zero's own 3V3 LDO sits **0.67 % low**, worth 221 mV at full
   scale. **`PACK_VOLTAGE_FULLSCALE_MV = 30 083`**. **The LDO term is per-module — redo this
   calibration if the RP2040 module is swapped.**
-- **Error budget RSS ≈ 92 mV** pack-referred, dominated by that reference. Fine for the 21.0 V
-  failsafe; marginal for band placement, which wants ±50 mV. A ratiometric measurement off the
-  LTC6655 would reach ≈ 53 mV — **identified, not built.**
 - **Settling:** divider RC **τ = 2.9 ms measured**, ~22 ms to one LSB, hence
   `PACK_SENSE_SETTLE_MS = 100`.
 - **Behaviour:** hard latch below **21.0 V**, **absent-suspend below 6 V** (so USB-only bench work
@@ -595,28 +592,18 @@ regulation across the whole usable discharge.
   swap — restart with `G`/`S`.
 - ⚠ **C18 is a 4700 µF 25 V part on `+20V`**, at ~100 % of rating against a 25.2 V fresh pack. A
   35 V replacement is identified and **not yet fitted** (§14.4).
-- **Cost: up to roughly double the dissipation in U1** — ≈ 2.5 W on the old 20 V bench supply to
-  ≈ 4.6 W at the top of a charged pack (mean nearer 3.6–3.8 W across the discharge) — inside a
-  sealed shielded enclosure, on a project whose first open problem is thermal drift.
+
 
 ### Pack state of charge is an operating variable
 
 **Pack voltage reaches the operating point: 43–51 mV/V over 21–25 V**, one sign across all bands,
-r = 0.96–0.97 *(measured)*. **This does not generalise beyond its measured span** — an earlier
-reading over only 0.55 V found the opposite and was not wrong about its own interval, where the
-effect predicts ~25 mV and is buried under thermal drift. A standing caution for any
-regulated-window claim taken over a narrow interval.
+r = 0.96–0.97 *(measured)*. 
 
 **The data-quality window is a property of (pack voltage × profile delays), not of voltage alone.**
 A noisy region sits at a **fixed place on the decay waveform** while pack voltage **scales the
 decay**, so which threshold columns intersect it moves with the pack — and each profile's delays cut
 the decay at different points.
 
-- **Under `cal_63_air_bat_v3`** *(measured 2026-07-30)* the usable window was **21.5 – 23.3 V**:
-  above ≈ 24.0 V the two highest-signal threshold columns were unusable however long the rig had
-  run; 22.5–24.0 V was a transition band where soak time was worth ~2.5–3× against voltage's ~11×;
-  below ≈ 21.5 V the trouble migrated to other columns. Direct evidence for the mechanism: at
-  21.08 V the trouble had *left* 3.80/4.40 V and appeared at 4.20 V and 4.75 V.
 - **Under `cal_3x10_v2`** the window is **full charge → 21.5 V**, the whole usable pack — a bench
   judgement for a profile whose delays are new and were cut against the front-end model, so it has
   no reason to inherit the old ladder's window. **Consistent with the mechanism above, not
@@ -628,21 +615,9 @@ the decay at different points.
 ICR18650-26C pack. **Trust the runtime, not the curve's voltage axis**, which is an alignment of a
 nominal OCV shape rather than a measured one.
 
-- **Idle drain 0.019 V/h against 0.28–0.34 V/h streaming — roughly 15×.** The consequence: **a
-  fresh pack cannot be idled down into a window.** Under the old 21.5–23.3 V window that made the
-  top 1.78 h (17 % of the pack) unavoidable *bench* time; under the current full → 21.5 V window
-  that time is usable, taking session planning from **4.55 h to ≈ 6.33 h per charge**.
-- **Measured IR drop ≈ 0.29 V at the terminals** (25.04 V no-load / 24.96 MCU-only / 24.75 running)
-  — *not* the ~0.95 V a two-parameter discharge fit had attributed to it.
-
 **Known supply-noise facts** *(measured, free-air, 10-sample σ; taken on the **5S** pack that the
 6S supply replaced, so the battery rows are stale — §14.2)*: ~200 µV USB no flash · ~250 µV battery no flash · ~900 µV USB using flash ·
 ~4000 µV battery using flash. **Writing to flash raises the noise floor ~10×** (§11).
-
-**Highest-value unmade measurement:** the +15 V rail under scope **during a TX pulse**, fresh pack
-vs near-flat. A depleted pack's internal resistance may sag the rail at the pulse instant in a way a
-DMM cannot show. Everything known about supply-vs-thermal separation rests on band *geometry*
-inference; this would observe the mechanism directly.
 
 ---
 
@@ -652,7 +627,7 @@ inference; this would observe the mechanism directly.
   The early-decay region carries the most discrimination information and sits well above the noise
   floor. This is the oldest unconventional choice in the project and it still holds.
 - **The profile spans almost the whole decay, and skips only the middle.** `cal_3x10_v2` runs from
-  **4.85 V down to the ~16.5 mV pedestal** — not the "0.5 – 4.9 V window" of the 63-cell epochs. The
+  **4.85 V down to the ~16.5 mV pedestal** . The
   omitted region is not a design preference: it is where the unipolar front end rails (§7), and
   it is cut out of the *geometry* so that no downstream consumer has to know about it.
 - **Two anchoring schemes in one profile — amplitude early, time late.** Conventionally a PI profile
@@ -676,11 +651,7 @@ inference; this would observe the mechanism directly.
   being confounded by it, and an orientation-invariant descriptor is the 2-D subspace rather than
   any signature in it.
 
-*Retired with the 63-cell epoch, and not true of the current profile: the **×1.5 geometric pulse
-ladder** across seven bands (§10). Any text elsewhere describing evenly-spaced slices of log
-target-τ, or a uniformly amplitude-anchored matrix, is describing `cal_72*`/`cal_63*`.*
-
----
+--
 
 ## 14. Open problems
 
@@ -733,34 +704,6 @@ target-τ, or a uniformly amplitude-anchored matrix, is describing `cal_72*`/`ca
    current profile** — but the question matters more now, not less: the 100 µs band is one of three
    rather than one of seven, so it carries a third of the profile. Needs a scope on coil current vs
    pulse width, which does not depend on any profile.
-
-8. **Threshold noise zone — mechanism unknown.** Column σ is elevated across a band of the decay
-   (~4.45–4.65 V under the 63-cell ladder) while both ends are clean. The *geometry* is understood —
-   the zone sits at a fixed place on the decay and the pack scales the decay past it (§12) — but
-   **why that region of the decay is noisy is not.** Events are quantized two-state (single samples
-   of ±64 mV), suggesting a discrete rather than broadband mechanism. **Status under `cal_3x10_v2`
-   is unknown** — the ladder is entirely new and the zone has not been re-mapped against it.
-
-9. **The classification layer needs rebuilding for the 30-cell epoch.** The signature geometry
-   established on the 63-cell corpora — family as an orientation coordinate, the two-basis mixing
-   law, crossing width as a third coordinate — is *conceptually* intact but every quantity in it is
-   per-epoch. `pimd_shape.py`'s `--selftest` expectations are hard-coded from the 2026-07-23
-   `cal_63_air_v2` analysis and will fail against anything else; **decide whether those
-   expectations become per-epoch data or the selftest is re-scoped.** `pimd_corpus_check`'s FAILs
-   on the retired v3 corpus were never diagnosed and may or may not survive the epoch change.
-
-10. **`Sn_Pb_solder_spool_01` names two different physical objects** across the 07-23/07-28
-    boundary — confirmed by a cross-epoch mean-shape cosine of **+0.143** against ≥ 0.95 for every
-    other matched target. The new roll needs its own id (ids are never reused) with the old
-    captures left on the old one. Both affected corpora are now previous-epoch, so this only bites
-    if they are revisited.
-
-11. **Neither quality gate catches a rogue capture**, and a within-placement check would. Repeats
-    of one placement should agree with each other; nothing currently asserts that at capture time.
-
-12. **Firmware v4.34's bench acceptance is outstanding.** Two measurements close it: sweep interval
-    on the firmware clock against the §10 table, and `B`'s `overrun_count` not rising against a
-    baseline. Until then the v4.34 settle change is reasoned and bench-plausible, not accepted.
 
 ---
 
@@ -855,15 +798,6 @@ Q4  then  G           → Mode 2 streaming, static CLASSIFY_EP profile;  E to st
 *5000,40000,8400,256  then S → Mode 1 streaming (~20/s);  E to stop
 A32                   → one raw boxcar average (R record), idle/Mode 1 only
 ```
-
-### Recalibration procedure
-
-**Always Import Profile before recalibrating.** The persisted `delaycal_settings.json` is *not*
-anchored to the locked profile, so editing a field or two and pressing Run inherits a stale baseline
-for everything else — band plan included. This has already produced a plausible-looking export
-carrying an excluded band and a short threshold ladder. Nothing in the export path flags a departure
-from the §10 band plan, so the procedure is the guard: **load the current locked profile, edit what
-you mean to change, then sweep.** Calibrate only after a full warm-up soak.
 
 ---
 
