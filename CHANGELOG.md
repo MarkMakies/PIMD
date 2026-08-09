@@ -1,3 +1,20 @@
+### References/images — `profile_3x10_timing.png`, the sample-timing map for `cal_3x10_v2`
+
+A figure for the blog, tracked here because it is also the clearest single picture of the operating
+geometry. Three lanes, one per band, on a log delay axis: the six amplitude-anchored early cells,
+the four time-anchored late cells, and the **sd 14.23–18.44 µs** below-rail window shaded across all
+three — which lands exactly in the gap in every lane, because that is what the profile exists to do
+(§7, §10). The 10 µs band's first late cell is annotated sitting on the rail exit itself, the one
+change `cal_3x10_v2` made over v1.
+
+**The delays are read from `src/data/profiles/cal_3x10_v2.json` at render time, not transcribed**,
+so the figure cannot drift from the lock it describes; only the rail bounds are hard-coded, from §7.
+The generator is a one-off and deliberately **not** in the repo — `utilities/` was retired at the
+epoch turnover and `src/*.py` is live tool source, so a throwaway figure script belongs in neither.
+Regenerating it means rewriting it, which is the right cost for something this small. (2026-08-10)
+
+---
+
 ### DESIGN.md / .gitignore — Doc-rev 1.15.7 — content already carried by CHANGELOG.md is cut, and the superseded profiles come back into the repo
 
 Operator trim, plus repair of the artefacts it left. No new bench data.
