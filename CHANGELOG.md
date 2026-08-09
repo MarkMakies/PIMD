@@ -1,3 +1,56 @@
+### DESIGN.md — Doc-rev 1.15.2 / 1.15.3 — staleness audit, and R1 is two resistors in parallel
+
+**A full pass for claims of the same kind as the withdrawn damping figure**: internally consistent,
+but undated, from a retired epoch, or propping up something newer. Five found. **Three are
+regressions the 1.15 consolidation introduced**, which is the useful lesson — a trim that removes
+qualifiers is a way of *creating* stale statements, not just of shortening the document.
+
+1. **§3's epoch banner was gutted.** The pre-1.15 text read *"every value below was measured before
+   the shielded enclosure"* — a blanket claim covering the whole section. 1.15 replaced it with a
+   per-value tagging scheme and then tagged almost nothing, silently promoting flyback, the RX
+   front-end node voltages, sample-timing precision and thermal drift to "current". §3 now carries
+   explicit `[pre-enclosure]` / `[63-cell]` tags and states that untagged means current.
+2. **Two unreconciled filtered-path noise figures.** §3 gives ≈ ±200 µV, §7 gives ≈ ±450 µV for the
+   same SDOA path — 2.25× apart, both pre-enclosure, and §7's boxcar arithmetic is built on the
+   larger. The pre-1.15 doc flagged this; 1.15 dropped the flag. Restored in **both** sections and
+   promoted to the head of §14.2. Nothing downstream depends on it (the acquisition path is raw,
+   where ±1400 µV is consistent throughout), which is how it survived — but one of the two is wrong.
+3. **§3 and §17 disagreed on epoch tags for the same numbers.** `splithalf_floor`, the
+   between-session component and the 70–130 ps timing jitter are tagged `63-cell` in §17 and were
+   untagged in §3. Now consistent.
+4. **SoC's "4 min warm-up" is a bench-supply figure** and warm-up is longer on the pack; the caveat
+   was dropped in 1.15 and is restored, along with Mode 2 warm-up's "untested on `cal_3x10_v2`".
+5. **§17.1's ~0.5 A was tagged "all epochs"** — it was measured on the 63-cell profile and the §12
+   capacity figures rest on it. Now tagged, with a duty check recorded as *inference*: mean band
+   duty goes 28.1 % → 27.1 % across the profile change, so the figure should carry, but it has not
+   been re-measured.
+
+**Then the substantive finding, from the bench rather than the document: R1 is two resistors in
+parallel and the schematic does not show it.** Brown-green-red-gold ∥ brown-black-black-red-gold =
+**1.5 kΩ ∥ 10 kΩ = 1304 Ω**, where schematic v6.04 draws a single `R1 1.3k`. That is within
+**0.33 %** of the value the front-end fit assumed, so **no measured result moves** — but the
+schematic is what a future reader will trust, and it is wrong. Recorded as new open item §14.5a,
+with the suggestion that a single 1 % part would be preferable to a ±5 % pair.
+
+**The best thing to come out of it: ζ does not depend on R at all.** For a parallel RLC the fitted
+poles alone fix it —
+
+> ζ = (τ_f + τ_s) / (2 √(τ_f · τ_s)) = **1.0622**
+
+— because C ∝ 1/R and L ∝ R, so √(L/C) ∝ R and the R cancels. **The over-damped verdict is therefore
+immune to the R1 uncertainty and to the ±5 % tolerance**, which is a much stronger statement than
+the document previously made. L and C individually *do* move with the assumed R (577 pF / 4.43 mH at
+1304 Ω against the published 579 pF / 4.41 mH at 1300 Ω — a 0.33 % shift kept as published, being far
+inside the fit's own uncertainty).
+
+Consequently the ζ-vs-R table is **relabelled as substitution sensitivity**, not as uncertainty in
+this build: it holds the fitted L and C constant and asks what a *different* resistor would do, so
+it inherits the R = 1300 assumption and is a guide to picking a part rather than a measurement. Read
+that way it still says something worth knowing — a ±5 % pair spans 1239–1370 Ω, and the upper corner
+sits ~10 Ω from critical. (2026-08-09)
+
+---
+
 ### DESIGN.md — Doc-rev 1.15.1 — the legacy critical-damping figure is withdrawn as corroboration
 
 **Question asked, and it was the right one: is the front end under- or over-damped?** The answer is

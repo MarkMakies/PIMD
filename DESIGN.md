@@ -3,7 +3,29 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) · **Firmware:** v4.34 · **PC tools:** gui v4.17 · classviz v1.72 · delaycal v1.47 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v2` (locked 2026-08-09, sha `def96704`, 3 × 10 = 30 cells). Bump this line on every edit.
 **Last bench update:** 2026-08-09 (3×10 epoch opened; pack/temperature telemetry on all four PC tools)
-**Doc rev:** 1.15.1 (2026-08-09) — post-consolidation correction, **no new bench data**. The legacy
+**Doc rev:** 1.15.3 (2026-08-09) — **staleness audit + as-built R1.** The RX damping resistor is
+**two parts in parallel on the board — 1.5 kΩ ∥ 10 kΩ = 1304 Ω — and schematic v6.04 draws a single
+1.3k** (§7, new open item §14.5a). Electrically it is what the fit assumed to 0.33 %, so no result
+moves. The audit also established that **ζ depends only on the pole ratio, not on R at all**
+(C ∝ 1/R, L ∝ R, so √(L/C) ∝ R and it cancels): ζ = (τ_f+τ_s)/(2√(τ_f·τ_s)) = 1.0622, immune to the
+R1 uncertainty and to the ±5 % tolerance. The ζ-vs-R table is relabelled as *substitution
+sensitivity* rather than uncertainty in this build. Staleness audit, no new bench data: A full pass for claims of
+the same kind as the damping one below: internally consistent, but undated, from a retired epoch, or
+propping up something newer. Five found, three of them regressions introduced by the 1.15 trim.
+**(a)** The 1.15 rewrite replaced §3's blanket *"every value below was measured before the
+enclosure"* banner with per-value tags and then tagged almost nothing — silently promoting flyback,
+the RX front-end node voltages, timing precision and thermal drift to "current". §3 now carries
+explicit `[pre-enclosure]` / `[63-cell]` tags and says untagged means current. **(b)** The filtered
+path has **two unreconciled noise figures** — §3's ≈ ±200 µV against §7's ≈ ±450 µV, 2.25× apart;
+the previous rev flagged this and 1.15 dropped the flag. Restored, in both sections, and promoted to
+the head of §14.2. **(c)** The corpus-derived statistics in §3 (`splithalf_floor`, between-session
+noise, timing jitter) were untagged while §17 tagged the same numbers `63-cell`; now consistent.
+**(d)** SoC's *4 min warm-up* is a **bench-supply** figure and warm-up is longer on the pack — the
+caveat was dropped in 1.15 and is restored, along with Mode 2 warm-up's "untested on
+`cal_3x10_v2`". **(e)** §17.1's ~0.5 A, which the §12 capacity figures rest on, was tagged "all
+epochs"; it was measured on the 63-cell profile, and now says so — with the duty check that suggests
+it carries (28.1 % → 27.1 % mean band duty) marked as inference, not measurement. Previous:
+1.15.1 (2026-08-09) — post-consolidation correction, **no new bench data**. The legacy
 "critical damping at ≈ 1.3–1.4k" bench note is **withdrawn as corroboration** of the fitted RX L and
 C: it is undated, predates the June 2026 front-end rework, and describes an RX network that may not
 be this one. §7's L/C now rest on the 2026-08-08 scope fit alone, which is sufficient on its own.
@@ -80,15 +102,18 @@ of the sampling, not of the targets.
 
 ## 3. Measured operating envelope — treat as ground truth
 
-> Values marked **[pre-enclosure]** were taken before 2026-07-13 and are historical reference only
-> — re-measure before relying on them (§14.2).
+> **Epoch tags — read these before quoting a number.**
+> **`[pre-enclosure]`** = measured before 2026-07-13 (shielded enclosure + fw v4.24). Historical
+> reference only; re-measure before relying on it (§14.2). **`[63-cell]`** = measured on the retired
+> `cal_63*` grid, so the value is epoch-bound (§10) and its status on `cal_3x10_v2` is untested.
+> **Untagged = current.**
 
-- **Flyback** *(measured, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**, RX coil **−15 V to
-  +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
+- **Flyback** *(measured, 10 kHz / 40 µs)* **[pre-enclosure]**: TX coil **−18 V to +265 V**, RX coil
+  **−15 V to +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
 - **FET Q1 limits:** < 10 A, < 300 µs, < 2 % duty. The detector deliberately runs above the duty
   note (§14.3).
-- **RX front-end node** after R9: **−0.48 / +5.11 V**; ADC input settles **~5.0 V**; edge ring peaks
-  **+5.30 / −0.69 V** (brief, current-limited, harmless). Topology in §7.
+- **RX front-end node** after R9 **[pre-enclosure]**: **−0.48 / +5.11 V**; ADC input settles
+  **~5.0 V**; edge ring peaks **+5.30 / −0.69 V** (brief, current-limited, harmless). Topology in §7.
 - **Signal-detect ceiling must be 5.0 V** in delaycal — post-enclosure the settled top of decay
   reads ~4.87–4.89 V on the heavy bands, and a 4.9 V ceiling false-triggers the coarse hunt.
 
@@ -98,32 +123,44 @@ amplifier noise.
 
 | where | filtered (SDOA) | raw single sample (SDOB) |
 |---|---|---|
-| on the decay slope, DS 256 | ≈ **±200 µV** [pre-enclosure] | ≈ **±1400 µV** |
+| on the decay slope, DS 256 | ≈ **±200 µV** [pre-enclosure] | ≈ **±1400 µV** [pre-enclosure] |
 | where slope vs delay ≈ 0 (past the lobe) | **14–15 µV** at DS 256 | per-sample σ **709 µV** at sd 30 µs |
 
-The 13–30× difference is the point: **the amplitude floor and the timing floor are separate
-specifications.** Equivalent timing jitter across most of the grid is a near-uniform **70–130 ps**;
-the exceptions (top thresholds, shortest and longest bands) reach 260–400 ps.
+⚠ **The two filtered-path figures in this document are not reconciled.** §3 gives ≈ ±200 µV on the
+slope; §7 gives ≈ ±450 µV for SDOA and the boxcar arithmetic there is built on it. They differ by
+2.25× and **both are pre-enclosure.** Neither has been re-measured since; this is the first item on
+the §14.2 backlog. The **raw** figure (±1400 µV) is consistent throughout and is what every boxcar
+calculation in this document rests on.
 
-- **Sample-timing precision** ≈ **5 ns** *(measured)*.
-- **Thermal drift** ≈ **−50 µV/s** at 10 kHz / 20 µs *(measured)*. The one direct check implies
+The 13–30× spread between the two rows is the point: **the amplitude floor and the timing floor are
+separate specifications.** Equivalent timing jitter across most of the grid is a near-uniform
+**70–130 ps** **[63-cell]**; the exceptions (top thresholds, shortest and longest bands) reach
+260–400 ps.
+
+- **Sample-timing precision** ≈ **5 ns** *(measured)* **[pre-enclosure]**.
+- **Thermal drift** ≈ **−50 µV/s** at 10 kHz / 20 µs *(measured)* **[pre-enclosure]**. The one direct check implies
   ≈ 35 µV/s, so 50 is an upper bound. **Reference age is therefore a hard ceiling on any
   frozen-reference measurement:** ~0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at 150 s — a
   reference older than ~10 s already rivals a weak target. Always bracket air on both sides;
   interpolating between a reference before and after takes correct pairings to cos 0.996–1.000
   where a single earlier reference costs ~0.05 of cosine.
 - **Standard Operating Conditions (SoC):** Mode 1 · 10.0 kHz / 20.0 µs pulse / 10.0 µs delay /
-  DS 256 · coil in air, no targets · **4 min warm-up** minimum. Reference capture:
-  `References/images/GUI-steady-state-256-1024.jpg`. **On battery, SoC is not fully specified
-  without a pack-voltage range** — pack voltage reaches the operating point at 43–51 mV/V (§12).
-- **Mode 2 warm-up ≈ 5 min** for a light profile; cold heavy bands drift up to ~250 ns in
-  calibrated delay, soaked repeat cals agree to ≤ 40 ns.
-- **`splithalf_floor` understates reproducibility noise by ≈ 2×** *(measured)*. It is a
+  DS 256 · coil in air, no targets. Reference capture:
+  `References/images/GUI-steady-state-256-1024.jpg`. Two caveats, both live: the **4 min warm-up**
+  figure was established on the **20 V bench supply that no longer exists** and **warm-up is longer
+  on the 6S pack** (§12, §14.1) — treat 4 min as a floor, not a spec; and **on battery, SoC is not
+  fully specified without a pack-voltage range**, because pack voltage reaches the operating point
+  at 43–51 mV/V (§12).
+- **Mode 2 warm-up ≈ 5 min** *(established 2026-07-02/03, on a light profile and on the bench
+  supply — it did **not** hold for a 63-cell profile on battery, and is **untested on
+  `cal_3x10_v2`*)*. Cold heavy bands drift up to ~250 ns in calibrated delay; soaked, repeat cals
+  agree to ≤ 40 ns.
+- **`splithalf_floor` understates reproducibility noise by ≈ 2×** *(measured)* **[63-cell]**. It is a
   within-capture statistic and does not see what moves between two captures. Across-capture L2 is
   **4.03 mV** against a median `splithalf_floor` of **1.82 mV**. Practical consequence: **the
   SNR ≥ 5 gate is really a reproducibility gate of ≈ 2.5–3.5**, which is why raising it keeps
   paying.
-- **The between-session noise component measures zero** *(measured)*: within-session pooled σ
+- **The between-session noise component measures zero** *(measured)* **[63-cell]**: within-session pooled σ
   **4.24 mV** vs all-captures **4.03 mV** across three days and eight sessions. Captures made on
   different days are directly comparable — which is what a training corpus needs.
 
@@ -146,7 +183,7 @@ the exceptions (top thresholds, shortest and longest bands) reach 260–400 ps.
    GPIO26 pack-voltage sense (22k/2.7k divider)   GPIO6 DS18B20 board temperature
 
  TX coil ──(flyback, resistive damping ~220R)
- RX coil ─► R1 1.3k damp ║ R9 4.7k series ─► clamp (D2 4.7V zener + D3 1N5819) ─► 47R
+ RX coil ─► R1 damp (1.5k‖10k=1304Ω) ║ R9 4.7k series ─► clamp (D2 4.7V zener + D3 1N5819) ─► 47R
           ─► LT6203 preamp/ADC driver (U3, single +12V) ─► LTC2508-32 ADC (U6)
           ─SPI─► RP2040
                        SDOA/SCKA/DRL  = 32-bit filtered/decimated  (SPI1, Mode 1)
@@ -194,17 +231,23 @@ scope, not by formula.
 ### RX front end (schematic v6.04)
 
 ```
-RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
+RX coil ─┬─ R1 ─ GND                   (shunt = damping; AS BUILT 1.5k ‖ 10k = 1304Ω,
+         │                              schematic v6.04 still draws a single 1.3k — §14.5)
          └─ R9 4.7k ──┬─ D2 1N4732 (4.7V zener) ─┐  (positive clamp)
                       │  D3 1N5819 (Schottky) ───┘  (negative clamp)
                       └─ 47R ─► LT6203 +input (single +12V supply)
 ```
 
-- **R1 = 1.3k (shunt) is the RX damping resistor**, which also cleans up TX via mutual coupling.
-  By the current fit it puts the network at **ζ = 1.06 — just into over-damping**, which is the
-  intent (§5). *(An older bench note put "critical damping at ≈ 1.3–1.4k". **Treat that band as
-  historical, not as a range to pick from:** it is undated, predates the June 2026 front-end
-  rework, and by the fitted values below **1.4k is under-damped, ζ = 0.99** — see the ζ table.)*
+- **R1 (shunt) is the RX damping resistor**, which also cleans up TX via mutual coupling.
+  ⚠ **As built it is TWO resistors in parallel, and the schematic does not show this** *(§14.5)*:
+  **1.5 kΩ ∥ 10 kΩ** (brown-green-red-gold ∥ brown-black-black-red-gold, both ±5 %) =
+  **1304 Ω effective**. Schematic v6.04 still draws a single `R1 1.3k`. The value was evidently
+  trimmed to land there, which is also the likeliest origin of the legacy "≈ 1.3–1.4k" bench note.
+  1304 Ω is within **0.33 %** of the 1300 Ω the §7 fit assumes, so nothing downstream moves.
+  By that fit the network sits at **ζ = 1.06 — just into over-damping**, which is the intent (§5).
+  *(Treat the legacy "critical damping at ≈ 1.3–1.4k" band as **historical, not a range to pick
+  from**: it is undated, predates the June 2026 front-end rework, and by the fitted values 1.4k is
+  under-damped — see the ζ table.)*
 - **R9 = 4.7k (series) is clamp current-limit only**, not damping.
 - **D2 / D3** sit in series across the post-R9 node and conduct only outside ~0–5 V; between the
   rails the diodes are off and R1 does the damping.
@@ -216,7 +259,8 @@ RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
 - **U6 LTC2508-32**, 32-bit oversampling SAR with a configurable decimation filter **and** a
   no-latency raw output:
   - **SDOA (SPI1):** 32-bit filtered/decimated, `DRL` data-ready-low — the precision path
-    *(≈ ±450 µV)*.
+    *(≈ ±450 µV — **but see §3: this is unreconciled with §3's ≈ ±200 µV for the same path**, and
+    both are pre-enclosure)*.
   - **SDOB (SPI0):** no-latency raw 14-bit *(≈ ±1400 µV)* — the acquisition path.
   - **Decimation** SEL0 (GPIO12): 256 (operating) or 1024.
   - **Conversion sync:** the falling edge of GPIO5 (`SAMPLE`/`MCLK`) starts each conversion, so
@@ -290,15 +334,38 @@ by construction — there is no guard in the feature code and none is needed whi
 
 ### RX L and C — pinned *(2026-08-08)*
 
-Taking the fitted poles with R1 = 1.3 k gives **C = 579 pF**, **L = 4.41 mH**, √(L/C) = 2762 Ω and
-**R_crit = ½√(L/C) = 1381 Ω**. *(The old 3.9 mH / 311 pF was inferred from a resonance and is
-retired.)* Damping is a **shunt**, so **lower R means more damping**:
+**ζ is the one number here that does not depend on R at all.** For a parallel RLC the two fitted
+poles alone fix it:
+
+> **ζ = (τ_f + τ_s) / (2 √(τ_f · τ_s)) = 1.0622**
+
+L and C individually *do* scale with the assumed R (C ∝ 1/R, L ∝ R), but √(L/C) scales with R too,
+so it cancels. **The over-damped verdict is therefore immune to the R1 uncertainty** — it would be
+1.06 whether R1 is 1300 Ω, the as-built 1304 Ω, or either ±5 % corner. That is why it can be stated
+flatly while the L and C below carry a caveat.
+
+Taking the fitted poles with R1 = 1300 Ω gives **C = 579 pF**, **L = 4.41 mH**, √(L/C) = 2762 Ω and
+**R_crit = ½√(L/C) = 1381 Ω**. *(With the as-built 1304 Ω these become 577 pF / 4.43 mH /
+R_crit 1385 Ω — a 0.33 % shift, far inside the fit's own uncertainty, so the published pair is kept.
+The old 3.9 mH / 311 pF was inferred from a resonance and is retired.)*
+
+**Substitution sensitivity** — what happens if R1 is *changed*, holding the fitted L and C. Damping
+is a **shunt**, so **lower R means more damping**. (Unlike ζ above, this table inherits the R = 1300
+assumption through L and C, so read it as a guide to picking a resistor, not as a measurement.)
 
 | R1 | ζ | |
 |---|---|---|
-| **1300 Ω — as built** | **1.06** | **over-damped, the intent (§5)** |
-| 1381 Ω | 1.00 | critical |
+| 1239 Ω — as-built pair, −5 % corner | 1.11 | over-damped |
+| **1304 Ω — as built, nominal (1.5k ∥ 10k)** | **1.06** | **over-damped, the intent (§5)** |
+| 1370 Ω — as-built pair, +5 % corner | **1.01** | over-damped, but **effectively critical** |
+| 1380 Ω | 1.00 | critical |
 | 1400 Ω | 0.99 | under-damped — ring returns |
+
+**Read that table as design margin for a *future* substitution, not as uncertainty in the current
+build.** This board's ζ is measured at 1.06 from its own poles regardless of what R1 turns out to
+be. But if either part is replaced, the ±5 % pair spans **1239–1370 Ω**, and at the upper corner the
+network would sit ~10 Ω from critical — so a worst-case pair has almost no margin. A single 1 %
+part would remove that concern (§14.5).
 
 **These values rest on the 2026-08-08 scope fit alone** — 894 points, residual RMS 0.87 mV, taken
 at the amplifier input on the current hardware. *(An earlier rev cited the legacy "1300–1400 Ω
@@ -628,10 +695,14 @@ inference; this would observe the mechanism directly.
    effect.)*
 
 2. **Post-enclosure / post-6S re-measurement backlog.** Noise floors, drift rates and the §12
-   supply-noise table are all pre-enclosure, and the battery rows are also 5S — doubly stale. Also
-   open: the 7805-vs-USB noise mystery (onboard 7805 path ~50 % noisier than USB, unresolved) and
-   the flash-penalty rows. **When re-measuring, record which floor is being measured** — amplitude
-   or timing (§3).
+   supply-noise table are all pre-enclosure, and the battery rows are also 5S — doubly stale.
+   **First item: the filtered path has two unreconciled figures** — §3's ≈ ±200 µV against §7's
+   ≈ ±450 µV for the same SDOA path, 2.25× apart, both pre-enclosure, and §7's boxcar arithmetic is
+   built on the larger one. Nothing downstream depends on the filtered figure (the acquisition path
+   is raw, where ±1400 µV is consistent throughout), which is why this has survived — but one of the
+   two is wrong and the document should not carry both. Also open: the 7805-vs-USB noise mystery
+   (onboard 7805 path ~50 % noisier than USB) and the flash-penalty rows. **When re-measuring,
+   record which floor is being measured** — amplitude or timing (§3).
 
 3. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET duty
    note; Q1 (IRF610) is being pushed past its noted SOA. A higher-rated replacement is probably
@@ -640,10 +711,17 @@ inference; this would observe the mechanism directly.
 4. **C18 under-rated.** 4700 µF **25 V** on a rail that reaches 25.2 V on a fresh pack. 35 V
    replacement identified, not fitted.
 
-5. **R9 clamp current unreconciled.** §7's +50 V "damped peak" implies ~9.6 mA through 4.7k, but §3
-   measures **+135 V at the RX coil**, which would imply ~28 mA. Either they are measured at
-   different points or under different damping. A scope at the post-R9 node settles it. *Not* a
-   claim the front end is out of spec — it has run for months.
+5. **Schematic v6.04 does not match the build at R1, and R9's clamp current is unreconciled.**
+   Two separate front-end documentation defects, both at the same node.
+   *(a)* **R1 is two resistors in parallel on the board — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective — and the
+   schematic draws a single 1.3k** *(§7)*. Electrically it is the value the fit assumes, to 0.33 %,
+   so no measured result moves; but the schematic is the thing a future reader will trust, and it is
+   wrong. **Update the schematic**, and while doing so consider whether a single 1 % part is
+   preferable — the ±5 % pair's upper corner sits ~10 Ω from critical damping (§7 ζ table).
+   *(b)* §7's +50 V "damped peak" implies ~9.6 mA through 4.7k, but §3 measures **+135 V at the RX
+   coil**, which would imply ~28 mA. Either they are measured at different points or under different
+   damping. A scope at the post-R9 node settles it. *Not* a claim the front end is out of spec — it
+   has run for months.
 
 6. **The host can block the MCU, and did — for 47 minutes.** The Mode 2 emit is a blocking `print()`
    to USB CDC (§8). v4.27 counts these on `B` but does not prevent them. Any PC tool that stops
@@ -795,7 +873,7 @@ you mean to change, then sweep.** Calibrate only after a full warm-up soak.
 
 | # | Fact | Epoch |
 |---|---|---|
-| 17.1 | **Power draw ~0.5 A average** streaming; drive current and heating scale with pulse width and duty. | all |
+| 17.1 | **Power draw ~0.5 A average** streaming; drive current and heating scale with pulse width and duty. Measured on the 63-cell profile (mean band duty 28.1 %); `cal_3x10_v2`'s mean band duty is **27.1 %**, so the figure should carry — *inferred from duty, not re-measured*. The §12 capacity numbers depend on it. | 63-cell → current |
 | 17.2 | **The front end is two real poles with opposite-sign residues** — τ_fast 1.125 µs, τ_slow 2.270 µs, ζ 1.06 — giving exactly one zero crossing, a negative lobe at sd 14.3–18.0 µs, a 16.5 mV pedestal and a 2.441 mV output rail. Measured on a scope at the amplifier input, not inferred from the ladder (§7). | current |
 | 17.3 | **The null responds to metal.** A steel spanner on the coil removes the zero crossing entirely (min +15.5 mV, difference up to +48.9 mV at sd 13.57 µs). It is real coil physics, not an amplifier artefact. | current |
 | 17.4 | **Where air is railed, measured target delta is compressed up to ~3.5×**, non-linearly and by an amount depending on target strength. Closed by geometry in `cal_3x10_v2` (§7). | current |
