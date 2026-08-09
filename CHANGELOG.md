@@ -34,7 +34,10 @@ needs no code. It was a leaf: it consumed `pimd_features`, `pimd_corpus_check` a
 
 **Consequences.** The `.gitignore` block covering the 2026-07-13 "previous-epoch ML tools" is gone:
 all three files it named are resolved (`pimd_corpus_check.py` re-tracked 2026-07-15, the other two
-deleted), and **every `src/*.py` is now repo source** with nothing ignored in its place. `USAGE.md`
+deleted), and **every `src/*.py` is now repo source** with nothing ignored in its place. Its
+`src/data/classify_settings.json` went with it — gitignored, so invisible to the repo, but a
+settings file for a tool that no longer exists is just a thing to wonder about later. **Retiring a
+tool means retiring its settings file too**, which is the precedent worth having here. `USAGE.md`
 → **v1.31** records the deletion in §6 with the recovery shas for both files and the warning that
 reviving one means reviving both. *For the next §18 consolidation pass:* §15's `src/pimd_classify.py`
 row (still describing v1.3) should go, and §1's pipeline diagram and the "fourth tool in the
