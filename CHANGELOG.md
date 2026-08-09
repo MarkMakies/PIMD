@@ -1,3 +1,383 @@
+### Findings — the cell-0 population is caused by the EMIT. Not the band boundary, not settling, not dwell.
+
+`cal_100_10_x15_v1_3band` (97a12499) was run under fw v4.34, 1427 frames / 143 s / 9.95 Hz. It
+fills the open cell of the factorial and closes the question. The 25 kHz/10 µs @ 5.160 µs cell,
+absolute >100 mV gate, Poisson errors:
+
+| run | emit? | energy step? | settle at that cell | events per 1000 |
+|---|---|---|---|---|
+| `cal_100_10_x15_v1` pos 0 | **yes** | yes | 3 ms | **32.6 ± 5.0** |
+| **3-band pos 0** | **yes** | **no** | **none — `needs_settling` is False** | **28.1 ± 4.4** |
+| `_bandswap` pos 15 | no | yes | 3 ms | 0.0 ± 0.7 |
+| **3-band pos 30** | **no** | **yes** | **3 ms** | **0.0 ± 0.7** |
+
+**The emit alone reproduces the population at full strength.** 28.1 ± 4.4 against 32.6 ± 5.0 is
+indistinguishable, and it is produced at a cell with *no* band boundary, *no* energy step and *no*
+settle sleep whatsoever. Removing the emit takes it to exactly zero in two independent runs.
+
+**The within-run control is the strongest evidence in this whole investigation.** ch0 and ch30 are
+the same frequency, same pulse, same delay, same profile, same sweep, the same second of the same
+capture — the only difference between them is which one follows the emit. Over 1426 sweeps:
+**ch0 151 events (min −205, max +129 mV), ch30 zero.** Not "fewer": zero.
+
+**Dwell is excluded over the full range tested.** The population appears at ~0 ms of settle (here,
+where the wrap changes neither frequency nor drive duty) and at ~16 ms (the v4.35 10 ms-floor run,
+10 ms settle + ~6 ms emit) at statistically the same rate, while every *settling* gradient in the
+profile responds strongly to that same range. Settling and this population are different
+phenomena and always were.
+
+**So the residual mechanism is the emit itself, and it is configuration-selective.** The bandswap
+run put the emit in front of the 3.125 kHz/100 µs cell and got 0.0 per 1000, so it is not simply
+"the cell after the emit". It is the emit *and* the 25 kHz/10 µs operating point. Dwell is out and
+the code path is byte-identical for both bands, which leaves the electrical environment during and
+after the USB TX burst — a ~250-byte W record is four packets and TX continues for milliseconds
+after `print()` returns, through cell 0's conversion. At 25 kHz a conversion completes every 40 µs
+so the BUSY-synced read lands inside that window; at 3.125 kHz the next conversion is up to 320 µs
+away. **Per CLAUDE.md this is not decidable from the code and wants the scope** — trigger on the
+USB D+/D− activity and watch the LT6203 output and the LTC2508 reference.
+
+**Two firmware options exist that do not require knowing the mechanism**, both cheap and
+reversible, and neither is a redesign: (a) decimate the emit via `MIN_EMIT_MS` and confirm the rate
+falls proportionally — a one-constant causality check; (b) **move the emit's service point off
+`i == 0` to a sweep index whose following cell sits on the pedestal**, where a corrupted sample
+costs nothing (cells 13/14 of the 25 kHz band read 15–16 mV at 1 LSB of σ). (b) is a real fix
+rather than a diagnostic and would leave the informative top-of-decay cells clean, but it is a hot
+path change and the v4.13/v4.20/v4.24/v4.26 sequence is fair warning that it needs its own A/B.
+
+**Secondary, and a caution for profile design.** The same run shows the 100 µs band reading
+*higher* and *noisier* in the 3-band profile than in the 2-band one — 4874.3 mV / σ 12.14 against
+4845.8 / 9.59 at 7.48 µs, and 3885.3 / σ 23.05 against 3852.4 / 10.87 at 8.32 µs. Thirty of the
+forty-five cells are now the low-power band, so the rig runs cooler and the 100 µs band's energy
+step is *larger* relative to steady state. **Band composition changes the operating point of the
+other bands** — which is §10's "a profile is only fully specified together with a pack-voltage
+range" extended to a dimension that was not previously written down. The two identical 25 kHz
+bands also differ by **34 mV** at 5.160 µs (4874.1 at position 0 vs 4839.8 at position 30) purely
+from position-30's under-settling, a direct measure of the residual boundary bias at a 3 ms floor.
+(2026-08-09)
+
+---
+
+### src/data/profiles/cal_100_10_x15_v1_3band.json — new — within-run factorial separating the emit from the energy step
+
+Diagnostic profile, not a calibration. Three bands × 15 delays = 45 cells:
+**25 kHz/10 µs, 3.125 kHz/100 µs, 25 kHz/10 µs**, where the two 25 kHz bands are *byte-identical*
+— same frequency, same pulse, same delays. The same physical configuration therefore appears at
+sweep position 0 **and** position 30 inside one sweep, at the same pack state, the same thermal
+state and the same run. Every comparison so far has been between runs; this is the first within-run
+control.
+
+**The design turns on a property of `needs_settling`, not on the repetition.** Because band 2 is
+also 25 kHz/10 µs, the wrap from position 44 into position 0 changes neither the frequency nor the
+drive duty, so `at_boundary or dd != cells[prev][2]` is **false** at position 0 — verified against
+the firmware's own arithmetic. That cell gets the blocking emit and *no* boundary settle and *no*
+energy step. Position 30 gets the 100 µs → 10 µs energy step and its settle but *not* the emit.
+The two confounded factors are separated, and combined with the existing runs the four-cell
+factorial is complete:
+
+| | emit | no emit |
+|---|---|---|
+| **energy step** | `cal_100_10_x15_v1` pos 0 — **32.6 /1000** | `_bandswap` pos 15, this profile pos 30 — **0.0 /1000** |
+| **no energy step** | **this profile, pos 0** — the open cell | — |
+
+Reading the result at 25 kHz/10 µs @ 5.160 µs on the absolute >100 mV gate: population at pos 0
+only ⇒ the emit alone is sufficient and the energy step is irrelevant; at pos 30 only ⇒ the energy
+step alone is sufficient and the emit is irrelevant; at both ⇒ each is independently sufficient;
+at neither ⇒ the two are required together, which is what the existing 32.6 vs 0.0 pair implies
+and which would point squarely at the emit's interaction with the low-power band rather than at
+either factor alone.
+
+Validated before writing: all 45 cells pass the firmware's `compute_pulse_duties` /
+`pulse_duties_valid` arithmetic, all three bands carry 15 delays (the `D` command rejects unequal
+bands), and the `D` string is 337 chars against 227 for the two-band profile — longer than
+anything sent so far but well inside what the 110-cell profiles already require. Expected sweep
+~117 ms (~8.5 Hz) at 45 cells and two real boundaries, so the 32-deep rolling window spans ~3.7 s.
+
+Two operational notes. `pimd_delaycal` labels rows by freq/pulse, so **two rows will look
+identical**; its thermal tables sort by `pulse_us` with a stable sort, giving display order
+band 0, band 2, band 1 — top row is the position-0 copy, middle row is the position-30 copy,
+bottom row is the 100 µs band. And `_meas_cache` / any keying on `(freq, pulse, delay)` collides
+between the two copies; the session `colmap` carries `band_index`, so `mode2_cell_noise` separates
+them correctly (smoke-tested on a synthetic 45-channel session: planted 52.2 outliers per 1000 on
+ch0, recovered 44.5, and the identical ch30 correctly reported 0.0 with no false positive).
+(2026-08-09)
+
+---
+
+### Findings — SETTLE_FLOOR_US 10 ms was tried and reverted: it fixes settling, and it kills the dwell hypothesis
+
+`SETTLE_FLOOR_US` was raised 3000 → 10000 µs (briefly FW_VERSION 4.35), flashed, run, and
+**reverted the same session**. No shipped version carries it, so this is recorded as a finding
+rather than a version entry — but the experiment answered two things and should not be re-run
+blind. The constant's comment block in `pimd_mcu.py` carries the short form.
+
+**It fixed the settling, comprehensively.** Equivalent timing jitter, first five cells of each
+band, across all four runs (`session_20260809_133725` / `_133928` at 3 ms, `_140356` / `_140331`
+at 10 ms; "emit" marks the band that sat at sweep position 0 and therefore also received the
+~6 ms blocking emit inside its settle window):
+
+| band | floor | at position 0 (**+ emit**) | at position 15 (settle only) |
+|---|---|---|---|
+| 3.125 kHz / 100 µs | 3 ms | 2.1 2.3 1.9 1.5 1.4 ns | 8.1 7.8 5.3 3.7 4.1 ns |
+| 3.125 kHz / 100 µs | **10 ms** | 1.1 1.4 1.4 0.7 1.4 ns | **3.3 3.9 3.0 2.2 2.7 ns** |
+| 25 kHz / 10 µs | 3 ms | 2.5 2.2 2.3 2.1 2.6 ns | 2.4 5.2 5.2 4.3 5.2 ns |
+| 25 kHz / 10 µs | **10 ms** | 2.5 1.3 1.4 1.4 1.3 ns | **1.0 2.2 2.3 2.1 2.6 ns** |
+
+Every position-15 gradient collapses to roughly the emit-fed figure, and the emit-fed positions
+improve again on top. The tool stops flagging a boundary gradient anywhere. The ~9–11 ms transient
+estimate is confirmed a second time, and 10 ms covers it.
+
+**It did not touch the cell-0 outlier population, and that is the valuable part.** The 25 kHz /
+10 µs @ 5.160 µs cell at sweep position 0, absolute >100 mV gate, with Poisson errors:
+
+| run | events / sweeps | rate per 1000 |
+|---|---|---|
+| v4.34, 3 ms, original | 43 / 1321 | 32.6 ± 5.0 |
+| v4.34, 3 ms, bandswap (same cell at pos 15) | 0 / 1425 | 0.0 ± 0.7 |
+| 10 ms, original | 6 / 258 | 23.3 ± 9.5 |
+| 10 ms, bandswap (same cell at pos 15) | 0 / 210 | 0.0 ± 4.8 |
+
+32.6 ± 5.0 against 23.3 ± 9.5 is **no change within the error** — and the 10 ms runs are only
+20–24 s / 211–259 frames, which is ample for σ (a MAD over ~250 differences) but far too short for
+a rate claim off six events. The conjunction holds identically under both floors: the population
+appears only where the 25 kHz/10 µs band meets sweep position 0, and position 0 occupied by the
+100 µs cell is 0 events in both firmwares.
+
+**So variable emit dwell is not the mechanism.** At a 10 ms floor cell 0 receives ~10 ms of settle
+plus the ~6 ms emit — roughly 16 ms at its own configuration before its sample, against a
+transient that every other measurement in this profile says is over by ~11 ms. Every settling
+gradient in the profile vanished at that dwell. If the population were the emit's *duration*
+moving the sample around on a relaxing curve, it would have gone with them. It did not. What
+remains is something about the emit that is not its length — USB TX burst coupling into the front
+end or the LTC2508 reference is the standing candidate, and per CLAUDE.md that is not decidable
+from the code.
+
+**Why it was reverted despite fixing settling.** The floor is global and the cost is real:
+12.07 → 10.53 Hz on this profile, and ~6.2 → ~4.8 Hz on `cal_63_air_bat_v3`'s seven boundaries,
+against the 6.88–6.92 Hz DESIGN §8 records as that profile's measured rate — and frame rate is
+part of the firmware↔ML contract, not a free parameter. The 10 ms number was measured on a **12.5×**
+adjacent-band power step (P ∝ pulse²×freq); `cal_63`'s bands step ×1.5 and very likely never
+needed it. The right shape, if a characterisation profile wants it, is a **per-boundary floor
+scaled to the actual energy step**, not a larger global constant. (2026-08-09)
+
+---
+
+### Findings — the band-swap experiment: settling needs ~10 ms, and cell 0's outlier population is a *conjunction*
+
+Two 2026-08-09 sessions under fw v4.34, **two minutes apart**, same pack and same thermal state —
+`session_20260809_133725` (`cal_100_10_x15_v1`, 056797db) and `session_20260809_133928`
+(`cal_100_10_x15_v1_bandswap`, 2c205e24) — as controlled an A/B as this rig gets. Scored with
+`mode2_cell_noise` on the **absolute** 100 mV excursion gate, matching cells across the two runs
+by `(freq, pulse, delay)`.
+
+**The cell-0 outlier population is neither cell-bound nor position-bound. It needs both.** The
+25 kHz/10 µs @ 5.160 µs cell runs **32.6 events per 1000 sweeps** at sweep position 0 and
+**0.0** at position 15 — the same physical cell, same delay, same firmware, minutes apart. So it
+does not follow the cell, which rules out a purely analogue, cell-intrinsic mechanism (clamp
+release, converter ceiling). But the cell that *takes over* position 0 in the swapped profile —
+3.125 kHz/100 µs @ 7.480 µs — is also **0.0**, so it does not follow the position either. The
+artefact requires the 25 kHz/10 µs configuration **and** the sweep position that carries the
+emit. Neither prediction in the v4.34 entry was right, and the conjunction is the more useful
+answer: it is not "cell 0 is noisy", it is "the emit interacts with the low-power band".
+
+**Settling: whichever band gets the emit comes out clean, and both bands need it.** The emit
+costs ~6 ms (from the 82.8 ms sweep: 30 cells × ~2.3 ms + 7.8 ms of delivered settle), and it
+lands entirely inside the settle window of whichever band sits at position 0. Equivalent timing
+jitter for the first five cells of each band:
+
+| band | at position 0 (settle **+ emit**) | at position 15 (settle only) |
+|---|---|---|
+| 3.125 kHz / 100 µs (4800 µs settle) | 2.1, 2.3, 1.9, 1.5, 1.4 ns | 8.1, 7.8, 5.3, 3.7, 4.1 ns |
+| 25 kHz / 10 µs (3000 µs settle) | 2.5, 2.2, 2.3, 2.1, 2.6 ns | 2.4, 5.2, 5.2, 4.3, 5.2 ns |
+
+σ falls 3–4× on the 100 µs band and ~2× on the 25 kHz band. **Both floors are still too short:**
+4800 µs and 3000 µs both leave a gradient, and only the extra ~6 ms removes it. The boundary
+transient for this 12.5× power step therefore runs **~9–11 ms**, which confirms by *manipulation*
+the ~8–10 ms inferred from the v4.33 data. `SETTLE_FLOOR_US` wants to be ≈ 10 000 for a step this
+size — measured evidence for the number v4.34 deliberately deferred. Cost would be ~+12 ms per
+sweep on this profile and ~+49 ms on `cal_63_air_bat_v3`'s 7 boundaries, so it is a real trade,
+not a free win.
+
+**The §17.7 "first-column noise" model needs a refinement.** In the swapped run the 25 kHz band's
+*first* cell (position 15) is its **cleanest** at 2.4 ns while its 2nd–5th sit at ~5 ns. Only the
+first cell of a band gets a settle `sleep_us` — a fixed, well-defined dwell. Every later cell has
+`remaining` go negative (overrun, no sleep at all), so its sample lands wherever ~2.3 ms of
+interpreter time happens to put it, while the band is still relaxing. The excess is not "the first
+column is bad", it is "cells 2–5 ride the transient with undamped timing". That is why raising the
+floor helps them: it moves the whole band past the transient before any of them sample.
+
+**Correction to the v4.34 entry's caveat.** That entry warned the pack had fallen 24.30 → 22.65 V
+and would confound the firmware A/B. The 24.30 V is `pimd_classviz`'s operator-entered `pack_v`
+header field (`age_s=unknown`), and it is stale and identical in all three sessions. The
+**firmware's** own readings are 22.959 V (12:36, in that session's `V` string) and 22.652 V
+(13:26) — a 0.31 V change, ~13–16 mV of decay amplitude. The v4.33/v4.34 comparison is therefore
+much better controlled than that caveat claimed.
+
+**And the header is not stale data — it is an unimplemented consumer.** `pimd_classviz`'s
+`pack_v` is a manually-typed spinbox (`sp_pack_v`, with a `PACK_V_REMIND_S` 20-minute nag), and
+the file contains **no** reference to `pack_mV` or `board_temp_dC`: it never reads the firmware's
+`P` telemetry or the `V` reply's trailing sensor fields. `pimd_delaycal` has none either.
+`pimd_gui` and `pimd_rawlog` do consume them. So the firmware side (the v4.29 calibrated divider,
+the v4.33 DS18B20) is real and reporting; the plumbing into the two tools that write capture
+metadata simply has not been built yet. Wiring `pack_v`/`board_temp_dC` straight from the wire
+into the classviz session header would satisfy §10's "state the window you ran in" automatically
+and remove a hand-entered field from the record — worth doing before the next corpus campaign,
+and it is a tooling task, not a firmware one.
+
+**What v4.34 actually bought** (identical profile, 62.5 → 76.5 relative-gate events was an artefact
+of the moving gate — see the tool v1.01 entry): σ **halved** across the 25 kHz band (×0.50–0.67),
+−15…−35 % on the 100 µs band, ch0 equivalent jitter 5.0 → 2.5 ns, and the cell-0 excursion median
+132 → 60 mV with the >100 mV rate 43.3 → 32.6 per 1000. A material improvement that did **not**
+eliminate the cell-0 population. Sweep 12.49 → 12.07 Hz, against a predicted ~11.8 Hz.
+(2026-08-09)
+
+---
+
+### utilities/mode2_noise/mode2_cell_noise.py — v1.01 — absolute-excursion column; the relative gate is not comparable between runs
+
+v1 gated candidate outliers at `4 × robust sigma` of the step series. That finds the anomalous
+cell **within** one run, which is what it was built for, but it is actively misleading **between**
+runs: the gate moves with each run's own noise, so halving a channel's sigma lets smaller events
+start crossing it. On the v4.33 → v4.34 A/B ch0 read **62.5 → 76.5** events per 1000 while sigma
+halved, equivalent jitter went 5.0 → 2.5 ns and the median excursion fell 132 → 60 mV — the count
+rose because the run got quieter. Reporting that as "the fix made it worse" would have been wrong.
+
+v1.01 adds a second column gated at an **absolute** `ABS_GATE_MV = 100` mV excursion (a single
+sample that far out steps an N-deep boxcar by `100/N`, which is what is detected), and keeps the
+relative column alongside it. Same-run diagnosis reads the relative column; any A/B reads the
+absolute one. The constant carries the reasoning so the trap is not re-entered. (2026-08-09)
+
+---
+
+### mcu/pimd_mcu.py — v4.34 — boundary settling is measured from the config write, not the loop top
+
+`acquire_mode2()` computed its band-boundary settle as
+`remaining = period - elapsed - 2` and then `remaining += period * settle_i`, where `elapsed` is
+`ticks_diff(ticks_us(), t0)` and `t0` is taken at the **top** of the loop iteration — before
+`read_raw_bytes_hold()` and before the freq/CC writes. Every microsecond of `elapsed` was
+therefore spent at the **previous** cell's configuration, and it was being deducted from this
+cell's settle budget. Delivered settle was `period·settle − (elapsed − period)`, not
+`SETTLE_FLOOR_US`. v4.34 captures `t_cfg = ticks_us()` immediately after `enable_irq(_held_irq)`
+— the instant cell[i]'s configuration goes live — and sleeps `period·settle` measured from
+*there*. Non-boundary cells are untouched, and the v4.26 IRQ-off critical section is not
+lengthened (the one new `ticks_us()` call is outside it).
+
+**How far short it fell.** Per-cell interpreter cost is ~2.3–2.4 ms, dominated by the BUSY sync
+(DESIGN §7 — the poll loop catches roughly one BUSY-high in six). That is far longer than any
+band period above ~400 Hz, so `elapsed` always exceeded `period` and the floor was always
+diluted:
+
+| boundary | intended | delivered before v4.34 |
+|---|---|---|
+| 25 kHz band, 75 periods | 3000 µs | ≈ 600–740 µs |
+| 3.125 kHz band, 15 periods | 4800 µs | ≈ 2.7–2.8 ms |
+
+So **`SETTLE_FLOOR_US` was not an absolute floor on any band in any profile in the repository.**
+v4.24 was still a real improvement and its bench verification was not wrong — before it the
+sleep went *negative* at high-frequency bands and there was no settling at all — but the
+mechanism was never delivering the number §8 and §17.7 quote for it.
+
+**What found it.** Hand-tuning `cal_100_10_x15_v1` (2 bands × 15 thresholds, 25 kHz/10 µs and
+3.125 kHz/100 µs) showed the first cell of each row with a std dev far above its neighbours —
+2.60 mV and 0.89 mV — that would **not move when the delay was nudged all the way down to
+2.5 V**. That control rules out timing jitter and decay slope and points at sweep position.
+`session_20260809_123634.csv` (3235 frames / 259 s, `profile_sha8 056797db`, 12.49 Hz) was
+analysed with the new `utilities/mode2_noise/mode2_cell_noise.py`, which deconvolves the 32-deep
+rolling mean to recover single samples. Two distinct signatures, neither delay-dependent:
+
+- **Band 1's first three cells** carry a decaying excess — 10.3 → 11.9 → 6.2 ns equivalent
+  timing jitter against the band's own 4.2 ns settled baseline. That is the §17.7 under-settled
+  boundary gradient, and it says this profile's boundary transient is still running **~8–10 ms**
+  after the switch.
+- **Cell 0 alone** carries a discrete single-sample outlier population: **62.5 events per 1000
+  sweeps** against 6.8 for the worst other cell in its band, median excursion 132 mV, bimodal at
+  ≈ −200 mV and ≈ +120 mV, spread evenly over all 32 residue classes and uniform in time. At one
+  event per 8–16 sweeps against a 12.49 Hz sweep this beats at **≈ 0.8–1.5 Hz**, which is the
+  "about 1 Hz" wander seen on the bench; each event then holds the displayed mean off for 32
+  frames (2.6 s), which is why an 8-frame std-dev window reports it so loudly and why it is
+  insensitive to the delay.
+
+**Falsified on the way, recorded so it is not re-checked.** The 1 Hz `SENSOR_SAMPLE_MS`
+pack-voltage read is *not* the cause: its exact schedule was reconstructed from the firmware
+clock, and those sweeps run +0.34 ms and carry *less* cell-0 movement, not more. DS18B20 fires
+16 times in the session. There is no 1 Hz spectral line, and no correlation between excursions
+and sweep interval (79.3 ms on event sweeps vs 80.1 ms otherwise). `src/pimd_delaycal.py` has no
+defect here — its "Std dev" is the std of 8 consecutive 32-deep rolling means sharing 31/32 of
+their samples, so it faithfully amplifies exactly this.
+
+**This fix does not claim to explain cell 0.** The dilution explains band 1's gradient and
+explains why cell 0 is fragile, but cell 0 is also the one cell whose settle window contains the
+blocking emit `print()`, so it may already be the best-settled cell in the sweep, and a discrete
+bimodal population is not what a settling curve looks like. Three candidates remain, in the same
+index-locked family as v4.13/v4.20/v4.24/v4.26: residual transient sampled on its varying part;
+emit-adjacent interpreter timing (a GC pass at the emit's allocation site, or USB frame
+scheduling); or USB TX burst coupling into the front end or the LTC2508 reference — a ~250-byte W
+record is four packets and TX activity continues for milliseconds after `print()` returns, through
+cell 0's settle and into its conversion. **That last one is an analogue question and cannot be
+settled from the code.** `cal_100_10_x15_v1_bandswap.json` is the discriminator: if the population
+follows sweep position 0 it is firmware, if it follows the 25 kHz cell it is analogue.
+
+**Cost, and why it is not a silent adoption.** Roughly +2.3 ms per boundary per sweep:
+`cal_100_10_x15_v1` 80.1 → ~85 ms (12.5 → 11.8 Hz), and `cal_63_air_bat_v3` with 7 boundaries
+~145 → ~161 ms (6.9 → 6.2 Hz) against the 0.1445–0.1455 s §8 records. It also deliberately moves
+every band's first-cell operating point. This is an acquisition change of the same class as v4.24
+and v4.26: it wants a v4.33/v4.34 A/B under one profile and a delay re-cal of the operating
+profile before any corpus capture. `SETTLE_FLOOR_US` and `BOUNDARY_PRIME` keep their values —
+make the floor deliver first, then measure whether 3 ms is the right number. Invariants (§11) are
+untouched: GPIO4/5 slice-2 phase-locking, the wire format, no scheduler, no flash writes.
+(2026-08-09)
+
+---
+
+### utilities/mode2_noise/mode2_cell_noise.py — v1 — recover per-cell single-sample noise from a Mode 2 session
+
+New offline tool. Mode 2 never emits samples — each W record carries a rolling mean `averages`
+deep (§9) — so per-cell noise has not been directly measurable from a session dump. But the
+firmware adds exactly **one** new sample per cell per sweep, so
+`m[i] − m[i−1] = (x[i] − x[i−N]) / N`, which recovers the single-sample series up to one unknown
+constant per residue class `i mod N`. Two statistics fall out:
+
+- **Matched-pair outlier detection.** A single bad sample entering the boxcar steps the mean by
+  `+d` and, exactly `N` frames later, leaving it steps the mean by `−d`. Requiring both makes the
+  test independent of drift, of the per-class constants and of the reconstruction itself — it is
+  not something detrending can manufacture. This is the primary statistic and the one the A/B is
+  scored on.
+- **Equivalent timing jitter.** A cell's σ is meaningless without its own local decay slope: 5 ns
+  is 6 mV on a steep cell and 0.4 mV on a flat one. Dividing the recovered σ by dV/dt from the
+  neighbouring cells gives nanoseconds, which is flat across a healthy band at the §8 timing
+  precision. A cell that stands out in mV but not in ns is behaving normally; one that stands out
+  in ns is not. This is what separates "steep slope" from "actually noisy", which is the exact
+  confusion that made the bench symptom hard to read.
+
+Robust statistics throughout (`1.4826·MAD`), so an outlier population cannot inflate the estimate
+of the population it is being compared against. The tool flags the two signatures by name —
+boundary-settling gradient and index-locked outlier population — against each **band's own**
+settled baseline rather than a hard-coded expectation, so it travels across bands, pack states and
+epochs. Cells below 1 LSB (610 µV) or flatter than 20 mV/µs report `--` rather than a number:
+the rail and the ~16.5 mV pedestal (§7) carry no timing information and dividing by their slope
+produces four-figure nonsense. It checks the firmware clock for dropped frames, because a drop
+breaks the N-frame pairing. `--hist <ch>` adds the excursion-size histogram and the residue-class
+control that distinguishes a real discrete mechanism from a reconstruction artefact.
+
+Read-only, pure numpy, no board required. Baseline for the v4.34 A/B:
+`python utilities/mode2_noise/mode2_cell_noise.py --hist 0 src/data/sessions/session_20260809_123634.csv`
+must report ch0 at 62.5 events/1000 with a 132 mV median and ch1/ch2 at zero. (2026-08-09)
+
+---
+
+### src/data/profiles/cal_100_10_x15_v1_bandswap.json — new — band-order discriminator for the cell-0 outlier population
+
+Diagnostic profile, not a calibration. Byte-identical to `cal_100_10_x15_v1` — same delays,
+thresholds and `averages` — with the two bands in the opposite **protocol** order, so
+3.125 kHz/100 µs occupies sweep position 0 instead of 25 kHz/10 µs. It answers the one question
+the v4.34 analysis could not: whether cell 0's discrete outlier population is locked to the sweep
+position (firmware) or to the 25 kHz cell (analogue). This is the same test §17.8 used on the
+index-locked σ anomaly, and it needs no code change. `pimd_delaycal` sorts its thermal rows by
+`pulse_us` for display and maps back through `_thermal_proto_to_display`, so the table looks
+unchanged and only the protocol order moves — the population visibly jumps rows if it is
+position-locked. Not to be calibrated against or captured with. (2026-08-09)
+
+---
+
 ### References/images — the three `profile8b-*` captures are tracked; the README image was broken on GitHub
 
 `README.md` has always opened with `profile8b-spanner-copper.jpg` as its lead figure, but

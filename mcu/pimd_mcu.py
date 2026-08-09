@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.33, coil v4
+# Pulse Induction Metal Detector, v4.34, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -63,6 +63,7 @@
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.34 FIX acquire_mode2: boundary settle measured from the config write, not the loop top
 #   v4.33 DS18B20 board temperature on GP6 (1-Wire); GP27 pot placeholder path retired
 #   v4.32 pack absent->present transition always announces itself, so 'failsafe armed' is observable
 #   v4.31 pack-absent suspend (<6 V = USB power) + re-arm hysteresis; battery swap no longer needs a reset
@@ -119,7 +120,7 @@ try:
 except ImportError:
     onewire = None
 
-FW_VERSION = '4.33'
+FW_VERSION = '4.34'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -225,6 +226,29 @@ SETTLE_FLOOR_US = 3000  # minimum ABSOLUTE settling time at a band/energy bounda
                         # bands got far less real settling time (25 kHz: 600 µs) than the
                         # ~1 ms+ the energy-step transient needs. Per-band settle periods are
                         # max(BOUNDARY_PRIME, ceil(SETTLE_FLOOR_US / period_us)).
+                        # v4.34 is what makes this an absolute floor in fact as well as in
+                        # name — see the settle block in acquire_mode2().
+                        # 10000 WAS TRIED AND REVERTED (2026-08-09). Do not re-run this blind:
+                        # the experiment was done and the result is worth keeping.
+                        # The 2026-08-09 band-swap A/B showed the transient for a 12.5x power
+                        # step (P ∝ pulse²×freq, 10 µs/25 kHz <-> 100 µs/3.125 kHz) runs
+                        # ~9-11 ms, so 3000 is genuinely short FOR THAT PROFILE. Raising the
+                        # floor to 10000 did exactly what it was predicted to do: the 100 µs
+                        # band's leading gradient collapsed from 8.1/7.8/5.3 ns to 3.3/3.9/3.0,
+                        # and the 25 kHz band's from 5.2/5.2/4.3 to 2.2/2.3/2.1 — both bands,
+                        # both protocol orders, settling problem solved.
+                        # It was reverted anyway, for two reasons. (1) The cost is real and
+                        # global: 12.1 -> 10.5 Hz here, and ~6.2 -> ~4.8 Hz on
+                        # cal_63_air_bat_v3's 7 boundaries, against the 6.88-6.92 Hz DESIGN §8
+                        # records as that profile's measured rate. cal_63's adjacent bands step
+                        # ×1.5, not ×12.5, so they very likely never needed it. (2) It did NOT
+                        # fix the thing it was raised to chase — the cell-0 outlier population
+                        # survived a 10 ms settle at 23.3 events/1000 above 100 mV. That is the
+                        # useful negative result: with ~16 ms of dwell before the sample, the
+                        # transient is long over, so VARIABLE EMIT DWELL IS NOT THE MECHANISM.
+                        # If a profile with a large adjacent-band energy step needs this, the
+                        # right shape is a per-boundary floor scaled to the step, not a bigger
+                        # global constant.
 COMMAND_POLL_MS = 1   # poll stdin for commands at most once per ms instead of once
                       # per sweep cycle (was every PWM period for a 1-2 cell profile).
                       # A reasonable reduction in syscall rate regardless, but tested
@@ -755,6 +779,11 @@ def acquire_mode2(profile):
                 sample_coil_pwm.duty_u16(sd)
                 last_dd, last_sd = dd, sd
             enable_irq(_held_irq)
+            # v4.34: cell[i]'s freq/CC are LIVE from here, and only from here.
+            # Everything before this instant — above all read_raw_bytes_hold()'s
+            # BUSY sync — was spent at cell[i-1]'s configuration and cannot count
+            # towards cell[i]'s settling. See the settle block below.
+            t_cfg = ticks_us()
             raw = raw14_from_bytes(data_bytes)
 
             cnt = rolling_count[prev]
@@ -781,10 +810,26 @@ def acquire_mode2(profile):
             # (>= BOUNDARY_PRIME, floored to SETTLE_FLOOR_US of real time —
             # v4.24) so the coil reaches steady state before the next cell
             # reads this cell's SDOB, breaking the contamination cascade.
+            #
+            # v4.34: the settle is measured from t_cfg, not from t0. The old
+            # `remaining = period - elapsed - 2; remaining += period * settle`
+            # deducted `elapsed` — time spent at the PREVIOUS cell's config,
+            # dominated by the BUSY sync — from this cell's budget, so the
+            # delivered settle was `period*settle - (elapsed - period)`. With
+            # per-cell interpreter cost ~2.3 ms (measured) against a 40 µs
+            # period, cell 0 of a 25 kHz band received ~0.6 ms of the intended
+            # 3 ms. SETTLE_FLOOR_US was therefore not an absolute floor on ANY
+            # band whose period is shorter than the per-cell cost — which is
+            # every band in every profile. v4.24 was still a real improvement
+            # (before it the sleep went negative and there was no settle at
+            # all, which is why it bench-verified), but it did not deliver what
+            # its name says. Non-boundary cells are unchanged.
             elapsed = ticks_diff(ticks_us(), t0)
             remaining = period_i - elapsed - 2
             if needs_settling:
-                remaining += period_i * settle_i
+                settle_left = period_i * settle_i - ticks_diff(ticks_us(), t_cfg)
+                if settle_left > remaining:
+                    remaining = settle_left
             if remaining > 0:
                 sleep_us(remaining)
             else:
