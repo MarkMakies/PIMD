@@ -1,8 +1,12 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-09
+
 ### profile — `cal_3x10_v2` closes the last open question: no cell sits inside the rail
 
 The one thing the `cal_3x10_v1` entry below deliberately left open is now shut. That profile's
 10 µs band placed its first *late* cell at **18.0 µs**, while the reconstructed below-rail window
-runs to **sd 18.44** (§8) — so the single cell most likely to still be clipped was in the very
+runs to **sd 18.44** (§7) — so the single cell most likely to still be clipped was in the very
 profile cut to eliminate clipped cells. It moves to **18.44 µs**, the measured rail exit itself.
 Nothing else changes: the diff is three lines — `name`, `notes`, and that one delay.
 **sha8 `def96704`** (was `89590f69`). `cal_3x10_v1` is retired to the superseded list without ever
@@ -106,7 +110,7 @@ All four served the previous epochs and none of them describes the instrument as
 `ML/V1` and `ML/V2` are **72-cell**, two epochs stale, and were already superseded by
 `pimd_classify.py`; `References/Targets v1 Analysis/` is the offline analysis of the 2026-07-23
 **63-cell `cal_63_air_v2`** corpus; `References/scope/` and `utilities/` are the measurement and
-tooling behind work that has since been consolidated into DESIGN §8 and §12. The outputs worth
+tooling behind work that has since been consolidated into DESIGN §7 and §12. The outputs worth
 keeping were copied into `References/images/` first — `6S-pack-discharge-curve.jpg`,
 `decay_model.png`, `lobe_at_amp_input_20260808.png` and `spanner_fills_the_null_20260808.png`.
 (2026-08-09)
@@ -125,7 +129,7 @@ one-line "utilities removed" would make them unfindable:
 
 | tool | what it produced |
 |---|---|
-| `decay_model/decaymodel.py` (v5) | the two-pole front-end model of §8 — τ_fast/τ_slow, ζ, the null, the below-rail reconstruction |
+| `decay_model/decaymodel.py` (v5) | the two-pole front-end model of §7 — τ_fast/τ_slow, ζ, the null, the below-rail reconstruction |
 | `decay_model/make_sweep_profile.py` | the characterisation sweep profiles (`sweep_*_decay_v1`) |
 | `soak_vs_voltage/soakvolt.py` | the 2026-07-30 pack-voltage result (§17.13) — the finding the tracked-utility rule was written to protect |
 | `pack_discharge/packv.py` | the SoC curve `pimd_gui.py` copies (its comment still cites the path; the table is duplicated in four tools and is unaffected) |
@@ -219,7 +223,7 @@ front-end model in hand rather than by sweeping and hoping. (2026-08-09)
 
 **Why the middle cells are gone.** The front end has two real poles with opposite-sign residues
 (τ_fast 1.125 µs, τ_slow 2.270 µs, ζ = 1.06), so air has exactly one zero crossing and swings
-negative — measured at the LT6203 input as **sd 14.3 → 18.0 µs**, bottoming **≈ −15 mV** (§8).
+negative — measured at the LT6203 input as **sd 14.3 → 18.0 µs**, bottoming **≈ −15 mV** (§7).
 The path is unipolar and the output **rails at 2.441 mV**; reconstructed through the 1.149
 input→ADC gain, air is genuinely **below the rail for 4.21 µs, sd 14.23–18.44**. §14.17 is the
 consequence and it is the whole argument: Δ = target − air, and where air is clipped up onto the
@@ -273,7 +277,7 @@ to record.
 change of meaning worth flagging because delaycal's `threshold_v` normally records the voltage a
 swept delay was *aimed at* (`_targets_v`). Here it is uniform across all three bands and reads
 **4.85, 2.17, 1.05, 0.48, 0.19, 0.07** for the six early cells and **0.017, 0.016, 0.015, 0.014**
-for the four late ones. Those last four are the **~16.5 mV front-end pedestal** (§8: +14.34 mV at
+for the four late ones. Those last four are the **~16.5 mV front-end pedestal** (§7: +14.34 mV at
 the input, **16.472 mV** at the ADC), which is exactly what a late sample is *for* — the decay is
 over and what is left is the front-end DC. The 1 mV steps between them keep the ladder monotonic;
 they are not four distinct measurements and should not be mined as such.
@@ -885,9 +889,6 @@ Doc-rev 1.8 and reinstating them is a consolidation-pass call, not a side effect
 image link. (2026-08-08)
 
 ---
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
-
 ## Archive — consolidated 2026-08-08
 
 ### utilities/decay_model/decaymodel.py — v5 — model refitted to the scope; below-rail reconstruction; file halved
