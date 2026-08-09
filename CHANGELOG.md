@@ -1,3 +1,199 @@
+### repo — `utilities/`, `ML/`, `References/scope/` and `References/Targets v1 Analysis/` retired at the epoch turnover
+
+Four directories removed now that `cal_3x10_v1` has replaced `cal_63_air_bat_v3` (entry below).
+All four served the previous epochs and none of them describes the instrument as it now stands:
+`ML/V1` and `ML/V2` are **72-cell**, two epochs stale, and were already superseded by
+`pimd_classify.py`; `References/Targets v1 Analysis/` is the offline analysis of the 2026-07-23
+**63-cell `cal_63_air_v2`** corpus; `References/scope/` and `utilities/` are the measurement and
+tooling behind work that has since been consolidated into DESIGN §8 and §12. The outputs worth
+keeping were copied into `References/images/` first — `6S-pack-discharge-curve.jpg`,
+`decay_model.png`, `lobe_at_amp_input_20260808.png` and `spanner_fills_the_null_20260808.png`.
+(2026-08-09)
+
+**Recoverability is not uniform, and that is the important part of this entry.**
+`utilities/` (9 files) and `References/scope/` (5) were tracked and are retrievable in full at
+**`59a9117`** — e.g. `git show 59a9117:References/scope/air_wide_20260808.csv`. **`ML/` (24 files)
+and `References/Targets v1 Analysis/` (7) were gitignored and had never been committed, so they
+are simply gone** — no history, no copy, ~4.8 MB. That was chosen deliberately rather than by
+accident, which is why it is written down here: nobody should later go looking through the log
+for them.
+
+**Findings that keep their result but lose their tool.** Each of these stands on its own in this
+file; what goes is the ability to *re-run* it from a clone. Named individually because a
+one-line "utilities removed" would make them unfindable:
+
+| tool | what it produced |
+|---|---|
+| `decay_model/decaymodel.py` (v5) | the two-pole front-end model of §8 — τ_fast/τ_slow, ζ, the null, the below-rail reconstruction |
+| `decay_model/make_sweep_profile.py` | the characterisation sweep profiles (`sweep_*_decay_v1`) |
+| `soak_vs_voltage/soakvolt.py` | the 2026-07-30 pack-voltage result (§17.13) — the finding the tracked-utility rule was written to protect |
+| `pack_discharge/packv.py` | the SoC curve `pimd_gui.py` copies (its comment still cites the path; the table is duplicated in four tools and is unaffected) |
+| `session_relabel/relabel.py` | the reconstructed `# mark:` lines in five session dumps, each stamped `reconstructed cos=… src=…` — those dumps keep their marks, but the reconstruction cannot be redone or audited |
+| `mode2_noise/mode2_cell_noise.py` | the cell-0 outlier investigation that traced the ±120/−200 mV population to the blocking emit |
+
+**DESIGN §15's tracked-utility rule retires with the directory.** That rule — *"a utility cited
+from `CHANGELOG.md` has to be tracked"* — exists because `soakvolt.py` nearly stayed local and
+would have left the project's headline pack finding unreproducible from a clone. It was the right
+rule while `utilities/` existed. With the directory gone it now guards nothing, and leaving it in
+place would make the next person think a tracked copy must be somewhere. **Recorded here as a
+deliberate retirement, not an oversight.**
+
+**Checklist for the next §18 consolidation pass** *(DESIGN.md is regenerated from this file, not
+edited directly — these are the rows that will otherwise dangle)*: drop the §15 inventory rows
+for `utilities/`, `References/scope/` and `References/Targets v1 Analysis/`; drop §15's
+tracked-utility rule; drop the two §16 offline run commands that invoke
+`utilities/decay_model/decaymodel.py` and `make_sweep_profile.py`; and check §15's
+`src/data/sessions/` row, which cites `utilities/session_relabel/` for the reconstructed marks —
+the marks survive, the tool does not, and the row should say so. Also repath the two
+`References/training-results-v1b.png` / `-v1c.png` rows, which moved into `References/images/`
+with the rest of the kept figures — same files, tracked as renames, new location.
+
+**Not touched by any of this:** `src/data/corpora/` keeps both 63-cell corpora. They are
+previous-epoch and cannot be mixed into a 30-cell dataset, but they remain the only corpora on
+disk and `pimd_shape.py --selftest` still expects them (§14.15).
+
+**`src/pimd_classify.py` v1.4 → v1.5** — its `DEFAULT_CORPUS` pointed at
+`../ML/V2/PIMD_target_corpus_signatures_v2.csv`, which stopped existing, so the default is
+repointed at `src/data/corpora/gui_signatures_targets_v3_20260728_142316.csv` and the `--corpus`
+help text corrected. The file is gitignored and so is not in this commit; recorded here because
+a silent dangling default is exactly the kind of thing that surfaces months later as a confusing
+traceback.
+
+***Flagged, not fixed — and it is worse than a dangling default.*** `pimd_classify.py` does not
+currently run **at all**: `build_arg_parser()` reads `pimd_features.DEFAULT_PROFILE` for its
+`--profile` default, and `pimd_features` has no such attribute, so every invocation dies with an
+`AttributeError` before parsing a single argument — GUI and `--headless` alike. **This predates
+the ML/ removal and is unrelated to it**: `DEFAULT_PROFILE` was removed from `pimd_features`
+deliberately (its own header comment records *"validate_profile/DEFAULT_PROFILE/--profile
+removed"*), and `pimd_classify.py` was never updated to match. Left alone on purpose: it is a
+gitignored previous-epoch tool whose defaults are 63/72-cell, and repairing it means deciding
+what it should point at in a 30-cell epoch that has no corpus yet — a real piece of work, not a
+one-line fix, and not one to fold silently into a cleanup.
+
+---
+
+### profile — `cal_3x10_v1` is the new corpus starting point; the null cells are gone and the matrix is less than half the size
+
+**3 bands × 10 cells = 30 channels**, `averages: 32`, sha8 **`89590f69`**. Bands 3125 Hz/100 µs,
+5000 Hz/50 µs, 25000 Hz/10 µs. Per band the ladder is **6 early samples, a skipped span, then 4
+late samples** — the skips are **13→30 µs** (100 µs band), **12→24 µs** (50 µs) and **10→18 µs**
+(10 µs). This replaces `cal_63_air_bat_v3` (7 × 9 = 63) as the operating profile and is the
+geometry the next capture campaign is built on. It was arrived at on the bench as best
+representing the range of targets, and it is the first profile in this project cut with the
+front-end model in hand rather than by sweeping and hoping. (2026-08-09)
+
+**Why the middle cells are gone.** The front end has two real poles with opposite-sign residues
+(τ_fast 1.125 µs, τ_slow 2.270 µs, ζ = 1.06), so air has exactly one zero crossing and swings
+negative — measured at the LT6203 input as **sd 14.3 → 18.0 µs**, bottoming **≈ −15 mV** (§8).
+The path is unipolar and the output **rails at 2.441 mV**; reconstructed through the 1.149
+input→ADC gain, air is genuinely **below the rail for 4.21 µs, sd 14.23–18.44**. §14.17 is the
+consequence and it is the whole argument: Δ = target − air, and where air is clipped up onto the
+floor the subtrahend is too large, so **the delta is always understated — by up to ~3.5×** (at
+sd 17.3 µs the ADC records **+6.3 mV** where the input shows **~+22 mV**). Those cells do not
+merely add noise. They compress amplitude non-linearly and by an amount that depends on target
+strength, so every band mean, crossing width and amplitude feature computed over them inherits
+that bias. Cutting them out of the geometry is the cheapest possible fix: no feature code has to
+learn about the rail, because nothing is sampled there any more.
+
+**What that costs, stated plainly.** The null is **real coil physics, not an artefact** — it is
+present *before* the amplifier and it **responds to metal**: a steel spanner on the coil removes
+the crossing entirely (minimum +15.5 mV, difference up to **+48.9 mV** at sd 13.57 µs). And the
+rail is an **air** problem, not a cell problem — a close ferrous target lifts the whole trace
+clear of it, so the same cell that is dead in air is perfectly live on a strong target. Dropping
+these cells therefore trades a target-present signal for a **bias-free** corpus. That is a
+deliberate choice and it should be revisited if the classifier turns out to want that region;
+it is not a free win.
+
+**The lineage, all of it on 2026-08-09, all on fw 4.34.** Read off the session dumps in
+`src/data/sessions/` — the embedded `profile_json` / `profile_sha8` headers are the primary
+record, since none of this line of work was written down until now:
+
+| profile | sha8 | geometry | measured sweep rate |
+|---|---|---|---|
+| `cal_63_air_bat_v3` (outgoing) | `4a2352d2` | 7 × 9 = 63 | **6.49 Hz** |
+| `cal_3x15_v2` | `fd369286` | 3 × 15 = 45 | **8.77 Hz** |
+| `cal_3x15_v3` — *"middle nulls removed from v2"* | `baf9019e` | 3 × 11 = 33 | **11.49 Hz** |
+| **`cal_3x10_v1`** (new) | `89590f69` | **3 × 10 = 30** | no session yet |
+
+Rates are the median of each dump's `firmware_time_ms` deltas, so they are on the firmware clock,
+and all four were taken on the same bench within an hour of each other. **The 63-cell profile
+nearly doubles in rate at 33 cells** — which is the direct answer to `next.txt`'s "our current
+system is slow to acquire due to large profile matrix".
+
+*Inference, not measurement, on one point:* 6.49 Hz for `cal_63_air_bat_v3` is **below** the
+0.1445–0.1455 s / 6.88–6.92 Hz §17.13 records for that same profile on 2026-07-30/31. Firmware
+v4.34 now delivers the *full* boundary settle it had previously been short-changing, and a 7-band
+profile pays that seven times per sweep where a 3-band profile pays it three. If that is the
+cause it is a second, independent argument for fewer bands — but the v4.34 acceptance figure
+(§14.18) is still outstanding and this is one 77-frame session, so it wants confirming rather
+than asserting.
+
+**`cal_3x15_v3` → `cal_3x10_v1` is one more early cell per band.** Dropped `8.32` µs (100 µs
+band), `7.744` µs (50 µs) and `6.0` µs (10 µs) — the second sample in each row — **as noisy and
+carrying no information the neighbouring cells did not already have** *(bench observation)*. The
+profile's own `notes` field now describes the final geometry rather than the v2→v3 step it used
+to record.
+
+**`threshold_v` in this profile is measured voltage, not a nominal target ladder,** and that is a
+change of meaning worth flagging because delaycal's `threshold_v` normally records the voltage a
+swept delay was *aimed at* (`_targets_v`). Here it is uniform across all three bands and reads
+**4.85, 2.17, 1.05, 0.48, 0.19, 0.07** for the six early cells and **0.017, 0.016, 0.015, 0.014**
+for the four late ones. Those last four are the **~16.5 mV front-end pedestal** (§8: +14.34 mV at
+the input, **16.472 mV** at the ADC), which is exactly what a late sample is *for* — the decay is
+over and what is left is the front-end DC. The 1 mV steps between them keep the ladder monotonic;
+they are not four distinct measurements and should not be mined as such.
+
+**What this invalidates.** Both corpora on disk are 63-cell and **cannot be migrated** into a
+30-cell epoch — `gui_signatures_targets_v1_20260723.csv` (4 158 rows, `cal_63_air_v2`/`b4bee9d2`)
+and `gui_signatures_targets_v3_20260728_142316.csv` (11 844 rows, `cal_63_air_bat_v3`/`4a2352d2`).
+The `(profile_name, profile_sha8)` guard in `pimd_features.py` refuses to build across them by
+design, and §10 is explicit that an identical cell count would not have implied comparability
+either. `ML/V1` and `ML/V2` are 72-cell and were already two epochs stale. On the tooling side
+nothing needs changing: classviz rebuilds its dims from the profile and discards the
+old-geometry air reference, `pimd_classify` derives geometry from the colmap, and **no firmware
+change is required** — this rides in the RAM-only `D`/`Q5` dynamic slot, as every 3x15 session
+already did. `cal_63_air_bat_v3.json` moves to `.gitignore`'s superseded-locks list and
+`cal_3x10_v1.json` becomes the tracked profile, per the procedure in that file's own comment.
+
+**The pack-voltage window: full charge down to 21.5 V — the whole usable pack.** §10 requires a
+profile to be specified together with a voltage range, and this is it. **21.5 V is not an
+arbitrary floor:** it is where the firmware's low-voltage failsafe re-arms (§12), it is the
+dashed edge already drawn on the pack gauge in all four PC tools (`PACK_WINDOW_LO_MV`), and the
+LOCKOUT floor sits below it at 21.0 V. The epoch's capture window is therefore bounded by
+something instrumented and on screen rather than by a number the operator has to hold in their
+head — and the board stops the run itself at the bottom of it.
+
+**This is wider than §12's 21.5–23.3 V clean window, deliberately, and it is a bench judgement
+about *this profile* rather than a correction to §12.** The relevant precedent is already in the
+record: the 2026-07-24 survey found the suspect columns elevated at **22.4 V**, which the 07-30
+rule calls clean, and §17 resolves that tension only as a hypothesis — *"the clean window may
+belong to **(pack voltage × profile delays)** rather than to pack voltage alone"*, since the zone
+sits at a fixed place on the decay and each profile's delays cut the decay at different points.
+`cal_3x10_v1`'s delays are entirely new and were cut against the front-end model, so it has no
+particular reason to inherit `cal_63`'s window. **That is consistent with the hypothesis, not
+confirmation of it** — DESIGN is explicit that it is "a hypothesis, not a result", and one
+profile behaving well over a wider range does not settle it.
+
+What the widening buys is concrete. §12's discharge budget writes off `full → 23.3 V` as
+**1.78 h, 17 % of the pack**, "unusable, above the data-quality ceiling", leaving **4.55 h** as
+the session-planning number. Capturing from full down to 21.5 V instead makes it **≈ 6.33 h per
+charge, +39 %** — the difference between one capture campaign per charge and two. The obligation
+that comes with it is that every capture records the voltage it actually ran at, which classviz
+v1.72 now does by itself on every `# pack_v:` line. If the wide window does cost quality at the
+top end, that per-frame track is what will show it. This is a testable widening, not an
+assumption; the sessions that established the geometry already span it, running at **24.30 V**
+down to **21.94 V** with the board at **54.8 °C**.
+
+**One thing this entry deliberately leaves open: the 10 µs band's first late cell sits at 18.0 µs,
+and the reconstructed below-rail window runs to sd 18.44.** It may still be inside the rail. The
+100 µs and 50 µs bands clear it comfortably (first late cell at 30 µs and 24 µs); the shortest
+band is where the margin is tightest, and the below-rail figure is a reconstruction from one
+scope condition rather than a per-band measurement. Worth one check before a corpus is built on
+it — a railed cell is precisely what this profile exists to remove, and it would be an unhappy
+irony to ship one.
+
+---
+
 ### src/pimd_classviz.py — v1.72 — pack voltage and board temperature from firmware telemetry; Pack V / Log V removed
 
 The `Pack V` spinbox and the `Log V` button are gone, and with them the 20-minute
