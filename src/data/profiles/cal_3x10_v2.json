@@ -1,7 +1,7 @@
 {
-  "name": "cal_3x10_v1",
+  "name": "cal_3x10_v2",
   "averages": 32,
-  "notes":"6 early samples, skip nulls at 13-30 (100us), 12-24 (50us), 10-18 (10us), and then 4 late samples",
+  "notes":"6 early samples, skip nulls at 13-30 (100us), 12-24 (50us), 10-18.44 (10us), and then 4 late samples. v2: the 10us band's first late sample moves 18.0 -> 18.44 us, the measured below-rail exit, so no cell sits inside the rail. Pack-voltage window: full charge down to 21.5 V.",
   "bands": [
     {
       "freq_hz": 3125,
@@ -69,7 +69,7 @@
         8.84,
         9.68,
         10.36,
-        18.0,
+        18.44,
         20.0,
         23.0,
         29.0

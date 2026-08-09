@@ -1,3 +1,45 @@
+### profile — `cal_3x10_v2` closes the last open question: no cell sits inside the rail
+
+The one thing the `cal_3x10_v1` entry below deliberately left open is now shut. That profile's
+10 µs band placed its first *late* cell at **18.0 µs**, while the reconstructed below-rail window
+runs to **sd 18.44** (§8) — so the single cell most likely to still be clipped was in the very
+profile cut to eliminate clipped cells. It moves to **18.44 µs**, the measured rail exit itself.
+Nothing else changes: the diff is three lines — `name`, `notes`, and that one delay.
+**sha8 `def96704`** (was `89590f69`). `cal_3x10_v1` is retired to the superseded list without ever
+having been captured against. (2026-08-09)
+
+**This is the cheapest this change will ever be, which is why it happens now.** The profile was
+locked less than two hours ago and **no corpus exists against it** — so retiring it orphans
+nothing, splits no dataset, and costs no recapture. The same edit made after a capture campaign
+would have meant a new `(profile_name, profile_sha8)` group that `pimd_features` refuses to merge
+with the first, i.e. throwing away or re-running the campaign. Locked profiles are never edited in
+place, so this is `cal_3x10_v2` as a new file, not a corrected v1.
+
+**Checks run before writing it, not after.** 18.44 µs is **exactly on the 8 ns PWM grid**
+(2305 × 8 ns — the firmware cannot produce a delay between grid points, so an off-grid value would
+have been silently rounded to something nobody chose); `_validate_profile_pwm()`, the client-side
+mirror of the firmware's `validate_profile()`, returns clean; the ladder stays monotonic; and the
+profile round-trips through `_apply_profile()` at 3 / 10 / 30 with a `D` command that builds. Worth
+noting the 10 µs band's headroom is genuinely tight — **max valid delay 29.095 µs against a
+largest-used 29.0 µs**, about 95 ns of margin, unchanged by this edit but not much to give away.
+
+**One thing this does not fix, and must not be papered over.** That cell's `threshold_v` still
+reads **0.017 V**, the pedestal figure measured when the cell sat at 18.0 µs. At 18.44 µs the trace
+is at the **rail exit (~2.4 mV)**, not up at the ~16.5 mV pedestal, so that entry is now stale —
+it is the one number in this profile that no longer describes where its cell actually sits. It is
+left as-is rather than replaced with a computed value: `threshold_v` in this profile records
+*measured* voltage (see the entry below), and substituting a figure derived from the model would
+quietly turn a measurement column into a mixture of measurement and inference. **Re-measure that
+cell and reissue as v3, or blank the field** — either is honest, inventing a number is not.
+
+**The pack-voltage window is now carried in the profile's own `notes`** — "full charge down to
+21.5 V" — rather than living only in a CHANGELOG entry. §10 requires a profile to be specified
+together with a voltage range, and the file is the thing that gets loaded, copied and handed
+around; a lock that has to be cross-referenced against a changelog to be fully specified is
+half-specified in practice.
+
+---
+
 ### repo — `pimd_classify.py` archived to history, then deleted; `src/*.py` is now all repo source
 
 The classification/heatmap surface goes the same way as the rest of the previous epoch, but in
