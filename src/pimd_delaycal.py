@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.45
+# PIMD Delay Calibration v1.46
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -21,6 +21,7 @@
 #   G                                      — start Mode 2 streaming
 #
 # History (full detail in CHANGELOG.md):
+#   v1.46 calibration table rows pulse-ascending, matching the two thermal tables
 #   v1.45 Colour lo/hi: lo spinbox floor -999 mV (was 0), for the signed Mean level metric
 #   v1.44 "Mean level" Compare-over-time is now signed with a diverging colour scale, not abs()
 #   v1.43 FIX Compare-over-time for "Mean level": was a ratio vs baseline, now an absolute mV delta
@@ -92,7 +93,7 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QEvent, QIODevice, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor, QFont  # noqa: E402
 
-APP_VERSION = '1.45'
+APP_VERSION = '1.46'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -1769,6 +1770,46 @@ class MainWindow(QMainWindow):
         freq_hz = round(freq_khz * 1000)
         return f'{freq_hz:,}Hz / {pulse_us:.1f}us'
 
+    def _cal_display_order(self, fp_pairs):
+        """Calibration-table row order: pulse width ascending.
+
+        Same rule as the two thermal tables (`_thermal_display_order`) and the
+        project's standard grid orientation -- lowest top-left, highest
+        bottom-right (`pimd_rawlog.py` header; `pimd_classviz.py` v1.71,
+        `pimd_classify.py` v1.4). fp_pairs entries are (freq_khz, pulse_us).
+        """
+        return sorted(range(len(fp_pairs)), key=lambda i: fp_pairs[i][1])
+
+    def _apply_cal_row_order(self, fp_pairs):
+        """Reorder the calibration table's rows VISUALLY only (v1.46).
+
+        Deliberately a QHeaderView section move rather than a permutation applied
+        to the data. The calibration table's row index doubles as the PROTOCOL
+        band index in _build_profile(), export_csv(), _fill_cell(),
+        _mark_row_pending(), _start_auto(), _auto_finish(), _auto_color_cell(),
+        _on_manual_nudge_clicked() and the thermal colour mirror -- ten call
+        sites, several of which WRITE a calibration. Permuting the data would
+        mean getting a protocol<->display mapping right at every one of them, and
+        getting it wrong in _build_profile() would silently pair the wrong delays
+        with the wrong band in an exported profile -- a corruption that need not
+        show up for days. Moving header sections leaves every logical index
+        untouched, so all ten stay correct by construction and only the screen
+        changes. _fp_pairs itself must NOT be reordered either: it drives the D
+        command, so its order IS the sweep order, and rotating it would move which
+        band sits at which sweep position.
+
+        Re-applied on every rebuild: QTableWidget.clear() and setRowCount() do not
+        reset section order (verified), so a stale permutation would otherwise
+        survive a profile change. The loop converges from any starting state.
+        moveSection() works programmatically regardless of sectionsMovable, which
+        stays False -- rows still cannot be dragged by hand.
+        """
+        hdr = self.table.verticalHeader()
+        for target_visual, logical in enumerate(self._cal_display_order(fp_pairs)):
+            current_visual = hdr.visualIndex(logical)
+            if current_visual != target_visual:
+                hdr.moveSection(current_visual, target_visual)
+
     def _rebuild_table(self, fp_pairs, targets_v):
         self.table.clear()
         self.table.setRowCount(len(fp_pairs))
@@ -1782,6 +1823,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem('')
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(r, c, item)
+        self._apply_cal_row_order(fp_pairs)
         if self.cb_manual_nudge.isChecked():
             self._apply_manual_nudge_overlay()
 
@@ -2404,9 +2446,14 @@ class MainWindow(QMainWindow):
         self._compare_lag_buf.clear()
 
         bands = profile['bands']
-        # Sort thermal table rows ascending by pulse_us; calibration table stays in
-        # protocol (run) order.  _thermal_proto_to_display maps protocol_band → display_row
-        # so _auto_color_cell and _update_thermal_tables can stay in sync.
+        # Sort thermal table rows ascending by pulse_us.  _thermal_proto_to_display maps
+        # protocol_band → display_row so _auto_color_cell and _update_thermal_tables can
+        # stay in sync.
+        # As of v1.46 the calibration table above shows the SAME order (it gets there by
+        # a header section move rather than a permutation — see _apply_cal_row_order),
+        # so all three tables now read top-to-bottom in pulse-ascending order. The two
+        # must be kept on the same key; they are computed separately only because this
+        # one works from a profile dict and that one from _fp_pairs.
         self._thermal_display_order = sorted(range(len(bands)), key=lambda i: bands[i]['pulse_us'])
         self._thermal_proto_to_display = {b: d for d, b in enumerate(self._thermal_display_order)}
         row_labels = [

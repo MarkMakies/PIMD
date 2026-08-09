@@ -19,6 +19,7 @@
 # Board firmware: pimd_mcu.py v4.23+
 #
 # History (full detail in CHANGELOG.md):
+#   v1.71 FIX heatmap band order keyed on pulse_us, not the delays_us[0] proxy
 #   v1.70 FIX Main/Analysis heatmap rows sorted delay-descending (longest at
 #         top) instead of ascending -- now matches the standard grid
 #         orientation (shortest pulse/delay top-left, longest bottom-right)
@@ -136,7 +137,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.70'
+APP_VERSION = '1.71'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -901,14 +902,26 @@ class MainWindow(QMainWindow):
                              for b in bands]
         self._band_labels = ['{0:,}Hz / {1:.3f}µs'.format(b['freq_hz'], b['pulse_us'])
                               for b in bands]
-        # Sort rows by first delay value ascending -- shortest-delay band first --
-        # so alternating pulse-width profiles (high/low interleaved) still render in
-        # delay order. Combined with invertY(True) on the heatmap plots, this puts
-        # the shortest-pulse/shortest-delay band at the top and the longest at the
-        # bottom, matching this project's standard grid orientation (pimd_rawlog.py
-        # header / CHANGELOG v1.13).
+        # Sort rows by PULSE WIDTH ascending -- shortest-pulse band first. Combined
+        # with invertY(True) on the heatmap plots this puts the shortest pulse at the
+        # top and the longest at the bottom, matching this project's standard grid
+        # orientation (pimd_rawlog.py header / CHANGELOG v1.13): lowest top-left,
+        # highest bottom-right.
+        #
+        # v1.71: the key was `delays_us[0]`, a PROXY for pulse width rather than the
+        # thing itself. v1.70 adopted it having verified only that
+        # cal_110_full_range_v4's pulse and first-delay ascend together, which they
+        # do -- as they do for every calibrated profile, because a shorter pulse
+        # releases the clamp earlier. The proxy fails the moment two bands are given
+        # the SAME delay ladder by hand: cal_3x15_v1 starts both its 50 µs and 10 µs
+        # bands at 5.160 µs, so the tie fell to protocol order and the rows came out
+        # 50/10/100 instead of 10/50/100. Sorting on pulse_us is what the orientation
+        # rule actually means, and it is a no-op on every other profile on disk
+        # (checked: only cal_3x15_v1 differs between the two keys). Ties between
+        # equal pulse widths keep protocol order -- Python's sort is stable -- which
+        # is what a profile carrying a duplicated band wants.
         self._band_display_order = sorted(
-            range(n_bands), key=lambda i: bands[i]['delays_us'][0])
+            range(n_bands), key=lambda i: bands[i]['pulse_us'])
         self._display_band_labels = [self._band_labels[i] for i in self._band_display_order]
         self._band_stats_order  = list(self._band_display_order)
         self._stats_band_labels = [self._band_labels[i] for i in self._band_stats_order]
@@ -939,6 +952,11 @@ class MainWindow(QMainWindow):
         # CLASSIFY_EP profile is actually pulse-*descending* (40->5us) -- so
         # every Analysis chart that plots "vs pulse width" must reindex by
         # this instead of assuming index order.
+        # As of v1.71 this is the SAME permutation as _band_display_order above
+        # (that one used to key on delays_us[0]). Kept as a separate name because
+        # the two express different requirements -- grid orientation there, "vs
+        # pulse width" plotting here -- and only coincide while both are defined
+        # as pulse-ascending. Do not collapse one into the other.
         self._pulse_sort_order = sorted(range(n_bands), key=lambda i: bands[i]['pulse_us'])
         self._pulse_us_sorted  = [bands[i]['pulse_us'] for i in self._pulse_sort_order]
         # Per-cell delay_us range across all bands, for the Analysis heatmap's

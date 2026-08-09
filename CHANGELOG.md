@@ -1,3 +1,79 @@
+### src/pimd_delaycal.py — v1.46 — calibration table rows pulse-ascending, matching the two thermal tables
+
+The two thermal tables (mean, std dev) have sorted their rows by `pulse_us` since v1.17
+(`_thermal_display_order`); the calibration table above them stayed in protocol/JSON order, which
+the v1.17 comment recorded as deliberate. With `cal_3x15_v1` — protocol order 100 / 50 / 10 µs —
+that left the top table reading 100/50/10 while the two below it read 10/50/100. All three now
+read top-to-bottom in pulse-ascending order, the project's standard grid orientation (lowest
+top-left, highest bottom-right).
+
+**Done as a `QHeaderView` section move, not as a permutation of the data, and that choice is the
+whole point of the change.** The calibration table's row index doubles as the **protocol band
+index** in ten places: `_build_profile()`, `export_csv()`, `_fill_cell()`, `_mark_row_pending()`,
+`_start_auto()`, `_auto_finish()`, `_auto_color_cell()`, `_on_manual_nudge_clicked()`, and the two
+thermal colour mirrors in `_update_thermal_tables()`. Several of those *write* a calibration.
+Permuting the data would mean getting a protocol↔display mapping right at every one of them, and
+getting it wrong in `_build_profile()` would silently pair the wrong delays with the wrong band in
+an exported profile — a corruption with no visible symptom until a capture campaign came out
+strange. Moving header sections leaves every logical index untouched, so all ten stay correct by
+construction and only the screen changes. `_on_manual_nudge_clicked()` is the clearest example: it
+uses its row argument both to address the table *and* to index `_fp_pairs` for its log label, and
+under this approach both remain right with no edit at all.
+
+**`_fp_pairs` is deliberately not reordered.** It drives the `D` command, so its order *is* the
+sweep order — rotating it would move which band sits at which sweep position, and this week's work
+has established that sweep position is exactly the variable under investigation.
+
+Verified by driving the real `_rebuild_table` / `_apply_cal_row_order` / `_fill_cell` against
+`cal_3x15_v1` under an offscreen Qt: display reads 10 / 50 / 100 µs top-to-bottom, while
+`table.item(0, ·)` still returns the 100 µs band's own delays and the full band↔delay round-trip
+is intact. Three Qt behaviours were checked rather than assumed — `moveSection()` works
+programmatically even though `sectionsMovable` is False (so rows still cannot be dragged by hand),
+`clear()` + `setRowCount()` do **not** reset section order (hence the re-apply on every rebuild,
+or a stale permutation would survive a profile change), and the move loop converges from any
+starting state. Switching afterwards to the 7-band `cal_63_air_bat_v3` renders
+9/13.44/20/30/45/67.2/100 with no residue. (2026-08-09)
+
+---
+
+### src/pimd_classviz.py — v1.71 / src/pimd_classify.py — v1.4 — heatmap band order keyed on pulse_us, not the `delays_us[0]` proxy
+
+`cal_3x15_v1` (3 bands: 3125 Hz/100 µs, 5000 Hz/50 µs, 25000 Hz/10 µs) rendered its heatmap rows
+**50 / 10 / 100 µs** on both the Main and Analysis sheets — neither the profile's own band order
+nor the project's standard grid orientation, which `pimd_rawlog.py`'s header declares as
+**lowest top-left, highest bottom-right**.
+
+Cause: `_band_display_order` sorted on `bands[i]['delays_us'][0]`, the band's *first delay*, as a
+stand-in for pulse width. That holds for every calibrated profile — a shorter pulse releases the
+clamp earlier, so first delay and pulse width ascend together — and v1.70 adopted it having
+explicitly verified only that `cal_110_full_range_v4` behaves that way. The proxy fails the
+moment two bands are given the **same delay ladder by hand**: `cal_3x15_v1` starts both its 50 µs
+and 10 µs bands at 5.160 µs, the tie fell to protocol order (50 before 10), and the 100 µs band's
+7.480 µs sorted last. Sorting on `pulse_us` is what the orientation rule actually means, so the
+key is now the quantity itself rather than something correlated with it.
+
+**Scope, checked rather than asserted:** across all eleven profiles in `src/data/profiles/`, the
+old and new keys produce an identical permutation for ten of them — every tracked and operating
+profile included (`cal_63_air_bat_v3`, `cal_110_full_range_v4`, both `cal_72` generations, all
+the `cal_100_10_x15` variants). `cal_3x15_v1` is the only one that moves, and it moves from
+50/10/100 to 10/50/100. The change is a no-op on every capture ever taken.
+
+Fixed in **both** tools. `pimd_classify.py` carried the same proxy with the same comment
+(its v1.3 was the sibling of classviz v1.70) and would have rendered the same profile the same
+wrong way — one profile displaying two different ways across two tools is worse than either being
+wrong alone. `pimd_delaycal.py` already sorted its thermal rows on `pulse_us`
+(`_thermal_display_order`), which is corroboration that pulse width is the intended convention
+rather than a new decision made here.
+
+Ties between equal pulse widths now keep protocol order, Python's sort being stable — which is
+what a profile carrying a deliberately duplicated band (`cal_100_10_x15_v1_3band`) wants.
+`_pulse_sort_order` is left as a separate name even though it is now the same permutation: it
+expresses a different requirement ("vs pulse width" plotting on the Analysis tab, not grid
+orientation) and the two only coincide while both are defined as pulse-ascending. Noted in place
+so neither is collapsed into the other. (2026-08-09)
+
+---
+
 ### Findings — the cell-0 population is caused by the EMIT. Not the band boundary, not settling, not dwell.
 
 `cal_100_10_x15_v1_3band` (97a12499) was run under fw v4.34, 1427 frames / 143 s / 9.95 Hz. It
