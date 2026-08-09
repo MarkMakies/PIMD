@@ -1,3 +1,43 @@
+### DESIGN.md / .gitignore — Doc-rev 1.15.7 — content already carried by CHANGELOG.md is cut, and the superseded profiles come back into the repo
+
+Operator trim, plus repair of the artefacts it left. No new bench data.
+
+**Cut from DESIGN.md as duplicated history rather than current design fact:** §12's U1 dissipation
+cost bullet (≈ 2.5 W → ≈ 4.6 W across the discharge) and its ADC error-budget RSS bullet (≈ 92 mV
+pack-referred, ≈ 53 mV available ratiometrically off the LTC6655, identified not built); the
+standing caution about regulated-window claims taken over a narrow interval; the retired
+`cal_63_air_bat_v3` 21.5–23.3 V data-quality window with its 22.5–24.0 V transition band; the
+idle-drain-vs-streaming 15× and session-planning arithmetic, and the ≈ 0.29 V measured IR drop; the
+"highest-value unmade measurement" note (the +15 V rail under scope during a TX pulse, fresh pack vs
+near-flat); §13's footnote on what retired with the 63-cell epoch; §14 open problems 8–12 (threshold
+noise zone, classification-layer rebuild, the `Sn_Pb_solder_spool_01` id collision, the missing
+within-placement quality gate, fw v4.34's outstanding bench acceptance); and §16's recalibration
+procedure. **All of it is in this file — the findings stand, and none of them are withdrawn.**
+
+**Four consequences of the cut are repaired.** The `---` rule before §14 had been left as `--`, so
+it rendered as text. Two stray spaces went (`*(measured)*. ` and `pedestal** .`), as did a doubled
+blank line in §12. The §14.8 / §14.9 / §16 cross-references pointed at sections that no longer
+exist — each is dropped rather than left dangling, with the substance it pointed at stated in place:
+delaycal's §15 row now says *why* Import Profile comes first (persisted settings are not anchored to
+the locked profile, so a stale baseline is inherited, band plan included) instead of pointing at the
+deleted procedure.
+
+**1.15.6's own text no longer described the file.** It stated that two enclosure references were
+deliberately kept, one being §12's note that the dissipation is trapped inside a sealed enclosure —
+that bullet is one of the ones cut here, so the Hardware rev line is now the only enclosure
+reference and the Doc-rev block says so.
+
+**All six superseded calibration profiles are restored to the repo** — `cal_3x10_v1`,
+`cal_63_air_bat_v3`, `cal_63_air_v1`, `cal_63_air_v2`, `cal_72_air_v2`, `cal_72_air_v3` — recovered
+from git history, where each had been untracked at its retirement. **This reverses the
+track-by-exception convention:** `.gitignore` no longer carries a per-lock retirement list, so it is
+no longer the authoritative record of which locks are retired (1.15.5 relied on it for exactly
+that), and a retired lock can no longer be lost by a working-copy accident. §15's profiles row is
+rewritten to match. `.gitignore` also loses rules for `REDO.md` and `assets`, neither of which
+exists. (2026-08-10)
+
+---
+
 ### DESIGN.md — Doc-rev 1.15.6 — the 2026-07-13 enclosure is no longer a measurement epoch
 
 **Operator assessment: fitting the shielded enclosure did not materially move what was being

@@ -3,19 +3,21 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) · **Firmware:** v4.34 · **PC tools:** gui v4.17 · classviz v1.72 · delaycal v1.47 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v2` (locked 2026-08-09, sha `def96704`, 3 × 10 = 30 cells). Bump this line on every edit.
 **Last bench update:** 2026-08-09 (3×10 epoch opened; pack/temperature telemetry on all four PC tools)
-**Doc rev:** 1.15.6 (2026-08-09) — **all "pre-enclosure" staleness framing removed.** The 2026-07-13
-shielded-enclosure fit is **no longer treated as a measurement reset** — it did not materially move
-what was being measured at the time *(operator assessment)*. §3's values stand as current; the epoch
-row in §1 is re-attributed to **fw v4.24**, which changed Mode 2 boundary settling on the same day
-and *did* void Mode 2 per-cell values and delay tables. Two enclosure references are kept because
-they are build facts rather than staleness claims: the Hardware rev line, and §12's note that the
-dissipation is trapped **inside a sealed enclosure**, which is the one place the enclosure genuinely
-bites (§14.1). §12's supply-noise table keeps its **5S** caveat — a different supply, a real reason.
-§14.2 is retitled and rescoped accordingly. The Doc-rev block itself is compressed to a terse
-lineage, per the header convention in `CLAUDE.md`; full detail for every rev is in `CHANGELOG.md`.
+**Doc rev:** 1.15.7 (2026-08-10) — **content already carried by `CHANGELOG.md` is removed.** Cut:
+§12's U1 dissipation cost and ADC error-budget bullets, the narrow-interval regulated-window caution,
+the retired `cal_63_air_bat_v3` 21.5–23.3 V window, the idle-drain / IR-drop bullets and the
+"highest-value unmade measurement" note; §13's retired-63-cell-epoch footnote; §14 open problems
+8–12; §16's recalibration procedure. **Their findings stand — they are in `CHANGELOG.md`.**
+Consequences of the cut are repaired here: the §14.8 / §14.9 / §16 cross-references those sections
+carried are dropped rather than left dangling, and the substance they pointed at is stated in place.
+**1.15.6's claim that §12 keeps the sealed-enclosure dissipation note no longer holds** — that
+bullet is one of the ones cut, so the Hardware rev line is now the only enclosure reference.
+**Superseded calibration profiles are tracked again** — `.gitignore` no longer ignores them and all
+six retired locks are back in the repo, so §15's profiles row is rewritten.
 
 *Rev lineage (detail in `CHANGELOG.md`):*
-*1.15.5 — §10 epoch ledger dropped; §3 epoch tags condensed · 1.15.4 — §13/§10 design principles
+*1.15.6 — "pre-enclosure" staleness framing removed; the 2026-07-13 enclosure is not a measurement
+epoch · 1.15.5 — §10 epoch ledger dropped; §3 epoch tags condensed · 1.15.4 — §13/§10 design principles
 corrected, they described the retired profile · 1.15.3 — staleness audit; R1 is 1.5k ∥ 10k as built;
 ζ shown independent of R · 1.15.2 — post-consolidation audit fixes · 1.15.1 — legacy
 critical-damping figure withdrawn as corroboration · 1.15 — §18 consolidation and deep trim,
@@ -593,11 +595,10 @@ regulation across the whole usable discharge.
 - ⚠ **C18 is a 4700 µF 25 V part on `+20V`**, at ~100 % of rating against a 25.2 V fresh pack. A
   35 V replacement is identified and **not yet fitted** (§14.4).
 
-
 ### Pack state of charge is an operating variable
 
 **Pack voltage reaches the operating point: 43–51 mV/V over 21–25 V**, one sign across all bands,
-r = 0.96–0.97 *(measured)*. 
+r = 0.96–0.97 *(measured)*.
 
 **The data-quality window is a property of (pack voltage × profile delays), not of voltage alone.**
 A noisy region sits at a **fixed place on the decay waveform** while pack voltage **scales the
@@ -627,7 +628,7 @@ nominal OCV shape rather than a measured one.
   The early-decay region carries the most discrimination information and sits well above the noise
   floor. This is the oldest unconventional choice in the project and it still holds.
 - **The profile spans almost the whole decay, and skips only the middle.** `cal_3x10_v2` runs from
-  **4.85 V down to the ~16.5 mV pedestal** . The
+  **4.85 V down to the ~16.5 mV pedestal**. The
   omitted region is not a design preference: it is where the unipolar front end rails (§7), and
   it is cut out of the *geometry* so that no downstream consumer has to know about it.
 - **Two anchoring schemes in one profile — amplitude early, time late.** Conventionally a PI profile
@@ -644,14 +645,14 @@ nominal OCV shape rather than a measured one.
   biases every amplitude feature derived from it. Removing those cells from the geometry is cheaper
   and safer than teaching every downstream consumer about the rail.
 - **The signature is a two-basis object, measured rather than assumed** *(established on the 63-cell
-  corpora — conceptually intact, but unverified on this geometry, §14.9)*. Each target's orientation
+  corpora — conceptually intact, but unverified on this geometry)*. Each target's orientation
   set is **rank 2** — one axial and one transverse basis shape — and an oblique pose is a positive
   convex combination landing on the arc between, with weights on the dipole prediction
   `cos²θ / sin²θ`. So the matrix carries enough structure to *solve for* orientation instead of
   being confounded by it, and an orientation-invariant descriptor is the 2-D subspace rather than
   any signature in it.
 
---
+---
 
 ## 14. Open problems
 
@@ -718,13 +719,13 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | **v4.17** — Mode 1 filtered-telemetry GUI. Pack SoC / board-temperature gauges; session logs to `data/sessions/gui_<ts>.csv`. |
 | `src/pimd_classviz.py` | **v1.72** — Mode 2 signature visualiser and the **corpus-capture workbench**. Four tabs (Heatmap / Stats / Analysis / Family Plane). Loads and runs saved profiles as RAM-only dynamic profiles; auto-logs a self-describing session dump whenever the stream runs; registry-backed structured capture writing `src/data/corpora/`; pack/temperature telemetry written to the dump automatically. Profile *authoring* is not here — it is in delaycal. |
-| `src/pimd_delaycal.py` | **v1.47** — delay-calibration sweeper and the only profile author. Coarse+fine two-phase sweep per (freq, pulse) pair, threshold-crossing delays snapped to the 8 ns grid, thermal soak monitoring, auto-nudge, Compare Profiles tab, pack/temperature gauges and a conditions span recorded into every exported profile's notes. **Import Profile first** when recalibrating — persisted settings are not anchored to the locked profile (§16). |
+| `src/pimd_delaycal.py` | **v1.47** — delay-calibration sweeper and the only profile author. Coarse+fine two-phase sweep per (freq, pulse) pair, threshold-crossing delays snapped to the 8 ns grid, thermal soak monitoring, auto-nudge, Compare Profiles tab, pack/temperature gauges and a conditions span recorded into every exported profile's notes. **Import Profile first** when recalibrating — persisted settings are not anchored to the locked profile, so editing a field and pressing Run inherits a stale baseline, band plan included. |
 | `src/pimd_rawlog.py` | **v1.16** — deliberately dumb raw logger: loads a profile, streams it, writes every firmware line **verbatim** to `data/sessions/rawlog_<ts>.txt`. No tables, no derived values, so it cannot develop display-layer defects. **Ground truth for offline work.** Acquisitions are self-bracketing. Geometry-agnostic. |
 | `src/pimd_shape.py` | **v1** — shared signature-geometry maths (pure NumPy, **no Qt**). `unit_shape` / `amp_l2` / `snr`, `band_means`, `band_range_mean`, `crossing_us`, `decay_persistence`, `family`. Geometry always passed explicitly; bands and thresholds resolved **by value**, never by stored index. `family` (sign) and `decay_persistence` (magnitude) are read together and neither overrules the other. |
 | `src/pimd_features.py` | **v14** — session-CSV → training-corpus builder (offline CLI). Registry join, **hard geometry guard: one `(profile_name, profile_sha8)` per corpus build**. Parses the dump's `# pack_v:` / `# soak:` / `# stall:` / `# capture:` / `# mark:` comment tracks; `pack_v_at()` interpolates a voltage per capture. |
 | `src/pimd_target_check.py` | **v4** — target-registry loader/validator (CLI + library). `DEFAULT_REGISTRY_PATH` here is the single source of truth for registry location. `-f` is required — there is no default path. |
 | `src/pimd_corpus_check.py` | **v1.9** — corpus-level acceptance checker. Shape distance-invariance, split-half SNR, repeat consistency, falloff fit. One flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. |
-| `src/data/profiles/` | Locked profiles (§10). **Only the operating profile is tracked** — `cal_3x10_v2.json`; each superseded lock is added to `.gitignore` as it is retired but kept on disk and stays usable as a delaycal comparison reference. |
+| `src/data/profiles/` | Locked profiles (§10). **All locks are tracked**, current and superseded — the operating profile is `cal_3x10_v2.json` (§10 firmware↔ML contract) and every retired lock stays in the repo and usable as a delaycal comparison reference. |
 | `src/data/targets/targets_v3.csv` | Human-authored target registry, **current**, 27 objects. Human-owned: tooling reads and validates only, never writes. `targets_v1.csv` is retained for reading the 2026-07-23 corpus. |
 | `src/data/corpora/` | Signature corpora (`gui_signatures_*.csv`). Both files on disk are **63-cell previous-epoch** and cannot be mixed into the current 30-cell epoch. Untracked, so **git cannot restore a damaged corpus** — back up before any in-place edit. |
 | `src/data/sessions/` | Raw Mode 2 session dumps — self-describing CSV with embedded profile JSON, per-column map, marks and comment tracks; plus rawlog's verbatim `.txt`. Written automatically whenever the stream runs, ~220 KB/min. Untracked and **not reconstructable after the fact.** |
@@ -770,12 +771,12 @@ python pimd_rawlog.py     # raw verbatim session logger — ground truth for off
 # Offline: registry validation (-f is required; there is no default)
 python pimd_target_check.py -f data/targets/targets_v3.csv
 
-# Offline: feature-maths acceptance check. NOTE (§14.9): expectations are hard-coded
+# Offline: feature-maths acceptance check. NOTE: expectations are hard-coded
 # from the 2026-07-23 cal_63_air_v2 analysis, so this FAILs against any other epoch.
 python pimd_shape.py --selftest data/corpora/gui_signatures_targets_v1_20260723.csv
 
 # Offline: corpus acceptance checks (exit 1 on any FAIL, so it can gate a capture day).
-# NOTE (§14.9): the v3-corpus FAILs were never diagnosed. Read the table, not the exit code.
+# NOTE: the v3-corpus FAILs were never diagnosed. Read the table, not the exit code.
 python pimd_corpus_check.py data/corpora/<corpus>.csv
 ```
 
@@ -816,7 +817,7 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 | 17.5 | **Sweep rate is set by cell count and band count:** 63 cells 6.49 Hz · 45 cells 8.77 Hz · 33 cells 11.49 Hz, one bench, one day, fw v4.34 (§10). | current |
 | 17.6 | **Pack voltage reaches the operating point at 43–51 mV/V over 21–25 V**, r = 0.96–0.97; does not generalise beyond that span (§12). | 6S |
 | 17.7 | **Pack capacity ≈ 5.2 Ah / 10.33 streaming-hours** full to empty; idle drain is ~15× lower than streaming, so a fresh pack cannot be idled into a window (§12). | 6S |
-| 17.8 | **The data-quality noise zone sits at a fixed place on the decay while pack voltage scales the decay** — so which threshold columns it hits is a function of state of charge, not a static profile property. Mechanism of *why that region is noisy* remains open (§14.8). | 63-cell |
+| 17.8 | **The data-quality noise zone sits at a fixed place on the decay while pack voltage scales the decay** — so which threshold columns it hits is a function of state of charge, not a static profile property. Mechanism of *why that region is noisy* remains open. | 63-cell |
 | 17.9 | **Thermal and supply drift are separable by sign:** thermal moves light and heavy bands in opposite directions (r = +0.99 across bands); supply moves all bands the same way (§14.1). | all |
 | 17.10 | **Reference age is a hard ceiling on frozen-reference measurement** — ~0.5 mV/cell at 10 s, 7.5 mV at 150 s. Air must be bracketed both sides; interpolation takes correct pairings to cos 0.996–1.000 (§3). | all |
 | 17.11 | **`splithalf_floor` understates reproducibility noise ≈ 2×**, so the SNR ≥ 5 gate is really a reproducibility gate of ≈ 2.5–3.5 (§3). | 63-cell |

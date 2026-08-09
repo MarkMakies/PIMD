@@ -1,0 +1,189 @@
+{
+  "name": "cal_63_air_v2",
+  "notes": "Fresh delay recalibration 2026-07-14 (fully warmed, fw v4.26 with the read->CC-write IRQ hold). Supersedes cal_63_air_v1: same band plan and top-dense threshold ladder 4.9 -> 0.5 V, delays re-anchored after the heavy bands had drifted 20-31 mV below nominal (the 100 us / 4.70 V cell had drifted onto the ~4.67 V upper edge of the threshold noise zone, sigma 2.7 mV; recal cured it). 6 us / 50 kHz band remains excluded per cal_63_air_v1 rationale (no unique info, noisy). 7 bands x 9 delays = 63 cells. Frame-compatible geometry with cal_63_air_v1 in cell count only - delays differ, so treat as a new calibration epoch for corpus purposes.",
+  "averages": 32,
+  "bands": [
+    {
+      "freq_hz": 25000,
+      "pulse_us": 9.0,
+      "delays_us": [
+        4.944,
+        5.056,
+        5.144,
+        5.4,
+        5.536,
+        5.792,
+        6.64,
+        7.312,
+        8.616
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 20000,
+      "pulse_us": 13.44,
+      "delays_us": [
+        5.376,
+        5.496,
+        5.6,
+        5.856,
+        6.0,
+        6.264,
+        7.112,
+        7.784,
+        9.096
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 15625,
+      "pulse_us": 20.0,
+      "delays_us": [
+        5.816,
+        5.936,
+        6.048,
+        6.312,
+        6.456,
+        6.72,
+        7.576,
+        8.256,
+        9.576
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 10000,
+      "pulse_us": 30.0,
+      "delays_us": [
+        6.264,
+        6.384,
+        6.496,
+        6.76,
+        6.912,
+        7.176,
+        8.04,
+        8.728,
+        10.064
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 6250,
+      "pulse_us": 45.0,
+      "delays_us": [
+        6.672,
+        6.8,
+        6.912,
+        7.184,
+        7.336,
+        7.608,
+        8.48,
+        9.168,
+        10.528
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 4000,
+      "pulse_us": 67.2,
+      "delays_us": [
+        7.04,
+        7.168,
+        7.28,
+        7.552,
+        7.712,
+        7.976,
+        8.856,
+        9.56,
+        10.928
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 3125,
+      "pulse_us": 100.0,
+      "delays_us": [
+        7.304,
+        7.44,
+        7.552,
+        7.832,
+        7.984,
+        8.264,
+        9.144,
+        9.84,
+        11.216
+      ],
+      "threshold_v": [
+        4.9,
+        4.8,
+        4.7,
+        4.4,
+        4.2,
+        3.8,
+        2.4,
+        1.5,
+        0.5
+      ]
+    }
+  ]
+}
