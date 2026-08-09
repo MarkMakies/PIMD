@@ -48,6 +48,40 @@ the marks survive, the tool does not, and the row should say so. Also repath the
 `References/training-results-v1b.png` / `-v1c.png` rows, which moved into `References/images/`
 with the rest of the kept figures — same files, tracked as renames, new location.
 
+**Three more files go with the same sweep.** `HANDOFF_cell_reduction.md` is retired because its
+question has been **answered**: it was the 2026-08-03 brief asking which rows and columns of
+`cal_110_full_range_v4` (10 × 11 = 110 cells) could be dropped "without losing information, to cut
+sweep/frame time and thermal exposure", and `cal_3x10_v1` — 30 cells, 6.49 → 11.49 Hz — is the
+answer. A handover doc outlives its usefulness the moment the handover completes. Also
+`sweep_100us_asbuilt_20260808.json`, the reconstruction of the superseded 68-cell ladder (§10),
+and `sweep_150us_decay_v1.json`.
+
+**That last one is half of a documented pair, and the consolidation pass needs to know.** §10's
+*"Characterisation sweeps — `sweep_100us_decay_v1` / `sweep_150us_decay_v1`"* subsection and
+§15's inventory row both describe the two together as the 66-cell single-band sweeps built to
+model the decay rather than sample it. **`sweep_100us_decay_v1.json` survives and stays tracked;
+the 150 µs half does not.** The §10 subsection and the §15 row should be rewritten around the one
+that remains rather than left describing a pair that no longer exists. The 150 µs sweep is
+retrievable at **`16edf75`** like the rest of this cleanup, and §10's reasoning for why the pair
+existed at all — `cal_110_full_range_v4`'s 150 µs band puts only two columns between clip release
+and the rail, and two points cannot constrain a decay — stands as written and should be kept.
+
+**`src/pimd_v2_findings.py` deleted too** — the v1.0 reproduction script for `ML_Findings_v2.md`,
+which went with `ML/` above, so it was reproducing a document that no longer exists. Gitignored
+since `ff3b619` untracked it, but **tracked before that and byte-identical to the copy at
+`84471fe`** *(checked, not assumed)*, so it is recoverable despite not being in the current index.
+Its `.gitignore` rule goes with it.
+
+**It takes `pimd_classify.py` with it, and that is worth stating rather than discovering.** That
+tool does not merely import it — it delegates its band-mean / crossing-continuum physics to it at
+eleven call sites (`bandmeans()`, `crossing_us()`, `continuum()`, and the hand-curated `FAM3`
+campaign-2 ground truth), by deliberate design: *"reuses, does not reimplement"*. So
+`pimd_classify.py` now fails at **import** as well as at argument parsing. In practice this
+changes nothing — it was already unrunnable for the `DEFAULT_PROFILE` reason above, it is
+gitignored, and its whole feature set is 63/72-cell — but anyone reviving it needs both
+`84471fe:src/pimd_v2_findings.py` and a decision about what it should classify against in a
+30-cell epoch.
+
 **Not touched by any of this:** `src/data/corpora/` keeps both 63-cell corpora. They are
 previous-epoch and cannot be mixed into a 30-cell dataset, but they remain the only corpora on
 disk and `pimd_shape.py --selftest` still expects them (§14.15).

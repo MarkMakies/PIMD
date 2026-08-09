@@ -13,9 +13,9 @@ assets
 
 # Previous-epoch ML tools — kept locally, not repo source (2026-07-13 epoch reset)
 # (pimd_corpus_check.py re-tracked 2026-07-15 — v1.5 reads the current v1.32+
-#  target_id/distance_mm corpus schema)
+#  target_id/distance_mm corpus schema. pimd_v2_findings.py deleted 2026-08-09 —
+#  its rule is gone with it rather than left guarding nothing.)
 src/pimd_classify.py
-src/pimd_v2_findings.py
 
 src/data/classviz_settings.json
 src/data/classify_settings.json
