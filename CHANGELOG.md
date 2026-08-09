@@ -23,14 +23,25 @@ profile round-trips through `_apply_profile()` at 3 / 10 / 30 with a `D` command
 noting the 10 µs band's headroom is genuinely tight — **max valid delay 29.095 µs against a
 largest-used 29.0 µs**, about 95 ns of margin, unchanged by this edit but not much to give away.
 
-**One thing this does not fix, and must not be papered over.** That cell's `threshold_v` still
-reads **0.017 V**, the pedestal figure measured when the cell sat at 18.0 µs. At 18.44 µs the trace
-is at the **rail exit (~2.4 mV)**, not up at the ~16.5 mV pedestal, so that entry is now stale —
-it is the one number in this profile that no longer describes where its cell actually sits. It is
-left as-is rather than replaced with a computed value: `threshold_v` in this profile records
-*measured* voltage (see the entry below), and substituting a figure derived from the model would
-quietly turn a measurement column into a mixture of measurement and inference. **Re-measure that
-cell and reissue as v3, or blank the field** — either is honest, inventing a number is not.
+***Correction, same day, before any capture:*** this entry originally claimed that the moved
+cell's `threshold_v` of **0.017 V** had gone stale — that it was a pedestal figure *measured* at
+18.0 µs and no longer described a cell now sitting at the rail exit — and called for a re-measure
+or a v3. **That was wrong, and it contradicted the `cal_3x10_v1` entry below, which already had it
+right.** The last four `threshold_v` values in **every** band (`0.017, 0.016, 0.015, 0.014`) are
+**placeholders for the pedestal, not measurements of anything.** The 1 mV steps exist only to keep
+the ladder monotonic. Only the six *early* values are measured voltages.
+
+So moving a late cell's delay invalidates nothing: a placeholder does not describe where its cell
+sits and was never claiming to. **No v3 is needed and no re-measurement is owed.** The rule that
+matters for anyone reading this column later is the one the v1 entry already states — *the four
+late values are not four distinct measurements and should not be mined as such* — and it applies
+uniformly across all three bands, at whatever delay each late cell ends up at.
+
+Recorded rather than edited away, because the mistake is instructive: the drift happened between
+two entries written an hour apart, where the second treated a column the first had explicitly
+flagged as placeholder data as though it were measured. **A column that mixes measured and
+placeholder values is exactly the kind of thing that gets mis-mined later** — which is the reason
+the v1 entry called it out in the first place.
 
 **The pack-voltage window is now carried in the profile's own `notes`** — "full charge down to
 21.5 V" — rather than living only in a CHANGELOG entry. §10 requires a profile to be specified
