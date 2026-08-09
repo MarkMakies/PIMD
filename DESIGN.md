@@ -3,7 +3,16 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) · **Firmware:** v4.34 · **PC tools:** gui v4.17 · classviz v1.72 · delaycal v1.47 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v2` (locked 2026-08-09, sha `def96704`, 3 × 10 = 30 cells). Bump this line on every edit.
 **Last bench update:** 2026-08-09 (3×10 epoch opened; pack/temperature telemetry on all four PC tools)
-**Doc rev:** 1.15.3 (2026-08-09) — **staleness audit + as-built R1.** The RX damping resistor is
+**Doc rev:** 1.15.4 (2026-08-09) — **§13 and §10's design principles corrected: they described the
+retired profile.** Four claims were false of `cal_3x10_v2` — the **×1.5 geometric pulse ladder**
+(actual ratios are **2× and 5×**), *evenly spaced slices of log target-τ* (log gaps 0.7 and 0.3),
+the **0.5–4.9 V sampling window** (actual span is 4.85 V down to the ~16.5 mV pedestal), and a
+**uniformly amplitude-anchored matrix** (only the 6 early cells are; the 4 late ones are
+time-anchored). The real design change is now stated: **the ladder is a hybrid** — amplitude
+anchoring early where polarity separates families, time anchoring late where only decay rate does,
+and nothing between because the front end rails there. §14.7's coil-current item is re-scoped, its
+evidence having come from the ladder that no longer exists. Previous: 1.15.3 — **staleness audit +
+as-built R1.** The RX damping resistor is
 **two parts in parallel on the board — 1.5 kΩ ∥ 10 kΩ = 1304 Ω — and schematic v6.04 draws a single
 1.3k** (§7, new open item §14.5a). Electrically it is what the fit assumed to 0.33 %, so no result
 moves. The audit also established that **ζ depends only on the pole ratio, not on R at all**
@@ -514,14 +523,37 @@ readings and must not be treated as such.
 **Headroom note:** the 10 µs band's largest delay (29.0 µs) sits against a max valid delay of
 **29.095 µs** — about 95 ns of margin before the 16-bit PWM duty overflows.
 
-### Design principles (carried across every epoch)
+### Design principles — as they stand at `cal_3x10_v2`
 
-- **Pulse widths geometric ×≈1.5.** Pulse width is a target-time-constant-selective excitation axis;
-  constant-ratio spacing gives equal discrimination information per band.
-- **Frequencies from the CLEAN_FREQS 125 MHz-divisor list**, chosen to hold duty near 30 % so
-  per-band heating stays roughly even. Duty absorbs grid quantisation; the pulse ladder stays exact.
-- **Amplitude-anchored delays** make the matrix self-normalising across bands — at the cost that
-  which cells are good is a function of pack state of charge, not a static property (§13).
+⚠ **Two long-standing principles were dropped at this epoch.** Text describing the ×1.5 geometric
+pulse ladder and a uniformly amplitude-anchored matrix describes `cal_72*`/`cal_63*` and **is not
+true of the current profile.**
+
+- **Three widely-spaced bands, not a geometric ladder.** Pulse widths are **100 / 50 / 10 µs** —
+  ratios **2× and 5×**, deliberately uneven. The retired 63-cell profile used a **×1.5 geometric**
+  ladder over seven bands, on the principle that constant-ratio spacing gives equal discrimination
+  information per slice of log target-τ. That principle is **not in force here**: three bands cannot
+  tile log-τ evenly, and this plan was chosen on the bench as the smallest set that still spans the
+  target range. **The trade is resolution in τ for sweep rate**, and it is a bench judgement rather
+  than a derived optimum.
+- **Frequencies from the CLEAN_FREQS 125 MHz-divisor list** — 3125 / 5000 / 25000 Hz are all exact
+  divisors, so `WRAP` is integer and the pulse ladder stays exact with duty absorbing the grid
+  quantisation. Duties are 31.25 / 25 / 25 % (mean 27.1 %), keeping per-band heating roughly even.
+  *This principle does carry across every epoch.*
+- **The delay ladder is a hybrid, and that is the substantive change.** Two schemes in one band,
+  for two different physics (§2):
+  - **6 early cells, amplitude-anchored** on the volt-scale decay (4.85 → 0.07 V measured). These
+    carry the polarity split, and they inherit the cost of amplitude anchoring — which cells are
+    good is a function of pack state of charge, not a static property (§12). *Worth checking on the
+    bench: §2's measured polarity window on the 100 µs band is **sd 7.97–12.30 µs**, and two of that
+    band's six early cells sit outside it — **7.48 µs** (before) and **13.0 µs** (after). Not
+    necessarily wrong, since that window was measured against one target pair and the ends are where
+    the split narrows rather than vanishes, but it means the polarity split is carried by four cells
+    on that band, not six.*
+  - **4 late cells at fixed delays** out on the tail, landing on the ~16.5 mV pedestal. Past the
+    front end's lobe both target families read positive, so sign is not a discriminant there and
+    **decay rate** is what separates them. Time, not amplitude, is the right anchor for that.
+  - **Nothing in between**, because the front end rails there (§7).
 - **Fewer cells and fewer band boundaries is faster**, measured on one bench, one day, fw v4.34:
 
 | geometry | sweep rate |
@@ -662,24 +694,37 @@ inference; this would observe the mechanism directly.
 
 ## 13. What makes this design unusual (deliberate, validated choices)
 
-- **Sampling the 0.5 – 4.9 V band of the flyback decay** rather than the usual bottom ~700 mV —
-  it carries more discrimination information and sits well above the noise floor.
-- **The threshold ladder is a fixed set of voltages sampling a decay whose scale moves with the
-  pack.** This is the cost of amplitude-anchored delays and it was not anticipated: "which cells are
-  good" is not a static property of a profile (§12).
-- **Geometric pulse ladder (×1.5) + amplitude-anchored thresholds** — every band interrogates a
-  distinct, evenly spaced slice of log target-τ, and amplitude anchoring makes the matrix
-  self-normalising across bands.
+- **Sampling high on the flyback decay — up to 4.85 V — rather than the usual bottom ~700 mV.**
+  The early-decay region carries the most discrimination information and sits well above the noise
+  floor. This is the oldest unconventional choice in the project and it still holds.
+- **The profile spans almost the whole decay, and skips only the middle.** `cal_3x10_v2` runs from
+  **4.85 V down to the ~16.5 mV pedestal** — not the "0.5 – 4.9 V window" of the 63-cell epochs. The
+  omitted region is not a design preference: it is where the unipolar front end rails (§7), and
+  it is cut out of the *geometry* so that no downstream consumer has to know about it.
+- **Two anchoring schemes in one profile — amplitude early, time late.** Conventionally a PI profile
+  picks one. Here the early cells are anchored to *voltages* on the decay, because that is where
+  target **polarity** separates families; the late cells are anchored to *delays* out on the tail,
+  because past the front end's lobe both families read positive and only **decay rate** separates
+  them (§2). Using one scheme for both halves would sample the wrong quantity in one of them.
+- **The cost of amplitude anchoring, which was not anticipated:** the ladder is a fixed set of
+  voltages sampling a decay whose scale moves with the pack, so "which cells are good" is not a
+  static property of a profile (§12). This applies to the **six early cells**; the four late ones
+  are time-anchored and do not inherit it.
 - **Stepping over the front end's own artefact rather than correcting for it** (§7, §10). The null
   is real coil physics and it does carry target signal, but air is clipped there, so any cell in it
-  biases every amplitude feature derived from it. Removing those cells from the *geometry* is
-  cheaper and safer than teaching every downstream consumer about the rail.
-- **The signature is a two-basis object, measured rather than assumed.** Each target's orientation
+  biases every amplitude feature derived from it. Removing those cells from the geometry is cheaper
+  and safer than teaching every downstream consumer about the rail.
+- **The signature is a two-basis object, measured rather than assumed** *(established on the 63-cell
+  corpora — conceptually intact, but unverified on this geometry, §14.9)*. Each target's orientation
   set is **rank 2** — one axial and one transverse basis shape — and an oblique pose is a positive
   convex combination landing on the arc between, with weights on the dipole prediction
   `cos²θ / sin²θ`. So the matrix carries enough structure to *solve for* orientation instead of
   being confounded by it, and an orientation-invariant descriptor is the 2-D subspace rather than
   any signature in it.
+
+*Retired with the 63-cell epoch, and not true of the current profile: the **×1.5 geometric pulse
+ladder** across seven bands (§10). Any text elsewhere describing evenly-spaced slices of log
+target-τ, or a uniformly amplitude-anchored matrix, is describing `cal_72*`/`cal_63*`.*
 
 ---
 
@@ -727,10 +772,13 @@ inference; this would observe the mechanism directly.
    to USB CDC (§8). v4.27 counts these on `B` but does not prevent them. Any PC tool that stops
    draining the serial pipe stalls acquisition. Watch `emit_block_count`.
 
-7. **Possible TX coil-current plateau above ~67 µs.** In every calibration of the geometric ladder
-   the 67 → 100 µs band-to-band clip-release increment is the smallest on the ladder, consistent
-   with coil current flattening (τ_coil = L/R never measured). Needs a scope on coil current vs
-   pulse width. Bears on whether a 100 µs band justifies its share of frame time and thermal cost.
+7. **Possible TX coil-current plateau above ~67 µs.** In every calibration of the retired **×1.5
+   geometric ladder** the 67 → 100 µs band-to-band clip-release increment was the smallest on the
+   ladder, consistent with coil current flattening (τ_coil = L/R never measured). **The evidence is
+   epoch-bound — `cal_3x10_v2` has no 67 µs band, so the comparison cannot be repeated on the
+   current profile** — but the question matters more now, not less: the 100 µs band is one of three
+   rather than one of seven, so it carries a third of the profile. Needs a scope on coil current vs
+   pulse width, which does not depend on any profile.
 
 8. **Threshold noise zone — mechanism unknown.** Column σ is elevated across a band of the decay
    (~4.45–4.65 V under the 63-cell ladder) while both ends are clean. The *geometry* is understood —

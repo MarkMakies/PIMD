@@ -1,3 +1,52 @@
+### DESIGN.md — Doc-rev 1.15.4 — §13 and §10 described the retired profile, not this one
+
+**§13 "What makes this design unusual" was largely a description of `cal_63_air_bat_v3`.** Four of
+its claims are false of `cal_3x10_v2`, and §10's "Design principles (**carried across every
+epoch**)" repeated two of them under a heading that made the error worse.
+
+| claim | reality on `cal_3x10_v2` |
+|---|---|
+| "Geometric pulse ladder (×1.5)" | pulses are **100 / 50 / 10 µs** — ratios **2× and 5×** |
+| "evenly spaced slice of log target-τ" per band | log₁₀ gaps are **0.7 and 0.3** — not even |
+| "sampling the **0.5 – 4.9 V** band" | span is **4.85 V down to the ~16.5 mV pedestal** |
+| "amplitude-anchored **thresholds** … the matrix self-normalising" | only the **6 early** cells are amplitude-anchored; the **4 late** ones are at fixed delays |
+
+The ×1.5 figure was exact on the retired profile — its ratios run 1.49–1.50 across all seven bands —
+so this is not a rounding quibble. It is a **design principle that was dropped at the epoch change
+and never written down as dropped**, which is the same failure class as the rest of today's audit:
+the statement stayed true-sounding while the thing it described was replaced.
+
+**What the design actually is now, and it is a more interesting story than the one it replaced.**
+The ladder is a **hybrid of two anchoring schemes**, because the front end makes the two halves of
+the decay carry different information (§2):
+
+- **6 early cells, amplitude-anchored** on the volt-scale decay — this is where target **polarity**
+  separates families, so voltage is the right anchor. They inherit the pack-scaling cost (§12).
+- **4 late cells at fixed delays** on the tail, landing on the pedestal — past the front end's lobe
+  **both families read positive**, so sign is not a discriminant and **decay rate** is what
+  separates them. Time is the right anchor there, and amplitude anchoring would sample the wrong
+  quantity.
+- **Nothing in between**, because that is where the unipolar front end rails (§7).
+
+Conventionally a PI profile picks one anchoring scheme. Using one here would have sampled the wrong
+quantity in one half of the ladder.
+
+**Three-band spacing is a bench judgement, not a derived optimum**, and §10 now says so: three bands
+cannot tile log-τ evenly, and the plan trades τ resolution for sweep rate (63 cells 6.49 Hz → 33
+cells 11.49 Hz). The old ×1.5 rationale — constant-ratio spacing gives equal discrimination
+information per slice — was a real principle and is recorded as retired rather than deleted.
+
+**Two follow-ons in the same class.** §14.7 (possible TX coil-current plateau above ~67 µs) rested
+entirely on the retired ladder's band-to-band clip-release increments; `cal_3x10_v2` has no 67 µs
+band, so that comparison **cannot be repeated** — re-scoped, and noted that the question matters
+more now, since the 100 µs band is one of three rather than one of seven. And a boundary worth a
+bench check is recorded: §2's measured polarity window on the 100 µs band is **sd 7.97–12.30 µs**,
+while two of that band's six early cells sit **outside** it (7.48 and 13.0 µs) — so the polarity
+split may be carried by four cells there, not six. Flagged, not asserted: that window was measured
+against one target pair, and its ends are where the split narrows rather than vanishes. (2026-08-09)
+
+---
+
 ### DESIGN.md — Doc-rev 1.15.2 / 1.15.3 — staleness audit, and R1 is two resistors in parallel
 
 **A full pass for claims of the same kind as the withdrawn damping figure**: internally consistent,
