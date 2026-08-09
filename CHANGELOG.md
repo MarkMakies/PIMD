@@ -1,3 +1,43 @@
+### DESIGN.md — Doc-rev 1.15.1 — the legacy critical-damping figure is withdrawn as corroboration
+
+**Question asked, and it was the right one: is the front end under- or over-damped?** The answer is
+**over-damped, mildly, ζ = 1.06**, and it is consistent everywhere — but checking it surfaced a
+stale claim propping up the fit.
+
+DESIGN §7 carried an undated bench note, *"critically damps at ≈ 1.3–1.4k (measured)"*, and the
+`RX L and C — pinned` block cited it as **independent corroboration** of the 2026-08-08 fit,
+saying that "two quantities obtained years apart by different means agreeing to a few per cent is
+why these are recorded rather than left open". **That corroboration is withdrawn.** The note is in
+the very first repo commit (2026-06-22) with no date of its own, so it predates all recorded
+history; it also predates the June 2026 front-end rework, and it describes an RX network that may
+not be this one. It is not a check on the current values.
+
+**The fit does not need it.** C = 579 pF, L = 4.41 mH, R_crit = 1381 Ω rest on the 2026-08-08 scope
+measurement alone — 894 points, residual RMS 0.87 mV, taken at the amplifier input on the current
+hardware. What changes is the *warrant*, not the numbers.
+
+**The practical consequence is worth more than the retraction, because that band straddles the
+boundary.** Damping is a shunt, so lower R means more damping:
+
+| R1 | ζ | |
+|---|---|---|
+| **1300 Ω — as built** | **1.06** | over-damped, the intent |
+| 1381 Ω | 1.00 | critical |
+| 1400 Ω | 0.99 | **under-damped — ring returns** |
+
+So the legacy "1.3–1.4k critical" band is **not a range to pick R1 from**: its top end is
+under-damped by the current fit. Anyone swapping R1 to 1.4k on the strength of that line would
+reintroduce ring. §7 now states the ζ table explicitly and marks the old band historical.
+
+Two smaller repairs in the same pass. The **direct RX self-resonance measurement** is promoted in
+priority — with the corroboration withdrawn it is the only thing that would confirm L and C
+independently of a transient fit. And the guard against re-deriving **ζ = 1.00** is restored: it was
+cut as narrative in the 1.15 consolidation, but it is a methodological warning, not history —
+assuming the critically-damped form and fitting τ = 2RC can only ever report ζ = 1.00, and did, on
+2026-08-07. Cutting it made the same mistake available again. (2026-08-09)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-09

@@ -3,7 +3,15 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) · **Firmware:** v4.34 · **PC tools:** gui v4.17 · classviz v1.72 · delaycal v1.47 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v2` (locked 2026-08-09, sha `def96704`, 3 × 10 = 30 cells). Bump this line on every edit.
 **Last bench update:** 2026-08-09 (3×10 epoch opened; pack/temperature telemetry on all four PC tools)
-**Doc rev:** 1.15 (2026-08-09) — **consolidation and deep trim.** DESIGN.md is now a *working brief*, not an archive: it carries specs, measured values, the protocol, invariants and open problems, and nothing else. All narrative — how a result was reached, what was tried and reverted, per-version tool history — has been removed and lives in `CHANGELOG.md`, which is the source this file is consolidated from. Roughly 2190 → 640 lines. Substantive changes at this rev, not merely cuts: the **`cal_3x10_v2` epoch** replaces `cal_63_air_bat_v3` (30 cells, no cell sampled inside the front-end rail, pack window full → 21.5 V); the **railed-cell problem** (open problem 17 in the previous rev's §14) **is closed by geometry** and restated as a §7 design constraint on future profiles; the previous-epoch profile and corpus material is reduced to a ledger (§10); `utilities/`, `ML/`, `References/scope/`, `References/Targets v1 Analysis/`, `pimd_classify.py` and `pimd_v2_findings.py` are retired, with the §15 tracked-utility rule retired alongside them; and a stale §12 claim that the board carries no voltage or temperature sense — contradicted by the hardware built at fw v4.29–v4.33 — is removed. Previous: 1.14 (2026-08-08), the front end measured rather than inferred.
+**Doc rev:** 1.15.1 (2026-08-09) — post-consolidation correction, **no new bench data**. The legacy
+"critical damping at ≈ 1.3–1.4k" bench note is **withdrawn as corroboration** of the fitted RX L and
+C: it is undated, predates the June 2026 front-end rework, and describes an RX network that may not
+be this one. §7's L/C now rest on the 2026-08-08 scope fit alone, which is sufficient on its own.
+The practical consequence is worth more than the retraction: by the fitted values **1.4k is
+under-damped (ζ = 0.99)**, so that legacy band is not a range to pick R1 from — a ζ table now makes
+the boundary explicit, and a direct RX self-resonance measurement is promoted in priority since it
+is now the only independent check available. Previous: 1.15 (2026-08-09) — **consolidation and deep
+trim.** DESIGN.md is now a *working brief*, not an archive: it carries specs, measured values, the protocol, invariants and open problems, and nothing else. All narrative — how a result was reached, what was tried and reverted, per-version tool history — has been removed and lives in `CHANGELOG.md`, which is the source this file is consolidated from. Roughly 2190 → 640 lines. Substantive changes at this rev, not merely cuts: the **`cal_3x10_v2` epoch** replaces `cal_63_air_bat_v3` (30 cells, no cell sampled inside the front-end rail, pack window full → 21.5 V); the **railed-cell problem** (open problem 17 in the previous rev's §14) **is closed by geometry** and restated as a §7 design constraint on future profiles; the previous-epoch profile and corpus material is reduced to a ledger (§10); `utilities/`, `ML/`, `References/scope/`, `References/Targets v1 Analysis/`, `pimd_classify.py` and `pimd_v2_findings.py` are retired, with the §15 tracked-utility rule retired alongside them; and a stale §12 claim that the board carries no voltage or temperature sense — contradicted by the hardware built at fw v4.29–v4.33 — is removed. Previous: 1.14 (2026-08-08), the front end measured rather than inferred.
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -192,8 +200,11 @@ RX coil ─┬─ R1 1.3k ─ GND              (shunt = damping)
                       └─ 47R ─► LT6203 +input (single +12V supply)
 ```
 
-- **R1 = 1.3k (shunt) is the RX damping resistor** — critically damps at **≈ 1.3–1.4k**
-  *(measured)*, which also cleans up TX via mutual coupling.
+- **R1 = 1.3k (shunt) is the RX damping resistor**, which also cleans up TX via mutual coupling.
+  By the current fit it puts the network at **ζ = 1.06 — just into over-damping**, which is the
+  intent (§5). *(An older bench note put "critical damping at ≈ 1.3–1.4k". **Treat that band as
+  historical, not as a range to pick from:** it is undated, predates the June 2026 front-end
+  rework, and by the fitted values below **1.4k is under-damped, ζ = 0.99** — see the ζ table.)*
 - **R9 = 4.7k (series) is clamp current-limit only**, not damping.
 - **D2 / D3** sit in series across the post-R9 node and conduct only outside ~0–5 V; between the
   rails the diodes are off and R1 does the damping.
@@ -246,7 +257,9 @@ volt-scale region and does not extrapolate past it.**
 - **Two real poles with opposite-sign residues**, `V = A·e^(−t/τf) − B·e^(−t/τs) + V_q`:
   **τ_fast = 1.125 µs, τ_slow = 2.270 µs** *(measured)*, fit RMS 0.87 mV over 894 points. Exactly
   **one zero crossing** — it is not ringing.
-- **ζ = 1.06 — mildly overdamped**, not critically damped.
+- **ζ = 1.06 — mildly over-damped**, not critically damped. *(Do not re-derive this by assuming
+  the critically-damped form and fitting τ = 2RC: that construction can only ever report ζ = 1.00,
+  and it did, on 2026-08-07, before the two-pole fit replaced it.)*
 - **The negative lobe is real, it is in air, and it is on every band.** At the input it spans
   **sd 14.3 → 18.0 µs**, bottoming **≈ −15 mV** *(measured)*. It is **not** amplifier overload
   recovery: it is present *before* the LT6203, and it **responds to metal** — a steel spanner on
@@ -277,16 +290,28 @@ by construction — there is no guard in the feature code and none is needed whi
 
 ### RX L and C — pinned *(2026-08-08)*
 
-Taking the fitted poles with R1 = 1.3 k gives **C = 579 pF** and **L = 4.41 mH**, hence
-√(L/C) = 2762 Ω and **R_crit = ½√(L/C) = 1381 Ω** — against the **independently measured**
-1300–1400 Ω critical-damping value above. Two quantities obtained years apart by different means
-agreeing to a few per cent is why these are recorded rather than left open. *(The old 3.9 mH /
-311 pF was inferred from a resonance and is retired.)*
+Taking the fitted poles with R1 = 1.3 k gives **C = 579 pF**, **L = 4.41 mH**, √(L/C) = 2762 Ω and
+**R_crit = ½√(L/C) = 1381 Ω**. *(The old 3.9 mH / 311 pF was inferred from a resonance and is
+retired.)* Damping is a **shunt**, so **lower R means more damping**:
 
-**Still to measure:** a **direct** RX self-resonance measurement as a check on values currently
-derived from a transient fit; **R9 clamp current** (§14.5); and whether the **MCLK-edge ring** (70 ns
-FWHM, ~250 ns tail) exists in the circuit as well as between scope channels — the ADC samples on
-that edge, so if the coupling is real the converter captures the kick.
+| R1 | ζ | |
+|---|---|---|
+| **1300 Ω — as built** | **1.06** | **over-damped, the intent (§5)** |
+| 1381 Ω | 1.00 | critical |
+| 1400 Ω | 0.99 | under-damped — ring returns |
+
+**These values rest on the 2026-08-08 scope fit alone** — 894 points, residual RMS 0.87 mV, taken
+at the amplifier input on the current hardware. *(An earlier rev cited the legacy "1300–1400 Ω
+critical damping" bench note as independent corroboration and called that agreement the reason to
+trust the fit. **That claim is withdrawn** (2026-08-09): the note is undated, predates the June 2026
+front-end rework, and describes an RX network that may not be this one. It is not a check on the
+current values, and the fit does not need it.)*
+
+**Still to measure — and now more valuable, since the corroboration above was withdrawn:** a
+**direct** RX self-resonance measurement, which is the only thing that would confirm L and C
+independently of the transient fit. Also **R9 clamp current** (§14.5), and whether the
+**MCLK-edge ring** (70 ns FWHM, ~250 ns tail) exists in the circuit as well as between scope
+channels — the ADC samples on that edge, so if the coupling is real the converter captures the kick.
 
 ---
 
