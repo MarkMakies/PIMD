@@ -1,3 +1,32 @@
+### DESIGN.md — Doc-rev 1.15.5 — §10 epoch ledger dropped; §3's per-value epoch tags become one sentence
+
+Operator trim, plus repair of two artefacts that came with it. No new bench data.
+
+**Dropped from §10:** the epoch-ledger table of superseded profiles, and the 63-cell / 45-cell rows
+of the sweep-rate table. A retired profile's lineage belongs in this file and in git history, not in
+the working brief; `.gitignore` remains the authoritative list of which locks are retired, and every
+superseded JSON is still on disk and still usable as a delaycal comparison reference. **Verified
+before removing the pointer:** all four sha8s — `4a2352d2`, `89590f69`, `b4bee9d2`, `def96704` — are
+present in this file, so nothing became unfindable.
+
+**Changed in §3:** the per-value `[pre-enclosure]` tags are replaced by a single statement in the
+section banner naming the five pre-enclosure quantities (flyback, RX front-end node voltages,
+sample-timing precision, thermal drift, and the on-slope noise row). Same information, less markup.
+This mattered because the tags had been removed while the banner still *defined* the tag — which
+would have left those five values reading as current again, the exact defect Doc-rev 1.15.2 was cut
+to fix. The `[63-cell]` tags are unchanged.
+
+**Two artefacts repaired.** The tag removal left **empty backtick pairs and stray spacing**
+(`*(measured)* .`, `after R9 : `, a table row with trailing double-spaces), and a line in §10 was
+**truncated mid-word** — `r sweep and a 3-band`, the front of the sentence gone. The truncated
+sentence explained the 63-vs-33-cell rate difference, and with those rows deleted, restoring it
+verbatim would have pointed at data no longer present; it is rewritten to stand alone: measured on
+fw v4.34, rates from earlier firmware are not comparable because v4.34 delivers the full boundary
+settle it had been short-changing, and **`cal_3x10_v2` has not been rate-measured yet**.
+(2026-08-09)
+
+---
+
 ### DESIGN.md — Doc-rev 1.15.4 — §13 and §10 described the retired profile, not this one
 
 **§13 "What makes this design unusual" was largely a description of `cal_63_air_bat_v3`.** Four of

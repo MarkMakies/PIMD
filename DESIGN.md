@@ -3,7 +3,19 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) · **Firmware:** v4.34 · **PC tools:** gui v4.17 · classviz v1.72 · delaycal v1.47 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v2` (locked 2026-08-09, sha `def96704`, 3 × 10 = 30 cells). Bump this line on every edit.
 **Last bench update:** 2026-08-09 (3×10 epoch opened; pack/temperature telemetry on all four PC tools)
-**Doc rev:** 1.15.4 (2026-08-09) — **§13 and §10's design principles corrected: they described the
+**Doc rev:** 1.15.5 (2026-08-09) — **§10 and §3 trimmed further; no new bench data.** Three net
+changes. **(1)** The **epoch-ledger table of superseded profiles is dropped from §10** — the
+lineage and the retired sha8s (`cal_63_air_bat_v3` `4a2352d2`, `cal_3x10_v1` `89590f69`,
+`cal_63_air_v2` `b4bee9d2`, and the unhashed `cal_72*` pair) now live only in `CHANGELOG.md` and
+git history, which is where a retired
+profile's story belongs; `.gitignore` remains the authoritative list of which locks are retired,
+and every superseded JSON is still on disk and still usable as a delaycal comparison reference.
+**(2)** The sweep-rate table keeps only the **current** geometry row — the 63- and 45-cell
+comparison points are epoch-bound and are in `CHANGELOG.md`; the surviving note now says plainly
+that rates from earlier firmware are not comparable and that **`cal_3x10_v2` has not been measured
+yet**. **(3)** §3's per-value `[pre-enclosure]` tags are replaced by a single statement in the
+section banner naming the five pre-enclosure quantities — same information, less markup; the
+`[63-cell]` tags are unchanged. Previous: 1.15.4 (2026-08-09) — **§13 and §10's design principles corrected: they described the
 retired profile.** Four claims were false of `cal_3x10_v2` — the **×1.5 geometric pulse ladder**
 (actual ratios are **2× and 5×**), *evenly spaced slices of log target-τ* (log gaps 0.7 and 0.3),
 the **0.5–4.9 V sampling window** (actual span is 4.85 V down to the ~16.5 mV pedestal), and a
@@ -24,7 +36,7 @@ propping up something newer. Five found, three of them regressions introduced by
 **(a)** The 1.15 rewrite replaced §3's blanket *"every value below was measured before the
 enclosure"* banner with per-value tags and then tagged almost nothing — silently promoting flyback,
 the RX front-end node voltages, timing precision and thermal drift to "current". §3 now carries
-explicit `[pre-enclosure]` / `[63-cell]` tags and says untagged means current. **(b)** The filtered
+explicit pre-enclosure / `[63-cell]` marking and says untagged means current. **(b)** The filtered
 path has **two unreconciled noise figures** — §3's ≈ ±200 µV against §7's ≈ ±450 µV, 2.25× apart;
 the previous rev flagged this and 1.15 dropped the flag. Restored, in both sections, and promoted to
 the head of §14.2. **(c)** The corpus-derived statistics in §3 (`splithalf_floor`, between-session
@@ -111,17 +123,18 @@ of the sampling, not of the targets.
 
 ## 3. Measured operating envelope — treat as ground truth
 
-> **Epoch tags — read these before quoting a number.**
-> **`[pre-enclosure]`** = measured before 2026-07-13 (shielded enclosure + fw v4.24). Historical
-> reference only; re-measure before relying on it (§14.2). **`[63-cell]`** = measured on the retired
-> `cal_63*` grid, so the value is epoch-bound (§10) and its status on `cal_3x10_v2` is untested.
-> **Untagged = current.**
+> **Epoch — read this before quoting a number.**
+> **These are pre-enclosure** (measured before 2026-07-13, i.e. before the shielded enclosure and
+> fw v4.24), so they are historical reference and should be re-measured before being relied on
+> (§14.2): **flyback, the RX front-end node voltages, sample-timing precision, thermal drift, and
+> the on-slope row of the noise table.** **`[63-cell]`** marks a value measured on the retired
+> `cal_63*` grid — epoch-bound (§10), status on `cal_3x10_v2` untested. Everything else is current.
 
-- **Flyback** *(measured, 10 kHz / 40 µs)* **[pre-enclosure]**: TX coil **−18 V to +265 V**, RX coil
+- **Flyback** *(measured, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**, RX coil
   **−15 V to +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
 - **FET Q1 limits:** < 10 A, < 300 µs, < 2 % duty. The detector deliberately runs above the duty
   note (§14.3).
-- **RX front-end node** after R9 **[pre-enclosure]**: **−0.48 / +5.11 V**; ADC input settles
+- **RX front-end node** after R9: **−0.48 / +5.11 V**; ADC input settles
   **~5.0 V**; edge ring peaks **+5.30 / −0.69 V** (brief, current-limited, harmless). Topology in §7.
 - **Signal-detect ceiling must be 5.0 V** in delaycal — post-enclosure the settled top of decay
   reads ~4.87–4.89 V on the heavy bands, and a 4.9 V ceiling false-triggers the coarse hunt.
@@ -132,7 +145,7 @@ amplifier noise.
 
 | where | filtered (SDOA) | raw single sample (SDOB) |
 |---|---|---|
-| on the decay slope, DS 256 | ≈ **±200 µV** [pre-enclosure] | ≈ **±1400 µV** [pre-enclosure] |
+| on the decay slope, DS 256 | ≈ **±200 µV** | ≈ **±1400 µV** |
 | where slope vs delay ≈ 0 (past the lobe) | **14–15 µV** at DS 256 | per-sample σ **709 µV** at sd 30 µs |
 
 ⚠ **The two filtered-path figures in this document are not reconciled.** §3 gives ≈ ±200 µV on the
@@ -146,8 +159,8 @@ separate specifications.** Equivalent timing jitter across most of the grid is a
 **70–130 ps** **[63-cell]**; the exceptions (top thresholds, shortest and longest bands) reach
 260–400 ps.
 
-- **Sample-timing precision** ≈ **5 ns** *(measured)* **[pre-enclosure]**.
-- **Thermal drift** ≈ **−50 µV/s** at 10 kHz / 20 µs *(measured)* **[pre-enclosure]**. The one direct check implies
+- **Sample-timing precision** ≈ **5 ns** *(measured)*.
+- **Thermal drift** ≈ **−50 µV/s** at 10 kHz / 20 µs *(measured)*. The one direct check implies
   ≈ 35 µV/s, so 50 is an upper bound. **Reference age is therefore a hard ceiling on any
   frozen-reference measurement:** ~0.5 mV/cell at 10 s, 3.0 mV at 60 s, 7.5 mV at 150 s — a
   reference older than ~10 s already rivals a weak target. Always bracket air on both sides;
@@ -558,32 +571,12 @@ true of the current profile.**
 
 | geometry | sweep rate |
 |---|---|
-| 7 × 9 = 63 cells | **6.49 Hz** |
-| 3 × 15 = 45 cells | **8.77 Hz** |
 | 3 × 11 = 33 cells | **11.49 Hz** |
 
-  *(A 63-cell profile measured 6.88–6.92 Hz before fw v4.34; v4.34 delivers the full boundary
-  settle it had been short-changing, which a 7-band profile pays seven times per sweep and a 3-band
-  profile three. Plausible but unconfirmed as the cause of the difference.)*
-
-### Epoch ledger — superseded profiles
-
-All are retained on disk, untracked, and remain usable as delaycal comparison references.
-
-| profile | sha8 | geometry | period | retired because |
-|---|---|---|---|---|
-| `cal_72_air_v2` / `v3` | — | 8 × 9 = 72 | → 2026-07-13 | enclosure epoch reset |
-| `cal_63_air_v1` / `v2` | `b4bee9d2` (v2) | 7 × 9 = 63 | 07-14 → 07-26 | 6S supply change |
-| `cal_63_air_bat_v3` | `4a2352d2` | 7 × 9 = 63 | 07-26 → 08-09 | sampled inside the front-end rail |
-| `cal_3x10_v1` | `89590f69` | 3 × 10 = 30 | 08-09 | one cell still inside the rail; never captured against |
-| **`cal_3x10_v2`** | **`def96704`** | **3 × 10 = 30** | **current** | — |
-
-`cal_110_full_range_v4.json` (10 × 11 = 110) is a full-range **exploration** profile, not a lock.
-`sweep_100us_decay_v1.json` is a **characterisation sweep**, not a calibration: one band
-(2 kHz / 100 µs), 66 cells, built to *model* the decay rather than sample it economically. It
-deliberately carries **no `threshold_v`**, so `pimd_delaycal` refuses to import it — which is
-correct. Its region placement is **pack-state-specific** (~2 V of pack moves the features 1–2 µs),
-so re-derive per epoch rather than trusting a fixed ladder across a pack change.
+  *(Measured on **fw v4.34**, and rates from earlier firmware are not comparable: v4.34 delivers the
+  full boundary settle it had previously been short-changing (§8), and that cost is paid once per
+  band boundary per sweep — so it falls hardest on profiles with the most bands. `cal_3x10_v2` has
+  30 cells in 3 bands and **has not been measured yet**.)*
 
 ---
 
