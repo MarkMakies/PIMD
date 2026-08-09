@@ -1,3 +1,35 @@
+### DESIGN.md — Doc-rev 1.15.6 — the 2026-07-13 enclosure is no longer a measurement epoch
+
+**Operator assessment: fitting the shielded enclosure did not materially move what was being
+measured at the time.** All "pre-enclosure" staleness framing is removed from DESIGN.md
+accordingly — §3's flyback, RX front-end node voltages, sample-timing precision and thermal drift
+now stand as current rather than as historical reference awaiting re-measurement.
+
+**The 2026-07-13 epoch row survives, re-attributed.** That date bundled two changes, and only one of
+them is being retired as a reset: **fw v4.24 made Mode 2 boundary settling time-floored**, which
+genuinely voided Mode 2 per-cell values and delay tables (§8 — it was the root cause of the
+first-heatmap-column noise). The enclosure went on the same day and rode along in the framing. §1's
+table now names fw v4.24 as the reason and drops the enclosure from it.
+
+**Two enclosure references are deliberately kept, because they are build facts rather than staleness
+claims:** the Hardware rev line, and §12's note that the doubled U1 dissipation sits **inside a
+sealed shielded enclosure** on a project whose first open problem is thermal drift. That last one is
+the one place the enclosure does bite, and it is a live concern, not a stale measurement.
+
+**§12's supply-noise table keeps its caveat, on the other reason.** Those rows were taken on the
+**5S** pack that the 6S supply replaced — a different supply, a real and specific reason to
+distrust them — so "5S / pre-enclosure, stale on both counts" becomes simply 5S. §14.2 is retitled
+from "Post-enclosure / post-6S re-measurement backlog" to "Re-measurement backlog" and rescoped: the
+unreconciled ±200 µV / ±450 µV filtered-path pair stays its first item, now on the grounds that
+neither has been measured on current hardware rather than on epoch grounds.
+
+**The Doc-rev block is compressed from ~57 lines to a terse lineage**, matching the one-line-per-
+version header convention `CLAUDE.md` sets for source files. It had accreted six stacked revisions
+of prose — including archaeology about a tagging scheme that no longer exists — which is the
+accretion §18 exists to prevent. Full detail for every rev is in this file. (2026-08-09)
+
+---
+
 ### DESIGN.md — Doc-rev 1.15.5 — §10 epoch ledger dropped; §3's per-value epoch tags become one sentence
 
 Operator trim, plus repair of two artefacts that came with it. No new bench data.

@@ -3,58 +3,23 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) · **Firmware:** v4.34 · **PC tools:** gui v4.17 · classviz v1.72 · delaycal v1.47 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v2` (locked 2026-08-09, sha `def96704`, 3 × 10 = 30 cells). Bump this line on every edit.
 **Last bench update:** 2026-08-09 (3×10 epoch opened; pack/temperature telemetry on all four PC tools)
-**Doc rev:** 1.15.5 (2026-08-09) — **§10 and §3 trimmed further; no new bench data.** Three net
-changes. **(1)** The **epoch-ledger table of superseded profiles is dropped from §10** — the
-lineage and the retired sha8s (`cal_63_air_bat_v3` `4a2352d2`, `cal_3x10_v1` `89590f69`,
-`cal_63_air_v2` `b4bee9d2`, and the unhashed `cal_72*` pair) now live only in `CHANGELOG.md` and
-git history, which is where a retired
-profile's story belongs; `.gitignore` remains the authoritative list of which locks are retired,
-and every superseded JSON is still on disk and still usable as a delaycal comparison reference.
-**(2)** The sweep-rate table keeps only the **current** geometry row — the 63- and 45-cell
-comparison points are epoch-bound and are in `CHANGELOG.md`; the surviving note now says plainly
-that rates from earlier firmware are not comparable and that **`cal_3x10_v2` has not been measured
-yet**. **(3)** §3's per-value `[pre-enclosure]` tags are replaced by a single statement in the
-section banner naming the five pre-enclosure quantities — same information, less markup; the
-`[63-cell]` tags are unchanged. Previous: 1.15.4 (2026-08-09) — **§13 and §10's design principles corrected: they described the
-retired profile.** Four claims were false of `cal_3x10_v2` — the **×1.5 geometric pulse ladder**
-(actual ratios are **2× and 5×**), *evenly spaced slices of log target-τ* (log gaps 0.7 and 0.3),
-the **0.5–4.9 V sampling window** (actual span is 4.85 V down to the ~16.5 mV pedestal), and a
-**uniformly amplitude-anchored matrix** (only the 6 early cells are; the 4 late ones are
-time-anchored). The real design change is now stated: **the ladder is a hybrid** — amplitude
-anchoring early where polarity separates families, time anchoring late where only decay rate does,
-and nothing between because the front end rails there. §14.7's coil-current item is re-scoped, its
-evidence having come from the ladder that no longer exists. Previous: 1.15.3 — **staleness audit +
-as-built R1.** The RX damping resistor is
-**two parts in parallel on the board — 1.5 kΩ ∥ 10 kΩ = 1304 Ω — and schematic v6.04 draws a single
-1.3k** (§7, new open item §14.5a). Electrically it is what the fit assumed to 0.33 %, so no result
-moves. The audit also established that **ζ depends only on the pole ratio, not on R at all**
-(C ∝ 1/R, L ∝ R, so √(L/C) ∝ R and it cancels): ζ = (τ_f+τ_s)/(2√(τ_f·τ_s)) = 1.0622, immune to the
-R1 uncertainty and to the ±5 % tolerance. The ζ-vs-R table is relabelled as *substitution
-sensitivity* rather than uncertainty in this build. Staleness audit, no new bench data: A full pass for claims of
-the same kind as the damping one below: internally consistent, but undated, from a retired epoch, or
-propping up something newer. Five found, three of them regressions introduced by the 1.15 trim.
-**(a)** The 1.15 rewrite replaced §3's blanket *"every value below was measured before the
-enclosure"* banner with per-value tags and then tagged almost nothing — silently promoting flyback,
-the RX front-end node voltages, timing precision and thermal drift to "current". §3 now carries
-explicit pre-enclosure / `[63-cell]` marking and says untagged means current. **(b)** The filtered
-path has **two unreconciled noise figures** — §3's ≈ ±200 µV against §7's ≈ ±450 µV, 2.25× apart;
-the previous rev flagged this and 1.15 dropped the flag. Restored, in both sections, and promoted to
-the head of §14.2. **(c)** The corpus-derived statistics in §3 (`splithalf_floor`, between-session
-noise, timing jitter) were untagged while §17 tagged the same numbers `63-cell`; now consistent.
-**(d)** SoC's *4 min warm-up* is a **bench-supply** figure and warm-up is longer on the pack — the
-caveat was dropped in 1.15 and is restored, along with Mode 2 warm-up's "untested on
-`cal_3x10_v2`". **(e)** §17.1's ~0.5 A, which the §12 capacity figures rest on, was tagged "all
-epochs"; it was measured on the 63-cell profile, and now says so — with the duty check that suggests
-it carries (28.1 % → 27.1 % mean band duty) marked as inference, not measurement. Previous:
-1.15.1 (2026-08-09) — post-consolidation correction, **no new bench data**. The legacy
-"critical damping at ≈ 1.3–1.4k" bench note is **withdrawn as corroboration** of the fitted RX L and
-C: it is undated, predates the June 2026 front-end rework, and describes an RX network that may not
-be this one. §7's L/C now rest on the 2026-08-08 scope fit alone, which is sufficient on its own.
-The practical consequence is worth more than the retraction: by the fitted values **1.4k is
-under-damped (ζ = 0.99)**, so that legacy band is not a range to pick R1 from — a ζ table now makes
-the boundary explicit, and a direct RX self-resonance measurement is promoted in priority since it
-is now the only independent check available. Previous: 1.15 (2026-08-09) — **consolidation and deep
-trim.** DESIGN.md is now a *working brief*, not an archive: it carries specs, measured values, the protocol, invariants and open problems, and nothing else. All narrative — how a result was reached, what was tried and reverted, per-version tool history — has been removed and lives in `CHANGELOG.md`, which is the source this file is consolidated from. Roughly 2190 → 640 lines. Substantive changes at this rev, not merely cuts: the **`cal_3x10_v2` epoch** replaces `cal_63_air_bat_v3` (30 cells, no cell sampled inside the front-end rail, pack window full → 21.5 V); the **railed-cell problem** (open problem 17 in the previous rev's §14) **is closed by geometry** and restated as a §7 design constraint on future profiles; the previous-epoch profile and corpus material is reduced to a ledger (§10); `utilities/`, `ML/`, `References/scope/`, `References/Targets v1 Analysis/`, `pimd_classify.py` and `pimd_v2_findings.py` are retired, with the §15 tracked-utility rule retired alongside them; and a stale §12 claim that the board carries no voltage or temperature sense — contradicted by the hardware built at fw v4.29–v4.33 — is removed. Previous: 1.14 (2026-08-08), the front end measured rather than inferred.
+**Doc rev:** 1.15.6 (2026-08-09) — **all "pre-enclosure" staleness framing removed.** The 2026-07-13
+shielded-enclosure fit is **no longer treated as a measurement reset** — it did not materially move
+what was being measured at the time *(operator assessment)*. §3's values stand as current; the epoch
+row in §1 is re-attributed to **fw v4.24**, which changed Mode 2 boundary settling on the same day
+and *did* void Mode 2 per-cell values and delay tables. Two enclosure references are kept because
+they are build facts rather than staleness claims: the Hardware rev line, and §12's note that the
+dissipation is trapped **inside a sealed enclosure**, which is the one place the enclosure genuinely
+bites (§14.1). §12's supply-noise table keeps its **5S** caveat — a different supply, a real reason.
+§14.2 is retitled and rescoped accordingly. The Doc-rev block itself is compressed to a terse
+lineage, per the header convention in `CLAUDE.md`; full detail for every rev is in `CHANGELOG.md`.
+
+*Rev lineage (detail in `CHANGELOG.md`):*
+*1.15.5 — §10 epoch ledger dropped; §3 epoch tags condensed · 1.15.4 — §13/§10 design principles
+corrected, they described the retired profile · 1.15.3 — staleness audit; R1 is 1.5k ∥ 10k as built;
+ζ shown independent of R · 1.15.2 — post-consolidation audit fixes · 1.15.1 — legacy
+critical-damping figure withdrawn as corroboration · 1.15 — §18 consolidation and deep trim,
+2190 → 828 lines · 1.14 — the front end measured rather than inferred.*
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -87,13 +52,12 @@ steps over the front end's negative lobe entirely. The previous 63-cell epoch an
 are closed. **No corpus exists for the current epoch** — capture starts from zero, and that is the
 immediate next task.
 
-**Epoch discipline.** Three resets have voided quantitative history, and the rule each time is the
-same: frames from different profile geometries are never mixed, and a measured value is only valid
-inside the epoch it was taken in (§10).
+**Epoch discipline.** The rule each time is the same: frames from different profile geometries are
+never mixed, and a measured value is only valid inside the epoch it was taken in (§10).
 
 | epoch | opened | what it voided |
 |---|---|---|
-| shielded enclosure + fw v4.24 | 2026-07-13 | noise floors, drift rates, delay tables, all target-session numbers |
+| fw v4.24 — Mode 2 boundary settling made time-floored | 2026-07-13 | Mode 2 per-cell values and delay tables |
 | 6S pack replaces bench PSU | 2026-07-24 | *not* a measurement reset, but warm-up lengthened and pack voltage became an operating variable |
 | `cal_3x10_v2`, front end measured | 2026-08-09 | both 63-cell corpora; all per-cell and crossing-ladder quantities |
 
@@ -123,12 +87,10 @@ of the sampling, not of the targets.
 
 ## 3. Measured operating envelope — treat as ground truth
 
-> **Epoch — read this before quoting a number.**
-> **These are pre-enclosure** (measured before 2026-07-13, i.e. before the shielded enclosure and
-> fw v4.24), so they are historical reference and should be re-measured before being relied on
-> (§14.2): **flyback, the RX front-end node voltages, sample-timing precision, thermal drift, and
-> the on-slope row of the noise table.** **`[63-cell]`** marks a value measured on the retired
-> `cal_63*` grid — epoch-bound (§10), status on `cal_3x10_v2` untested. Everything else is current.
+> **Epoch — read this before quoting a number.** **`[63-cell]`** marks a value measured on the
+> retired `cal_63*` grid: epoch-bound (§10), and its status on `cal_3x10_v2` is untested.
+> Everything else stands as current. Some of these figures are old even so — §14.2 lists what is
+> worth re-measuring on the present hardware.
 
 - **Flyback** *(measured, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**, RX coil
   **−15 V to +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
@@ -136,7 +98,7 @@ of the sampling, not of the targets.
   note (§14.3).
 - **RX front-end node** after R9: **−0.48 / +5.11 V**; ADC input settles
   **~5.0 V**; edge ring peaks **+5.30 / −0.69 V** (brief, current-limited, harmless). Topology in §7.
-- **Signal-detect ceiling must be 5.0 V** in delaycal — post-enclosure the settled top of decay
+- **Signal-detect ceiling must be 5.0 V** in delaycal — the settled top of decay
   reads ~4.87–4.89 V on the heavy bands, and a 4.9 V ceiling false-triggers the coarse hunt.
 
 **Noise — and the slope it was measured on.** A noise figure without the slope it was taken on is
@@ -150,7 +112,7 @@ amplifier noise.
 
 ⚠ **The two filtered-path figures in this document are not reconciled.** §3 gives ≈ ±200 µV on the
 slope; §7 gives ≈ ±450 µV for SDOA and the boxcar arithmetic there is built on it. They differ by
-2.25× and **both are pre-enclosure.** Neither has been re-measured since; this is the first item on
+2.25× apart. Neither has been re-measured on the current hardware; this is the first item on
 the §14.2 backlog. The **raw** figure (±1400 µV) is consistent throughout and is what every boxcar
 calculation in this document rests on.
 
@@ -281,8 +243,7 @@ RX coil ─┬─ R1 ─ GND                   (shunt = damping; AS BUILT 1.5k �
 - **U6 LTC2508-32**, 32-bit oversampling SAR with a configurable decimation filter **and** a
   no-latency raw output:
   - **SDOA (SPI1):** 32-bit filtered/decimated, `DRL` data-ready-low — the precision path
-    *(≈ ±450 µV — **but see §3: this is unreconciled with §3's ≈ ±200 µV for the same path**, and
-    both are pre-enclosure)*.
+    *(≈ ±450 µV — **but see §3: this is unreconciled with §3's ≈ ±200 µV for the same path**)*.
   - **SDOB (SPI0):** no-latency raw 14-bit *(≈ ±1400 µV)* — the acquisition path.
   - **Decimation** SEL0 (GPIO12): 256 (operating) or 1024.
   - **Conversion sync:** the falling edge of GPIO5 (`SAMPLE`/`MCLK`) starts each conversion, so
@@ -674,8 +635,8 @@ nominal OCV shape rather than a measured one.
 - **Measured IR drop ≈ 0.29 V at the terminals** (25.04 V no-load / 24.96 MCU-only / 24.75 running)
   — *not* the ~0.95 V a two-parameter discharge fit had attributed to it.
 
-**Known supply-noise facts** *(measured, free-air, 10-sample σ; **5S / pre-enclosure**, stale on
-both counts — §14.2)*: ~200 µV USB no flash · ~250 µV battery no flash · ~900 µV USB using flash ·
+**Known supply-noise facts** *(measured, free-air, 10-sample σ; taken on the **5S** pack that the
+6S supply replaced, so the battery rows are stale — §14.2)*: ~200 µV USB no flash · ~250 µV battery no flash · ~900 µV USB using flash ·
 ~4000 µV battery using flash. **Writing to flash raises the noise floor ~10×** (§11).
 
 **Highest-value unmade measurement:** the +15 V rail under scope **during a TX pulse**, fresh pack
@@ -732,11 +693,11 @@ target-τ, or a uniformly amplitude-anchored matrix, is describing `cal_72*`/`ca
    the two were perfectly confounded before 2026-07-30. Thermal drift is real but the smaller
    effect.)*
 
-2. **Post-enclosure / post-6S re-measurement backlog.** Noise floors, drift rates and the §12
-   supply-noise table are all pre-enclosure, and the battery rows are also 5S — doubly stale.
-   **First item: the filtered path has two unreconciled figures** — §3's ≈ ±200 µV against §7's
-   ≈ ±450 µV for the same SDOA path, 2.25× apart, both pre-enclosure, and §7's boxcar arithmetic is
-   built on the larger one. Nothing downstream depends on the filtered figure (the acquisition path
+2. **Re-measurement backlog.** Noise floors and drift rates are old, and the §12 supply-noise
+   table's battery rows were taken on the **5S** pack the 6S supply replaced, so those are stale for
+   a definite reason. **First item: the filtered path has two unreconciled figures** — §3's
+   ≈ ±200 µV against §7's ≈ ±450 µV for the same SDOA path, 2.25× apart, and §7's boxcar arithmetic
+   is built on the larger one. Nothing downstream depends on the filtered figure (the acquisition path
    is raw, where ±1400 µV is consistent throughout), which is why this has survived — but one of the
    two is wrong and the document should not carry both. Also open: the 7805-vs-USB noise mystery
    (onboard 7805 path ~50 % noisier than USB) and the flash-penalty rows. **When re-measuring,
