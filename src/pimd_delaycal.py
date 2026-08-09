@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.46
+# PIMD Delay Calibration v1.47
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -19,8 +19,24 @@
 #   D<avg>;<freq_hz>,<pulse_us>,<d0>,...;… — define dynamic profile (thermal mode)
 #   Q<n>                                   — select profile
 #   G                                      — start Mode 2 streaming
+#   V                                      — identify; sent once on connect to prime
+#                                            the pack / board-temp gauges
+#
+# Records parsed besides R / W:
+#   P<time_ms>,<pack_mV>,<board_temp_dC>   — unsolicited sensor telemetry, ~60 s
+#   V<fw>,<board>,…,<pack_mV>,<board_temp_dC>,<lockout>
+#   PACK: / LOCKOUT                        — firmware messages, surfaced in the log
+#
+# board_temp_dC is deci-degrees C (x10 integer) from the DS18B20 on GP6 as of firmware
+# v4.33, and TEMP_INVALID_DC (-32768) on that field means NO READING — sensor absent,
+# unresponsive or CRC-failing. It is blanked, never logged as a number; see
+# _update_sensors(). A calibration is only comparable with another if the conditions
+# match (§14.1), so the pack/temperature span across a sweep is recorded in the
+# exported profile's notes and in the exported CSV's header block.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.47 pack-voltage and board-temperature gauges (P/V telemetry); sweep conditions
+#         recorded in the profile notes and the exported CSV header
 #   v1.46 calibration table rows pulse-ascending, matching the two thermal tables
 #   v1.45 Colour lo/hi: lo spinbox floor -999 mV (was 0), for the signed Mean level metric
 #   v1.44 "Mean level" Compare-over-time is now signed with a diverging colour scale, not abs()
@@ -90,10 +106,10 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QFileDialog, QHeaderView, QInputDialog, QPlainTextEdit, QSplitter, QTabWidget,
 )
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
-from PyQt6.QtCore import QEvent, QIODevice, Qt, QTimer  # noqa: E402
-from PyQt6.QtGui import QColor, QFont  # noqa: E402
+from PyQt6.QtCore import QEvent, QIODevice, QPointF, QRectF, Qt, QTimer  # noqa: E402
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen  # noqa: E402
 
-APP_VERSION = '1.46'
+APP_VERSION = '1.47'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -203,6 +219,190 @@ _COL_AUTO_DRIFTED = QColor(186, 156, 214)   # lavender:   locked-good channel no
                                              # threshold — frozen, not re-nudged
 
 
+# --------------------------------------------------------------------------
+# Pack / board-temperature telemetry (v1.47)
+#
+# Constants, maths and both gauge widgets are duplicated from pimd_gui.py, not
+# imported from it, for the same reason _build_d_command() is duplicated in
+# pimd_rawlog.py: every PC app in this repo stands alone. The thresholds and
+# captions must stay in step with pimd_gui.py so no two apps disagree about the
+# same pack -- if you retune one, retune all three (pimd_gui.py, pimd_rawlog.py,
+# here). Rationale for the numbers themselves lives in pimd_gui.py / DESIGN §12
+# and is not restated.
+# --------------------------------------------------------------------------
+N_CELLS = 6
+SOC_NOMINAL = [(4.20, 100), (4.15, 95), (4.11, 90), (4.06, 85), (4.02, 80),
+               (3.98, 75), (3.95, 70), (3.91, 65), (3.87, 60), (3.83, 55),
+               (3.80, 50), (3.77, 45), (3.75, 40), (3.72, 35), (3.70, 30),
+               (3.67, 25), (3.63, 20), (3.57, 15), (3.49, 10), (3.35, 5), (3.00, 0)]
+
+# (upper bound mV, fill colour, short caption)
+PACK_ZONES = (
+    (21_000, '#f66151', 'LOCKOUT floor'),
+    (21_500, '#ff8c00', 'below window'),
+    (23_300, '#8ff0a4', 'clean window'),
+    (24_000, '#f9f06b', 'transition'),
+    (99_999, '#ff8c00', 'above ceiling'),
+)
+PACK_WINDOW_LO_MV = 21_500      # lower edge of the clean window — marked on the gauge
+
+TEMP_GAUGE_MAX_C = 80.0         # board-temp gauge full scale
+TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
+                                # "no reading" sentinel (fw v4.33 sends -32768).
+                                # Threshold, not equality -- see pimd_gui.py.
+
+# Telemetry older than this has stopped arriving: the firmware's own cadence is
+# ~60 s, so three missed reports mean the board went quiet, not that it is slow.
+SENSOR_STALE_S = 180.0
+
+
+def pack_soc_pct(pack_mV):
+    """Loaded pack millivolts → SoC %, piecewise-linear on SOC_NOMINAL."""
+    if pack_mV is None:
+        return None
+    vcell = pack_mV / 1000.0 / N_CELLS
+    if vcell >= SOC_NOMINAL[0][0]:
+        return 100.0
+    if vcell <= SOC_NOMINAL[-1][0]:
+        return 0.0
+    for (v1, s1), (v2, s2) in zip(SOC_NOMINAL, SOC_NOMINAL[1:]):
+        if v2 <= vcell <= v1:
+            return s2 + (s1 - s2) * (vcell - v2) / (v1 - v2)
+    return 0.0
+
+
+def pack_zone(pack_mV):
+    """Pack millivolts → (fill colour, short caption) per PACK_ZONES."""
+    for upper, colour, caption in PACK_ZONES:
+        if pack_mV <= upper:
+            return colour, caption
+    return PACK_ZONES[-1][1], PACK_ZONES[-1][2]
+
+
+class BatteryGauge(QWidget):
+    """Battery-icon pack gauge — fill and text are state of charge, the caption
+    is the measured pack voltage and which DESIGN §12 zone it sits in."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(170, 52)
+        self.setMaximumHeight(52)
+        self._pack_mV = None
+        self._lockout = False
+        self.setToolTip(
+            'Pack voltage from the firmware (P/V telemetry, fw v4.28+).\n'
+            'Fill and % are state of charge on the nominal ICR18650 curve,\n'
+            'read off the loaded voltage, so it sits a few % low while pulsing.\n'
+            'Colour is the DESIGN §12 data-quality window:\n'
+            '  ≥ 24.0 V above the ceiling · 23.3–24.0 transition\n'
+            '  21.5–23.3 clean window · below 21.5 out of window\n'
+            '  ≤ 21.0 V firmware lockout floor (marked on the gauge).')
+
+    def set_reading(self, pack_mV, lockout=False):
+        self._pack_mV = pack_mV
+        self._lockout = lockout
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        cap_h = 15
+        body = QRectF(1.5, 1.5, w - 9.5, h - cap_h - 4)
+        nub = QRectF(body.right() + 1.5, body.top() + body.height() * 0.30,
+                     5.0, body.height() * 0.40)
+
+        outline = QColor('#5e5c64')
+        p.setPen(QPen(outline, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(body, 3.0, 3.0)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(outline)
+        p.drawRoundedRect(nub, 1.5, 1.5)
+
+        inner = body.adjusted(3.0, 3.0, -3.0, -3.0)
+        soc = pack_soc_pct(self._pack_mV)
+        if soc is not None:
+            colour, caption = pack_zone(self._pack_mV)
+            if self._lockout:
+                colour = PACK_ZONES[0][1]
+            p.setBrush(QColor(colour))
+            p.drawRect(QRectF(inner.left(), inner.top(),
+                              inner.width() * max(0.0, min(100.0, soc)) / 100.0,
+                              inner.height()))
+            text = '{0:.0f} %'.format(soc)
+            sub = '{0:.2f} V  ·  {1}'.format(self._pack_mV / 1000.0,
+                                             'LOCKED OUT' if self._lockout else caption)
+        else:
+            text, sub = '—', 'no pack reading'
+
+        # Lower edge of the clean window, so "stop capturing here" is visible
+        # without doing the voltage-to-SoC conversion in your head.
+        edge = pack_soc_pct(PACK_WINDOW_LO_MV)
+        x = inner.left() + inner.width() * edge / 100.0
+        p.setPen(QPen(QColor('#77767b'), 1.0, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(x, inner.top()), QPointF(x, inner.bottom()))
+
+        font = QFont()
+        font.setPointSize(11)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor('#241f31'))
+        p.drawText(body, Qt.AlignmentFlag.AlignCenter, text)
+
+        font.setPointSize(8)
+        font.setBold(False)
+        p.setFont(font)
+        p.setPen(QColor('#f66151') if self._lockout else self.palette().windowText().color())
+        p.drawText(QRectF(0, h - cap_h, w, cap_h),
+                   Qt.AlignmentFlag.AlignCenter, sub)
+
+
+class BarGauge(QWidget):
+    """Plain horizontal bar gauge with its reading printed inside — used for
+    board temperature."""
+
+    def __init__(self, vmax, fmt, colour='#a8c8e8', parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(170, 24)
+        self.setMaximumHeight(24)
+        self._vmax = vmax
+        self._fmt = fmt
+        self._colour = colour
+        self._value = None
+
+    def set_value(self, value):
+        self._value = value
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        body = QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0)
+        p.setPen(QPen(QColor('#5e5c64'), 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(body, 3.0, 3.0)
+
+        inner = body.adjusted(2.5, 2.5, -2.5, -2.5)
+        if self._value is None:
+            text = '—'
+        else:
+            frac = max(0.0, min(1.0, self._value / self._vmax))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(self._colour))
+            p.drawRect(QRectF(inner.left(), inner.top(),
+                              inner.width() * frac, inner.height()))
+            text = self._fmt.format(self._value)
+
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor('#241f31') if self._value is not None
+                 else self.palette().windowText().color())
+        p.drawText(body, Qt.AlignmentFlag.AlignCenter, text)
+
+
 class MainWindow(QMainWindow):
     MY_GREEN  = 'background-color: rgb(143, 240, 164);'
     MY_YELLOW = 'background-color: rgb(249, 240, 107);'
@@ -245,6 +445,20 @@ class MainWindow(QMainWindow):
         self._carried_notes = '' # 'notes' of the last imported profile
         self._carried_from  = '' # its name, for attribution
         self._last_save_name = ''  # basename (no .json) last chosen in the save dialog
+
+        # Pack / board-temperature telemetry (v1.47). All None until the firmware
+        # says otherwise, so the gauges read '—' rather than a plausible zero.
+        self._pack_mV        = None
+        self._board_temp_dC  = None   # None also means "sentinel seen", i.e. no reading
+        self._pack_lockout   = False
+        self._sensor_last_wall = None  # wall time of the last accepted P/V reading
+        self._fw_version     = None
+        # Conditions span, reset at Run and on connect. A calibration is only
+        # comparable with another if the conditions match (§14.1), so what the
+        # rig was doing thermally and electrically while the delays were being
+        # measured has to travel with them -- into the profile notes and the
+        # exported CSV header, not just onto the screen.
+        self._cond_reset('connect')
 
         # Thermal / profile state
         self._thermal_state      = 'idle'       # 'idle' | 'running'
@@ -459,6 +673,13 @@ class MainWindow(QMainWindow):
         form.addRow('Targets (V):', self.le_targets)
 
         left_col.addWidget(cfg_box)
+
+        # Rig state (v1.47) -- pack and board temperature, at parity with
+        # pimd_gui.py's gauges (same widgets, same zone colouring). Left column
+        # rather than the top bar: the battery gauge is 52 px tall and the top
+        # bar is a 30 px button row, and this window is sized to fit three
+        # tables without scrolling.
+        left_col.addWidget(self._build_sensor_box())
 
         # Activity log
         log_box_grp = QGroupBox('Activity Log')
@@ -878,6 +1099,167 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.statusBar().showMessage('Not connected')
+
+    # ------------------------------------------------------------------
+    # Rig state — pack voltage / board temperature (v1.47)
+    #
+    # Read-only display of the firmware's own telemetry. Nothing here sends a
+    # command while a sweep or a soak is running: the gauges are primed by the
+    # single 'V' at connect (the rig is idle then) and refresh from the
+    # unsolicited 'P' records the firmware emits every ~60 s. Same rule as
+    # pimd_rawlog.py, and for the same reason -- an extra command injected
+    # mid-sweep would interleave with the R records the sweep state machine
+    # advances on.
+    # ------------------------------------------------------------------
+    def _build_sensor_box(self):
+        box = QGroupBox('Rig State')
+        col = QVBoxLayout(box)
+        col.setContentsMargins(6, 4, 6, 4)
+        col.setSpacing(3)
+
+        self.gauge_pack = BatteryGauge()
+        col.addWidget(self.gauge_pack)
+
+        self.gauge_temp = BarGauge(TEMP_GAUGE_MAX_C, '{0:.1f} °C')
+        self.gauge_temp.setToolTip(
+            'Board temperature from the firmware (P/V telemetry).\n'
+            'DS18B20 1-Wire sensor on GP6, factory-calibrated to ±0.5 °C\n'
+            '(fw v4.33+); reported to 0.1 °C and refreshed every 30 s.\n'
+            'Shows — when the sensor is absent, unresponsive or CRC-failing.\n'
+            'The span across a sweep travels with the exported profile (§14.1).')
+        col.addWidget(self.gauge_temp)
+
+        self.lbl_sensor_age = QLabel('no telemetry yet')
+        f = QFont()
+        f.setPointSize(8)
+        self.lbl_sensor_age.setFont(f)
+        self.lbl_sensor_age.setToolTip(
+            'Age of the last pack/temperature report. The firmware sends one\n'
+            'unsolicited every ~60 s while connected, so anything older than\n'
+            '{0:.0f} s means the board has gone quiet, not that it is slow.'.format(
+                SENSOR_STALE_S))
+        col.addWidget(self.lbl_sensor_age)
+
+        # Ages the readout between reports so a stalled board is visible without
+        # waiting for the next one that never comes.
+        self._sensor_age_timer = QTimer(self)
+        self._sensor_age_timer.timeout.connect(self._refresh_sensor_age)
+        self._sensor_age_timer.start(5000)
+        return box
+
+    def _cond_reset(self, why):
+        """Start a fresh conditions span (pack/temperature first-last-min-max).
+
+        Called at connect and again at Run, so an exported profile's notes
+        describe the sweep that produced it and not whatever the rig was doing
+        an hour earlier."""
+        self._cond_since      = why
+        self._cond_pack_first = None
+        self._cond_pack_last  = None
+        self._cond_pack_min   = None
+        self._cond_pack_max   = None
+        self._cond_temp_first = None
+        self._cond_temp_last  = None
+        self._cond_temp_min   = None
+        self._cond_temp_max   = None
+
+    def _cond_record(self, pack_mV, temp_dC):
+        """Fold one reading into the current conditions span. temp_dC is None
+        when the firmware reported its no-reading sentinel — a missing sensor
+        must not drag the min down to a number that looks like a measurement."""
+        if pack_mV is not None:
+            if self._cond_pack_first is None:
+                self._cond_pack_first = pack_mV
+                self._cond_pack_min = self._cond_pack_max = pack_mV
+            self._cond_pack_last = pack_mV
+            self._cond_pack_min = min(self._cond_pack_min, pack_mV)
+            self._cond_pack_max = max(self._cond_pack_max, pack_mV)
+        if temp_dC is not None:
+            if self._cond_temp_first is None:
+                self._cond_temp_first = temp_dC
+                self._cond_temp_min = self._cond_temp_max = temp_dC
+            self._cond_temp_last = temp_dC
+            self._cond_temp_min = min(self._cond_temp_min, temp_dC)
+            self._cond_temp_max = max(self._cond_temp_max, temp_dC)
+
+    def _conditions_note(self):
+        """One line describing the conditions span, or '' when the firmware
+        never reported any. Empty rather than 'unknown' so a pre-v4.28 board
+        (or a run with the sensor unplugged) leaves no misleading trace."""
+        parts = []
+        if self._cond_pack_first is not None:
+            parts.append('pack {0:.2f}→{1:.2f} V (min {2:.2f})'.format(
+                self._cond_pack_first / 1000.0, self._cond_pack_last / 1000.0,
+                self._cond_pack_min / 1000.0))
+        if self._cond_temp_first is not None:
+            parts.append('board {0:.1f}→{1:.1f} °C (max {2:.1f})'.format(
+                self._cond_temp_first / 10.0, self._cond_temp_last / 10.0,
+                self._cond_temp_max / 10.0))
+        if not parts:
+            return ''
+        return 'Conditions since {0}: {1}.'.format(self._cond_since, ', '.join(parts))
+
+    def _update_sensors(self, pack_mV, board_temp_dC, lockout=None):
+        """Apply one pack / board-temp reading to the gauges, the conditions
+        span and the Activity Log.
+
+        board_temp_dC may be the firmware's no-reading sentinel (fw v4.33+, see
+        TEMP_INVALID_MAX_DC). It is resolved to None once, here, so nothing
+        downstream can print -3276.8 °C as though it were a temperature."""
+        self._pack_mV = pack_mV
+        valid_temp = board_temp_dC > TEMP_INVALID_MAX_DC
+        self._board_temp_dC = board_temp_dC if valid_temp else None
+        if lockout is not None:
+            self._pack_lockout = lockout
+        self._sensor_last_wall = time.time()
+        self._cond_record(pack_mV, self._board_temp_dC)
+        self._refresh_sensor_gauges()
+        self._refresh_sensor_age()
+        self._log('Sensor: {0}'.format(self._sensor_summary()))
+
+    def _sensor_summary(self):
+        """The one-line form used in the Activity Log and the CSV header."""
+        if self._pack_mV is None:
+            pack = 'pack —'
+        else:
+            _colour, caption = pack_zone(self._pack_mV)
+            pack = 'pack {0:.2f} V, {1:.0f} % SoC, {2}'.format(
+                self._pack_mV / 1000.0, pack_soc_pct(self._pack_mV),
+                'LOCKED OUT' if self._pack_lockout else caption)
+        temp = ('board —' if self._board_temp_dC is None
+                else 'board {0:.1f} °C'.format(self._board_temp_dC / 10.0))
+        return '{0}; {1}'.format(pack, temp)
+
+    def _refresh_sensor_gauges(self):
+        self.gauge_pack.set_reading(self._pack_mV, self._pack_lockout)
+        # Sub-zero readings are legal (the part goes to -55 °C) and BarGauge
+        # clamps the bar fraction, so they show as an empty bar with the correct
+        # negative number printed.
+        self.gauge_temp.set_value(None if self._board_temp_dC is None
+                                  else self._board_temp_dC / 10.0)
+
+    def _refresh_sensor_age(self):
+        if not hasattr(self, 'lbl_sensor_age'):
+            return
+        if self._sensor_last_wall is None:
+            self.lbl_sensor_age.setText('no telemetry yet')
+            self.lbl_sensor_age.setStyleSheet('')
+            return
+        age = time.time() - self._sensor_last_wall
+        self.lbl_sensor_age.setText('last report {0:.0f} s ago'.format(age))
+        self.lbl_sensor_age.setStyleSheet(
+            self.MY_YELLOW if age > SENSOR_STALE_S else '')
+
+    def _clear_sensors(self):
+        """Forget the rig state on disconnect, so a stale pack voltage cannot
+        outlive the connection it came from."""
+        self._pack_mV = None
+        self._board_temp_dC = None
+        self._pack_lockout = False
+        self._sensor_last_wall = None
+        self._fw_version = None
+        self._refresh_sensor_gauges()
+        self._refresh_sensor_age()
 
     # ------------------------------------------------------------------
     # Compare Profiles tab
@@ -1646,6 +2028,12 @@ class MainWindow(QMainWindow):
                 self.pb_connect.setText('Connected')
                 self.pb_connect.setStyleSheet(self.MY_GREEN)
                 self.send_command('E')
+                # Prime the gauges (v1.47). Without this they sit blank for up
+                # to a minute, until the first unsolicited 'P' lands. Sent while
+                # the rig is idle, before any sweep or stream, so it cannot
+                # interleave with the R/W records the state machines read.
+                self.send_command('V')
+                self._cond_reset('connect')
                 self.pb_run.setEnabled(True)
                 self.statusBar().showMessage('Connected — ready to run.')
             else:
@@ -1660,6 +2048,7 @@ class MainWindow(QMainWindow):
             self.pb_connect.setText('Not Connected')
             self.pb_connect.setStyleSheet(self.MY_YELLOW)
             self.pb_run.setEnabled(False)
+            self._clear_sensors()
             self._log('Disconnected.')
             self.statusBar().showMessage('Disconnected.')
 
@@ -1708,6 +2097,72 @@ class MainWindow(QMainWindow):
                     and raw.startswith('W'):
                 self._on_thermal_w_record(raw)
                 continue
+
+            # Sensor telemetry (v1.47), handled BEFORE the _pending_d_ready gate
+            # below: an unsolicited 'P' can land in the window between D being
+            # sent and its reply arriving, and that gate consumes every line it
+            # sees. Nothing here touches sweep or thermal state.
+            if raw.startswith('P') and raw[1:2].isdigit():
+                # P<time_ms>,<pack_mV>,<board_temp_dC> (firmware v4.28+).
+                #
+                # The isdigit() guard is load-bearing, and is the bug pimd_gui.py
+                # v4.17 was cut to fix -- do not simplify it away. A bare
+                # startswith('P') also matches every firmware MESSAGE beginning
+                # with P: 'PACK: rail absent ...', 'PACK: present again ...' and
+                # the 'Pulse Induction Metal Detector v...' boot banner. Those
+                # split on commas into an IndexError once per pack power-cycle.
+                # A record always has a digit after the tag (it is <time_ms>);
+                # a message never does.
+                parts = raw[1:].split(',')
+                try:
+                    self._update_sensors(int(parts[1]), int(parts[2]))
+                except (IndexError, ValueError) as e:
+                    self._log(f'Sensor packet parse error: {e} -- {raw}')
+                continue
+
+            if raw.startswith('PACK:'):
+                # Pack presence / failsafe-arming transitions (fw v4.31-v4.32).
+                # 'PACK: present again at N mV — lockout cleared ...' is the ONLY
+                # line that retires a latch, so it is matched explicitly. Note it
+                # contains the word "lockout" while meaning the opposite -- a
+                # substring test across all firmware messages would latch on this
+                # one and invert the state.
+                if 'lockout cleared' in raw:
+                    self._pack_lockout = False
+                    self._refresh_sensor_gauges()
+                self.status_label.setText(f'Firmware: {raw}')
+                self._log(raw)
+                continue
+
+            if raw.startswith('LOCKOUT'):
+                # The v4.28 low-voltage failsafe latching. A sweep running into
+                # this is producing delays against a pack the firmware has cut,
+                # so it is stopped rather than left to fill the table with
+                # readings nobody should calibrate against.
+                self._pack_lockout = True
+                self._refresh_sensor_gauges()
+                self.status_label.setText(f'Firmware: {raw}')
+                self._log(raw)
+                if self._state == 'sweeping':
+                    self.stop_calibration()
+                    self._log('Sweep stopped — pack lockout latched.')
+                continue
+
+            if raw.startswith('V'):
+                # Identify reply. Fields 0/1 are firmware version and board ID,
+                # present on every revision; fields 8..10 are pack_mV /
+                # board_temp_dC / lockout and need firmware v4.28+, so older
+                # firmware simply leaves the gauges blank.
+                parts = raw[1:].split(',')
+                if parts and parts[0].replace('.', '').isdigit():
+                    self._fw_version = parts[0]
+                    if len(parts) >= 11:
+                        try:
+                            self._update_sensors(int(parts[8]), int(parts[9]),
+                                                 bool(int(parts[10])))
+                        except ValueError as e:
+                            self._log(f'Identify parse error: {e} -- {raw}')
+                    continue
 
             if self._pending_d_ready is not None:
                 # 'E' (sent immediately before 'D') prints nothing, so the
@@ -1873,9 +2328,17 @@ class MainWindow(QMainWindow):
         self._sweep_started_at = datetime.now()
         self._sweep_ended_at   = None
         self._auto_note        = ''
+        # v1.47: the conditions this profile gets stamped with are this sweep's,
+        # not whatever the rig was doing since it was plugged in. The current
+        # reading is folded straight back in so the span is never empty just
+        # because the next 'P' is still up to a minute away.
+        self._cond_reset('sweep start')
+        self._cond_record(self._pack_mV, self._board_temp_dC)
 
         self._log(f'Starting calibration — {len(fp_pairs)} pair(s), '
                   f'{len(targets_v)} threshold(s)')
+        if self._pack_mV is not None:
+            self._log(f'Conditions at start: {self._sensor_summary()}')
         self.send_command('E')
         self._send_next_step()
 
@@ -2101,6 +2564,14 @@ class MainWindow(QMainWindow):
 
         if self._auto_note:
             parts.append(self._auto_note)
+
+        # v1.47. Pack voltage and board temperature across the sweep, from the
+        # firmware's own P/V telemetry. §14.1: two calibrations are only
+        # comparable if their conditions are, and until now the conditions were
+        # not recorded anywhere at all.
+        conditions = self._conditions_note()
+        if conditions:
+            parts.append(conditions)
 
         if self._fp_pairs and self._targets_v:
             parts.append(
@@ -3188,6 +3659,20 @@ class MainWindow(QMainWindow):
             return
         try:
             with open(path, 'w') as f:
+                # '#' header block (v1.47) so an exported table is self-describing
+                # about the conditions it was measured under, the same facts the
+                # exported profile's notes carry. Comment lines, so anything that
+                # already reads these CSVs by skipping the first line still gets
+                # the header row it expects only if it skips '#' too -- the
+                # consumers are the operator and an AI analyst, both of which do.
+                f.write('# PIMD delay calibration table\n')
+                f.write(f'# exported_iso: {datetime.now().isoformat()}\n')
+                f.write(f'# tool: pimd_delaycal.py v{APP_VERSION}\n')
+                f.write('# fw_version: {0}\n'.format(self._fw_version or 'unknown'))
+                f.write('# sensors_now: {0}\n'.format(self._sensor_summary()))
+                conditions = self._conditions_note()
+                if conditions:
+                    f.write(f'# {conditions}\n')
                 headers = ['freq_kHz/pulse_us'] + [f'{v:.3f}V' for v in self._targets_v]
                 f.write(','.join(headers) + '\n')
                 for r, (freq, pulse) in enumerate(self._fp_pairs):

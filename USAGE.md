@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.29
+# PIMD — Usage Guide (USAGE.md) v1.30
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,12 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.30 2026-08-09 delaycal v1.29 → v1.47, classviz v1.66 → v1.72. §4: new Rig State
+                gauges bullet, and the conditions span now carried in the exported
+                profile notes and the CSV header block. §5's Pack V sub-bullet
+                rewritten — the Pack V field and Log V button are gone, both pack
+                voltage and board temperature come from firmware telemetry, and the
+                '# pack_v:' track (now carrying temp_c) writes itself.
 v1.29 2026-08-07 gui v4.14 → v4.16, mcu v4.32 → v4.33. §3's board-temp gauge: the
                 scale is no longer a placeholder — it is a DS18B20 on GP6 (fw
                 v4.33+), blanked when the sensor is unavailable, with the
@@ -253,7 +259,7 @@ code, like every other app here (v4.14).
 
 ---
 
-## 4. pimd_delaycal — delay calibration sweeper (v1.29)
+## 4. pimd_delaycal — delay calibration sweeper (v1.47)
 
 **Intent.** Produces the calibrated profiles everything else depends on. For each
 configured (freq, pulse) pair it finds the sample delay at which the decay crosses
@@ -285,8 +291,21 @@ exports the result as a classviz-compatible profile JSON in
   guard reports, so naming the file names the epoch. The notes are pre-filled with
   the sweep's start/end time and duration, the sweep and Auto Nudge parameters
   (including std-dev N), the Auto Nudge outcome, the geometry, and the notes of any
-  profile imported this session, attributed — add your own conditions (thermal state,
-  soak time, pack voltage) before saving. Nothing else is reproducible without them.
+  profile imported this session, attributed — plus, since v1.47, a **`Conditions since
+  sweep start:`** line giving pack voltage first→last (and minimum) and board
+  temperature first→last (and maximum) from firmware telemetry across the sweep and any
+  soak that followed. Add your own conditions before saving; §14.1 is the reason —
+  two calibrations are only comparable if their conditions are. The exported **CSV**
+  carries the same facts in a `#` header block (export timestamp, tool and firmware
+  version, sensors at export, conditions span) ahead of the table row.
+- **Rig State gauges (v1.47).** Pack voltage / state of charge / DESIGN §12 zone and
+  board temperature, read straight off the firmware's own `P` telemetry (~60 s) and
+  primed by the `V` sent on connect — the same gauges `pimd_gui` shows, so the two
+  apps read identically. Nothing is polled: no command is injected while a sweep or a
+  soak is running. `—` on the temperature bar means the DS18B20 gave no reading, not
+  0 °C. The age line under the gauges turns yellow after 180 s, which means the board
+  stopped reporting rather than that it is slow. A latched `LOCKOUT` stops a running
+  sweep — past that point the table is being filled against a pack the firmware has cut.
 - **Import Profile** loads an existing JSON — **start every recalibration here**, see
   below. Also used for re-checking a profile without a fresh sweep. Its notes and
   filename are carried forward to the next export.
@@ -316,7 +335,7 @@ the current locked profile, edit what you mean to change, then sweep.
 
 ---
 
-## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.66)
+## 5. pimd_classviz — Mode 2 signature visualiser & capture (v1.72)
 
 **Intent.** The Mode 2 workhorse: renders each sweep frame as a real-time heatmap of
 signed per-cell deviation from an air baseline (blue = non-ferrous/opposing, red =
@@ -564,20 +583,28 @@ validated against the target registry.
       reconstructed afterwards; the cost of the opposite mistake is ~13 MB/hour of
       gitignored CSV. This is why the 2026-07-29/30 warm-up sessions could be analysed
       at all. An explicit **Stop** stays stopped until the stream is next started.
-    - **Pack V + Log V (v1.64).** Enter the measured pack voltage; `Log V` timestamps
-      it into the dump as a `# pack_v:` line, and the current value is stamped into
-      every signature capture's `pack_v` column. Log it **every ~20 min** — the status
-      bar nags with the reading's age. Analysis interpolates between entries, so what
-      you are building is a voltage *track*: one reading cannot describe a run over
-      which a 6S pack falls ~2.5 V. 0.00 reads `—` and means not measured. Note the
-      corpus column takes the field's **current value**, not a fresh reading — so
-      re-enter it as you go, or captures hours apart all carry the same voltage.
-      Appending to a corpus captured before v9 keeps that file's own columns, so
-      `pack_v` is not recorded there at all (v1.65); start a new signature file if you
-      want it per capture. The logged comment line carries **`age_s`** (v1.66) —
-      seconds since you last *typed* the value, so the dump distinguishes a fresh
-      meter reading from one carried over. A value restored from the last session
-      reads `age_s=unknown`, never a confident zero.
+    - **Pack voltage + board temperature, from firmware telemetry (v1.72).** The
+      `Pack V` field and the `Log V` button are **gone** — there is nothing to type
+      and nothing to remember. Two gauges (the same ones `pimd_gui` shows: pack SoC
+      with its DESIGN §12 zone colour, and board temperature) read the firmware's `P`
+      records, and **every reading writes itself into the open dump** as a
+      `# pack_v: <iso>, <volts>, age_s=<n>, temp_c=<c|none>` line at the firmware's
+      own ~60 s cadence. So the voltage *track* analysis interpolates over is now
+      complete by construction — one reading cannot describe a run over which a 6S
+      pack falls ~2.5 V, and the 1h51m gap in the 2026-07-29 dump cannot recur.
+      `temp_c` is new at v1.72 and is `none` when the DS18B20 gave no reading, never
+      a number; it rides in the same key=value tail as `age_s`, so readers that
+      predate it ignore it. `age_s` is now the age of the *firmware's* report
+      (normally under 60 s), not of something you typed. The label beside the gauges
+      shows that age and turns yellow past 180 s — that means the board stopped
+      reporting, i.e. the track has a hole in it. `PACK:` and `LOCKOUT` firmware
+      messages are marked into the dump as `# mark: firmware: …` lines. Signature
+      captures still stamp `pack_v` into the corpus column, now from the live
+      reading rather than from whatever was last typed. Appending to a corpus
+      captured before features v9 keeps that file's own columns, so `pack_v` is not
+      recorded there at all (v1.65); start a new signature file if you want it per
+      capture. `pimd_features` reads the track unchanged; it does not yet expose
+      `temp_c` as a parsed field.
     - **`# soak:` lines (v1.66)** record the rig's own run history:
       `streamed_s` (seconds the stream has actually run, banked across stop/start —
       *not* wall-clock elapsed), `stalled_s` (seconds lost to firmware-time gaps, so

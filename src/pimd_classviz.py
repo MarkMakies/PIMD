@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.70
+# PIMD Signature Visualiser (ClassViz) v1.72
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -16,9 +16,15 @@
 # lives in pimd_delaycal.py; ClassViz only loads and runs.
 #
 # Protocol: receives W<profile_idx>,<time_ms>,<ch0>,...,<chN-1>
-# Board firmware: pimd_mcu.py v4.23+
+#           also P<time_ms>,<pack_mV>,<board_temp_dC>   — unsolicited, ~60 s
+#           and   V<fw>,<board>,…,<pack_mV>,<board_temp_dC>,<lockout>
+# Board firmware: pimd_mcu.py v4.23+ (sensor fields need v4.28+, real board
+#           temperature v4.33+; board_temp_dC = -32768 means NO READING)
 #
 # History (full detail in CHANGELOG.md):
+#   v1.72 pack voltage and board temperature come from firmware telemetry, on
+#         pimd_gui's gauges; the Pack V / Log V hand-entry controls are gone and
+#         the session dump's '# pack_v:' track is written automatically
 #   v1.71 FIX heatmap band order keyed on pulse_us, not the delays_us[0] proxy
 #   v1.70 FIX Main/Analysis heatmap rows sorted delay-descending (longest at
 #         top) instead of ascending -- now matches the standard grid
@@ -111,8 +117,10 @@ import numpy as np
 
 os.environ.setdefault('QT_API', 'pyqt6')
 
-from PyQt6.QtCore import QEvent, QIODevice, QTimer, Qt  # noqa: E402
-from PyQt6.QtGui import QBrush, QColor, QFont, QImage, QPixmap  # noqa: E402
+from PyQt6.QtCore import QEvent, QIODevice, QPointF, QRectF, QTimer, Qt  # noqa: E402
+from PyQt6.QtGui import (  # noqa: E402
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap,
+)
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -137,7 +145,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.71'
+APP_VERSION = '1.72'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -340,12 +348,202 @@ WINDOW_NOMINAL_MIN_N    = 20    # below this, no nominal is established and the
 # scheduling jitter (p99 of healthy intervals on 2026-07-29 was 0.180 s) while
 # still catching every one of the 222 gaps in that session's stall window.
 FRAME_GAP_WARN_S = 2.0
-# Nag interval for a fresh pack-voltage reading while recording (v1.64), seconds.
-PACK_V_REMIND_S = 20 * 60
 # How often a '# soak:' line is written while streaming (v1.66), seconds.
 SOAK_EMIT_S = 60
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'data', 'classviz_settings.json')
+
+# --------------------------------------------------------------------------
+# Pack / board-temperature telemetry (v1.72)
+#
+# v1.64 to v1.71 carried the pack voltage as a number the operator read off a
+# meter and typed in, with a "Log V" button to timestamp it and a 20-minute nag
+# because a typed number goes stale. The firmware has reported both pack volts
+# and board temperature on the wire since v4.28 (real DS18B20 temperature since
+# v4.33), so none of that hand-entry is needed any more: the track writes itself
+# at the firmware's own ~60 s cadence, and it cannot be forgotten.
+#
+# Constants, maths and both gauge widgets are duplicated from pimd_gui.py, not
+# imported from it -- every PC app in this repo stands alone (same rule as
+# _build_d_command, duplicated in three tools). The thresholds and captions must
+# stay in step with pimd_gui.py so no two apps disagree about the same pack: if
+# you retune one, retune all four (pimd_gui.py, pimd_rawlog.py,
+# pimd_delaycal.py, here). Rationale for the numbers is in pimd_gui.py / §12.
+# --------------------------------------------------------------------------
+N_CELLS = 6
+SOC_NOMINAL = [(4.20, 100), (4.15, 95), (4.11, 90), (4.06, 85), (4.02, 80),
+               (3.98, 75), (3.95, 70), (3.91, 65), (3.87, 60), (3.83, 55),
+               (3.80, 50), (3.77, 45), (3.75, 40), (3.72, 35), (3.70, 30),
+               (3.67, 25), (3.63, 20), (3.57, 15), (3.49, 10), (3.35, 5), (3.00, 0)]
+
+# (upper bound mV, fill colour, short caption)
+PACK_ZONES = (
+    (21_000, '#f66151', 'LOCKOUT floor'),
+    (21_500, '#ff8c00', 'below window'),
+    (23_300, '#8ff0a4', 'clean window'),
+    (24_000, '#f9f06b', 'transition'),
+    (99_999, '#ff8c00', 'above ceiling'),
+)
+PACK_WINDOW_LO_MV = 21_500      # lower edge of the clean window — marked on the gauge
+
+TEMP_GAUGE_MAX_C = 80.0         # board-temp gauge full scale
+TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
+                                # "no reading" sentinel (fw v4.33 sends -32768).
+                                # Threshold, not equality -- see pimd_gui.py.
+
+# Telemetry older than this has stopped arriving: the firmware's cadence is
+# ~60 s, so three missed reports mean the board went quiet. This replaces
+# v1.64's 20-minute PACK_V_REMIND_S, which was pacing a human with a multimeter.
+SENSOR_STALE_S = 180.0
+
+
+def pack_soc_pct(pack_mV):
+    """Loaded pack millivolts → SoC %, piecewise-linear on SOC_NOMINAL."""
+    if pack_mV is None:
+        return None
+    vcell = pack_mV / 1000.0 / N_CELLS
+    if vcell >= SOC_NOMINAL[0][0]:
+        return 100.0
+    if vcell <= SOC_NOMINAL[-1][0]:
+        return 0.0
+    for (v1, s1), (v2, s2) in zip(SOC_NOMINAL, SOC_NOMINAL[1:]):
+        if v2 <= vcell <= v1:
+            return s2 + (s1 - s2) * (vcell - v2) / (v1 - v2)
+    return 0.0
+
+
+def pack_zone(pack_mV):
+    """Pack millivolts → (fill colour, short caption) per PACK_ZONES."""
+    for upper, colour, caption in PACK_ZONES:
+        if pack_mV <= upper:
+            return colour, caption
+    return PACK_ZONES[-1][1], PACK_ZONES[-1][2]
+
+
+class BatteryGauge(QWidget):
+    """Battery-icon pack gauge — fill and text are state of charge, the caption
+    is the measured pack voltage and which DESIGN §12 zone it sits in."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(170, 52)
+        self.setMaximumHeight(52)
+        self._pack_mV = None
+        self._lockout = False
+        self.setToolTip(
+            'Pack voltage from the firmware (P/V telemetry, fw v4.28+).\n'
+            'Fill and % are state of charge on the nominal ICR18650 curve,\n'
+            'read off the loaded voltage, so it sits a few % low while pulsing.\n'
+            'Colour is the DESIGN §12 data-quality window:\n'
+            '  ≥ 24.0 V above the ceiling · 23.3–24.0 transition\n'
+            '  21.5–23.3 clean window · below 21.5 out of window\n'
+            '  ≤ 21.0 V firmware lockout floor (marked on the gauge).\n'
+            'Every reading is written to the open session dump as a\n'
+            "'# pack_v:' line, so a long run carries a voltage TRACK.")
+
+    def set_reading(self, pack_mV, lockout=False):
+        self._pack_mV = pack_mV
+        self._lockout = lockout
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        cap_h = 15
+        body = QRectF(1.5, 1.5, w - 9.5, h - cap_h - 4)
+        nub = QRectF(body.right() + 1.5, body.top() + body.height() * 0.30,
+                     5.0, body.height() * 0.40)
+
+        outline = QColor('#5e5c64')
+        p.setPen(QPen(outline, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(body, 3.0, 3.0)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(outline)
+        p.drawRoundedRect(nub, 1.5, 1.5)
+
+        inner = body.adjusted(3.0, 3.0, -3.0, -3.0)
+        soc = pack_soc_pct(self._pack_mV)
+        if soc is not None:
+            colour, caption = pack_zone(self._pack_mV)
+            if self._lockout:
+                colour = PACK_ZONES[0][1]
+            p.setBrush(QColor(colour))
+            p.drawRect(QRectF(inner.left(), inner.top(),
+                              inner.width() * max(0.0, min(100.0, soc)) / 100.0,
+                              inner.height()))
+            text = '{0:.0f} %'.format(soc)
+            sub = '{0:.2f} V  ·  {1}'.format(self._pack_mV / 1000.0,
+                                             'LOCKED OUT' if self._lockout else caption)
+        else:
+            text, sub = '—', 'no pack reading'
+
+        # Lower edge of the clean window, so "stop capturing here" is visible
+        # without doing the voltage-to-SoC conversion in your head.
+        edge = pack_soc_pct(PACK_WINDOW_LO_MV)
+        x = inner.left() + inner.width() * edge / 100.0
+        p.setPen(QPen(QColor('#77767b'), 1.0, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(x, inner.top()), QPointF(x, inner.bottom()))
+
+        font = QFont()
+        font.setPointSize(11)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor('#241f31'))
+        p.drawText(body, Qt.AlignmentFlag.AlignCenter, text)
+
+        font.setPointSize(8)
+        font.setBold(False)
+        p.setFont(font)
+        p.setPen(QColor('#f66151') if self._lockout else self.palette().windowText().color())
+        p.drawText(QRectF(0, h - cap_h, w, cap_h),
+                   Qt.AlignmentFlag.AlignCenter, sub)
+
+
+class BarGauge(QWidget):
+    """Plain horizontal bar gauge with its reading printed inside — used for
+    board temperature."""
+
+    def __init__(self, vmax, fmt, colour='#a8c8e8', parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(170, 24)
+        self.setMaximumHeight(24)
+        self._vmax = vmax
+        self._fmt = fmt
+        self._colour = colour
+        self._value = None
+
+    def set_value(self, value):
+        self._value = value
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        body = QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0)
+        p.setPen(QPen(QColor('#5e5c64'), 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(body, 3.0, 3.0)
+
+        inner = body.adjusted(2.5, 2.5, -2.5, -2.5)
+        if self._value is None:
+            text = '—'
+        else:
+            frac = max(0.0, min(1.0, self._value / self._vmax))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(self._colour))
+            p.drawRect(QRectF(inner.left(), inner.top(),
+                              inner.width() * frac, inner.height()))
+            text = self._fmt.format(self._value)
+
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor('#241f31') if self._value is not None
+                 else self.palette().windowText().color())
+        p.drawText(body, Qt.AlignmentFlag.AlignCenter, text)
 
 
 def _default_profile():
@@ -602,11 +800,14 @@ class MainWindow(QMainWindow):
         self._stall_count     = 0
         self._stall_worst_s   = 0.0
         self._stall_last_wall = None
-        # v1.64 pack voltage. None means not measured (see _pack_v_value); the
-        # persisted value is restored in _load_settings.
-        self._pack_v           = None
-        self._pack_v_last_wall = None
-        self._pack_v_edited_wall = None    # v1.66: when the field was last TYPED
+        # v1.72 pack / board-temperature telemetry, replacing v1.64's typed-in
+        # number. All None until the firmware says otherwise, so the gauges read
+        # '—' rather than a plausible-looking zero -- and _pack_v_value() returns
+        # None, which is written as a blank column, not as 0.00 V.
+        self._pack_mV          = None
+        self._board_temp_dC    = None   # None also means "sentinel seen", i.e. no reading
+        self._pack_lockout     = False
+        self._sensor_last_wall = None   # wall time of the last accepted P/V reading
         # v1.66 soak history. The rig's thermal state depends on how long it has
         # actually been sweeping, not on wall-clock elapsed -- a stopped stream
         # cools it, and nothing recorded that. streamed_s accumulates ACROSS
@@ -2105,38 +2306,34 @@ class MainWindow(QMainWindow):
         row_b.addStretch(1)
         v.addLayout(row_b)
 
-        # -- Pack voltage (v1.64) ------------------------------------------
-        # A 6S pack falls ~2.5 V across a long run and NONE of it was recorded:
-        # '# supply: battery' was the only supply fact in the dump. Settling the
-        # 2026-07-29/30 warm-up-vs-battery question needed pack voltage against
-        # the frame timeline, and that only existed as handwriting on paper.
+        # -- Rig state: pack voltage / board temperature (v1.72) -------------
+        # A 6S pack falls ~2.5 V across a long run and none of it used to be
+        # recorded: '# supply: battery' was the only supply fact in the dump.
+        # v1.64 fixed that with a typed-in number and a Log V button; v1.72
+        # takes both off the operator, because the firmware has been reporting
+        # pack volts and board temperature on the wire the whole time. Same
+        # gauges as pimd_gui.py, so the two apps read identically.
         row_c = QHBoxLayout()
-        row_c.addWidget(QLabel('Pack V:'))
-        self.sp_pack_v = QDoubleSpinBox()
-        self.sp_pack_v.setRange(0.0, 60.0)
-        self.sp_pack_v.setDecimals(2)
-        self.sp_pack_v.setSingleStep(0.01)
-        self.sp_pack_v.setSpecialValueText('—')      # 0.00 means "not measured"
-        self.sp_pack_v.setValue(self._pack_v or 0.0)
-        self.sp_pack_v.setToolTip(
-            'Measured pack terminal voltage, under load. 0.00 (—) means not '
-            'measured and is written as blank rather than as a reading.\n\n'
-            'Stamped into every signature capture (pack_v column) and into the '
-            'session header. Press "Log V" to timestamp it mid-stream so a long '
-            'run carries a voltage TRACK, not one value: analysis interpolates '
-            'between entries.')
-        self.sp_pack_v.valueChanged.connect(self._on_pack_v_changed)
-        row_c.addWidget(self.sp_pack_v)
+        self.gauge_pack = BatteryGauge()
+        row_c.addWidget(self.gauge_pack)
 
-        self.pb_pack_v_log = QPushButton('Log V')
-        self.pb_pack_v_log.setToolTip(
-            'Append the current pack voltage to the open session dump as a '
-            'timestamped "# pack_v:" line.')
-        self.pb_pack_v_log.clicked.connect(self._on_pack_v_log)
-        row_c.addWidget(self.pb_pack_v_log)
+        self.gauge_temp = BarGauge(TEMP_GAUGE_MAX_C, '{0:.1f} °C')
+        self.gauge_temp.setToolTip(
+            'Board temperature from the firmware (P/V telemetry).\n'
+            'DS18B20 1-Wire sensor on GP6, factory-calibrated to ±0.5 °C\n'
+            '(fw v4.33+); reported to 0.1 °C and refreshed every 30 s.\n'
+            'Shows — when the sensor is absent, unresponsive or CRC-failing.\n'
+            "Logged alongside the voltage on each '# pack_v:' line (temp_c=),\n"
+            'which is what a warm-up-versus-battery question actually needs.')
+        row_c.addWidget(self.gauge_temp)
 
-        self.lbl_pack_v_age = QLabel('')
-        row_c.addWidget(self.lbl_pack_v_age)
+        self.lbl_sensor_age = QLabel('')
+        self.lbl_sensor_age.setToolTip(
+            'Age of the last pack/temperature report. The firmware sends one\n'
+            'unsolicited every ~60 s while connected, so anything older than\n'
+            '{0:.0f} s means the board has gone quiet, not that it is slow.'.format(
+                SENSOR_STALE_S))
+        row_c.addWidget(self.lbl_sensor_age)
         row_c.addStretch(1)
         v.addLayout(row_c)
 
@@ -7101,6 +7298,7 @@ class MainWindow(QMainWindow):
             self.serial_open(False)
             self.pb_connect.setText('Not Connected')
             self.pb_connect.setStyleSheet(self.MY_YELLOW)
+            self._clear_sensors()
             self.statusBar().showMessage('Disconnected')
 
     def read_from_serial(self):
@@ -7179,6 +7377,61 @@ class MainWindow(QMainWindow):
 
         if line[0] == 'V':
             self._fw_version_line = line
+            # Fields 8..10 are pack_mV / board_temp_dC / lockout (firmware
+            # v4.28+); older firmware sends 8 and leaves the gauges blank. Only
+            # ever reached on connect -- nothing sends 'V' while streaming.
+            parts = line[1:].split(',')
+            if len(parts) >= 11:
+                try:
+                    self._update_sensors(int(parts[8]), int(parts[9]),
+                                         bool(int(parts[10])))
+                except ValueError as e:
+                    self.statusBar().showMessage('Identify parse error: {0}'.format(e))
+            return
+
+        if line[0] == 'P' and line[1:2].isdigit():
+            # Unsolicited pack / board-temp telemetry (firmware v4.28+):
+            # P<time_ms>,<pack_mV>,<board_temp_dC>
+            #
+            # The isdigit() guard is load-bearing, and is the bug pimd_gui.py
+            # v4.17 was cut to fix -- do not simplify it away. A bare 'P' test
+            # also matches every firmware MESSAGE beginning with P: 'PACK: rail
+            # absent ...', 'PACK: present again ...' and the 'Pulse Induction
+            # Metal Detector v...' boot banner. Those split on commas into an
+            # IndexError once per pack power-cycle. A record always has a digit
+            # after the tag (it is <time_ms>); a message never does.
+            parts = line[1:].split(',')
+            try:
+                self._update_sensors(int(parts[1]), int(parts[2]))
+            except (IndexError, ValueError) as e:
+                self.statusBar().showMessage('Sensor parse error: {0}'.format(e))
+            return
+
+        if line.startswith('PACK:'):
+            # Pack presence / failsafe-arming transitions (fw v4.31-v4.32).
+            # 'PACK: present again at N mV — lockout cleared ...' is the ONLY
+            # line that retires a latch, so it is matched explicitly. Note it
+            # contains the word "lockout" while meaning the opposite -- a
+            # substring test across all firmware messages would latch on this
+            # one and invert the state.
+            if 'lockout cleared' in line:
+                self._pack_lockout = False
+                self._refresh_sensor_gauges()
+            self.statusBar().showMessage(line)
+            if self._recording and self._session_file and not self._session_paused:
+                self._append_mark('firmware: {0}'.format(line))
+            return
+
+        if line.startswith('LOCKOUT'):
+            # The v4.28 low-voltage failsafe latching. Marked into the dump as
+            # well as shown: frames after this point are not the same experiment
+            # as frames before it, and a session read back offline has no other
+            # way to know that happened.
+            self._pack_lockout = True
+            self._refresh_sensor_gauges()
+            self.statusBar().showMessage(line)
+            if self._recording and self._session_file and not self._session_paused:
+                self._append_mark('firmware: {0}'.format(line))
             return
 
         # Mode 2 sweep: W<idx>,<time_ms>,<ch0>,...,<chN-1> — idx must match the
@@ -7533,11 +7786,12 @@ class MainWindow(QMainWindow):
         self._session_path        = path
         self._session_start_wall  = time.time()
         self._session_frame_count = 0
-        # v1.64: the header line IS a reading when a voltage is entered, so the
-        # nag clock starts from it rather than from zero. With the field blank it
-        # stays None and the label says so immediately.
-        self._pack_v_last_wall    = (time.time() if self._pack_v_value() is not None
-                                     else None)
+        # v1.72: nothing to seed here any more. The header line IS the first
+        # entry in the track when the firmware has already reported (see
+        # _session_write_header), and the age shown beside the gauges is the age
+        # of the firmware's report, which is independent of whether a dump is
+        # open. v1.64's separate "when was a line last written" clock existed
+        # only to pace the operator, and there is no operator in this loop now.
         self._recording = True
         self.pb_record.setText('■ 0 frames')
         self.pb_record.setStyleSheet(self.MY_RED)
@@ -7570,10 +7824,15 @@ class MainWindow(QMainWindow):
         # v1.64. The header value is the reading at session start; '# pack_v:'
         # lines appended mid-stream carry the rest of the discharge, which is
         # what a multi-hour run actually needs (2.5 V of fall on 2026-07-29).
+        # v1.72: both the header line and the track come from firmware telemetry
+        # at its own ~60 s cadence, and carry board temperature alongside.
         pack_v = self._pack_v_value()
         f.write('# pack_v: {0}\n'.format(
-            '{0}, {1:.2f}, {2}'.format(ts.isoformat(), pack_v, self._pack_v_age_field())
+            '{0}, {1:.2f}, {2}, {3}'.format(ts.isoformat(), pack_v,
+                                            self._pack_v_age_field(), self._temp_c_field())
             if pack_v is not None else '(not measured)'))
+        f.write('# sensor_source: firmware telemetry (P/V records), classviz v{0}\n'.format(
+            APP_VERSION))
         # v1.66: soak context at the moment this dump opens, so a dump started
         # mid-run (a profile change opens a fresh one) is still self-describing
         # about how long the rig had already been going.
@@ -7657,33 +7916,76 @@ class MainWindow(QMainWindow):
         self._session_file.write('# mark: {0}, {1}\n'.format(ts, text))
         self._session_file.flush()
 
-    def _pack_v_value(self):
-        """Current pack voltage, or None when the field reads its 0.00 '—'
-        special value. None is written as a blank column / omitted line rather
-        than as 0.00, which would look like a measurement of a flat pack."""
-        v = self.sp_pack_v.value() if hasattr(self, 'sp_pack_v') else 0.0
-        return v if v > 0.0 else None
+    # ------------------------------------------------------------------
+    # Pack / board temperature — firmware telemetry (v1.72)
+    #
+    # Nothing here sends a command. The gauges are primed by the 'V' already in
+    # connect_port()'s handshake (sent while the rig is idle) and refresh from
+    # the unsolicited 'P' records the firmware emits every ~60 s. Deliberately
+    # no periodic poll: an extra command injected mid-stream would interleave
+    # with the W records, and the firmware's own cadence is already the cadence
+    # the pack-voltage track wants.
+    # ------------------------------------------------------------------
+    def _update_sensors(self, pack_mV, board_temp_dC, lockout=None):
+        """Apply one pack / board-temp reading to the gauges and the open dump.
 
-    def _on_pack_v_changed(self, value):
-        self._pack_v = value if value > 0.0 else None
-        # v1.66: when the number was last TYPED, which is not the same as when it
-        # was last logged. A reading's usefulness depends on how long ago someone
-        # actually looked at the meter, so that is what gets written out.
-        self._pack_v_edited_wall = time.time()
+        board_temp_dC may be the firmware's no-reading sentinel (fw v4.33+, see
+        TEMP_INVALID_MAX_DC). It is resolved to None once, here, so neither the
+        gauge nor the log ever sees the raw sentinel: a later reader has no way
+        to tell -3276.8 from a temperature."""
+        self._pack_mV = pack_mV
+        valid_temp = board_temp_dC > TEMP_INVALID_MAX_DC
+        self._board_temp_dC = board_temp_dC if valid_temp else None
+        if lockout is not None:
+            self._pack_lockout = lockout
+        self._sensor_last_wall = time.time()
+        self._refresh_sensor_gauges()
+        self._update_pack_v_age()
+        # The whole point of taking this off the operator: every reading lands
+        # in the dump, so the track is complete without anyone remembering to
+        # press a button. Paused sessions are skipped for the same reason frames
+        # are -- a paused dump is not describing the rig.
+        if self._recording and self._session_file and not self._session_paused:
+            self._append_pack_v()
+
+    def _refresh_sensor_gauges(self):
+        if not hasattr(self, 'gauge_pack'):
+            return
+        self.gauge_pack.set_reading(self._pack_mV, self._pack_lockout)
+        # Sub-zero readings are legal (the part goes to -55 °C) and BarGauge
+        # clamps the bar fraction, so they show as an empty bar with the correct
+        # negative number printed.
+        self.gauge_temp.set_value(None if self._board_temp_dC is None
+                                  else self._board_temp_dC / 10.0)
+
+    def _clear_sensors(self):
+        """Forget the rig state on disconnect, so a stale pack voltage cannot
+        outlive the connection it came from."""
+        self._pack_mV = None
+        self._board_temp_dC = None
+        self._pack_lockout = False
+        self._sensor_last_wall = None
+        self._refresh_sensor_gauges()
+        self._update_pack_v_age()
+
+    def _pack_v_value(self):
+        """Current pack voltage in volts, or None when the firmware has not
+        reported one. None is written as a blank column / a '(not measured)'
+        header line rather than as 0.00, which would look like a measurement of
+        a flat pack."""
+        return None if self._pack_mV is None else self._pack_mV / 1000.0
 
     def _pack_v_age_s(self):
-        """Seconds since the pack-voltage field was last edited, or None when
-        that is unknown (v1.66).
+        """Seconds since the pack voltage on the gauges was reported, or None
+        when nothing has been reported yet.
 
-        Unknown covers the value restored from settings at launch: _load_settings
-        calls setValue(), which fires valueChanged like any edit, but a number
-        carried over from the last session is emphatically NOT a reading anyone
-        just took -- the field comes up pre-filled, so treating the restore as an
-        edit would stamp every launch with a confident age_s=0 it has not earned.
-        _load_settings clears the timestamp again for exactly that reason."""
-        if self._pack_v_edited_wall is None:
+        v1.64-v1.71 measured this from when the number was last TYPED, because
+        it was a human reading off a meter. It is now the age of the firmware's
+        own report, which is the same question -- how stale is this number --
+        with a far better answer: it is normally under 60 s."""
+        if self._sensor_last_wall is None:
             return None
-        return time.time() - self._pack_v_edited_wall
+        return time.time() - self._sensor_last_wall
 
     def _pack_v_age_field(self):
         """The 'age_s=...' fragment for a written pack_v line -- an integer
@@ -7693,62 +7995,59 @@ class MainWindow(QMainWindow):
         age = self._pack_v_age_s()
         return 'age_s=unknown' if age is None else 'age_s={0:.0f}'.format(age)
 
-    def _on_pack_v_log(self):
-        """Timestamp the current pack voltage into the open dump."""
+    def _temp_c_field(self):
+        """The 'temp_c=...' fragment (v1.72). Written on every pack_v line so
+        the dump carries a board-temperature TRACK next to the voltage one --
+        warm-up and battery sag are the two confounders that move a session's
+        levels, and until now only one of them was recorded.
+
+        The literal 'none' when the DS18B20 gave no reading, never a number:
+        pimd_features' _parse_kv_tail hands the tail back as strings, so a
+        consumer that has not been taught this field yet ignores it, and one
+        that has can tell absent from measured."""
+        return ('temp_c=none' if self._board_temp_dC is None
+                else 'temp_c={0:.1f}'.format(self._board_temp_dC / 10.0))
+
+    def _append_pack_v(self):
+        """One '# pack_v: <iso>, <volts>, age_s=<n|unknown>, temp_c=<c|none>'
+        line, mid-stream. Same cheap write+flush on the open handle as
+        _append_mark, and the same argument for why that is safe on the event
+        loop.
+
+        The first three fields are unchanged since v1.66 and the two-field v1.64
+        form is still what the 2026-07-29/30 pair uses; pimd_features v10 reads
+        all of them, and its `age_s` parse is a key=value tail scan, so the
+        v1.72 `temp_c` field appends without breaking any existing reader."""
         volts = self._pack_v_value()
         if volts is None:
-            self.statusBar().showMessage('Enter a pack voltage before logging it.')
             return
-        if not (self._recording and self._session_file):
-            self.statusBar().showMessage('No session recording — pack voltage not logged.')
-            return
-        if self._session_paused:
-            self.statusBar().showMessage('Paused — resume before logging pack voltage.')
-            return
-        self._append_pack_v(volts)
-        self._pack_v_last_wall = time.time()
-        self._update_pack_v_age()
-        self.statusBar().showMessage('Logged pack voltage: {0:.2f} V'.format(volts))
-
-    def _append_pack_v(self, volts):
-        """One '# pack_v: <iso>, <volts>, age_s=<n|unknown>' line, mid-stream.
-        Same cheap write+flush on the open handle as _append_mark, and the same
-        argument for why that is safe on the event loop.
-
-        v1.66 added the age field. pimd_features v10 parses it and still accepts
-        the v1.64 two-field form, which is what every dump captured before today
-        uses -- including the 2026-07-29/30 pair the warm-up findings rest on."""
         ts = datetime.fromtimestamp(time.time()).isoformat()
-        self._session_file.write('# pack_v: {0}, {1:.2f}, {2}\n'.format(
-            ts, volts, self._pack_v_age_field()))
+        self._session_file.write('# pack_v: {0}, {1:.2f}, {2}, {3}\n'.format(
+            ts, volts, self._pack_v_age_field(), self._temp_c_field()))
         self._session_file.flush()
 
     def _update_pack_v_age(self):
-        """Age of the last logged reading, and the nag when it goes stale.
+        """Age of the last telemetry report, and the warning when it stops.
 
         Status bar only, never a dialog: v1.63 established that a modal would
-        stall the stream behind a prompt nobody asked for. Sized against the
-        gap this exists to prevent -- the 2026-07-29 session has 1h51m between
-        two readings, which is exactly where interpolating pack voltage onto the
-        frame timeline is least defensible."""
-        if not hasattr(self, 'lbl_pack_v_age'):
+        stall the stream behind a prompt nobody asked for. What this watches for
+        has changed with v1.72 -- it is no longer nagging an operator to take a
+        reading (the readings take themselves), it is reporting that the board
+        has stopped sending them, which means the track has a hole in it."""
+        if not hasattr(self, 'lbl_sensor_age'):
             return
-        if not self._recording:
-            self.lbl_pack_v_age.setText('')
-            self.lbl_pack_v_age.setStyleSheet('')
+        age_s = self._pack_v_age_s()
+        if age_s is None:
+            self.lbl_sensor_age.setText('no telemetry yet')
+            self.lbl_sensor_age.setStyleSheet(self.MY_YELLOW)
             return
-        if self._pack_v_last_wall is None:
-            self.lbl_pack_v_age.setText('no reading logged')
-            self.lbl_pack_v_age.setStyleSheet(self.MY_YELLOW)
-            return
-        age_s = time.time() - self._pack_v_last_wall
-        self.lbl_pack_v_age.setText('last V {0:.0f} min ago'.format(age_s / 60.0))
-        if age_s >= PACK_V_REMIND_S:
-            self.lbl_pack_v_age.setStyleSheet(self.MY_YELLOW)
+        self.lbl_sensor_age.setText('{0:.0f} s ago'.format(age_s))
+        if age_s >= SENSOR_STALE_S:
+            self.lbl_sensor_age.setStyleSheet(self.MY_YELLOW)
             self.statusBar().showMessage(
-                'Pack voltage due — last reading {0:.0f} min ago'.format(age_s / 60.0))
+                'No pack/temperature telemetry for {0:.0f} s'.format(age_s))
         else:
-            self.lbl_pack_v_age.setStyleSheet('')
+            self.lbl_sensor_age.setStyleSheet('')
 
     def _streamed_s(self):
         """Cumulative seconds the stream has actually been running this session
@@ -8211,7 +8510,8 @@ class MainWindow(QMainWindow):
         self._serial_max_batch = 0
 
         # v1.64: piggy-backed on this existing 1 Hz timer rather than adding a
-        # second one — the pack-voltage age only needs minute resolution.
+        # second one — the telemetry age only needs second resolution, and this
+        # is the tick that makes a board gone quiet visible (v1.72).
         self._update_pack_v_age()
         # v1.66: and the periodic soak line, on the same tick for the same reason.
         # ~300 lines over a five-hour session against 114k data rows, and it means
@@ -8280,15 +8580,11 @@ class MainWindow(QMainWindow):
             self.sp_analysis_avg_n.setValue(int(s.get('analysis_avg_n', 1)))
 
             self.cb_supply.setCurrentText(s.get('supply', SUPPLY_CHOICES[0]))
-            # v1.64. Restored as a convenience only -- the last session's closing
-            # voltage is the best guess for this session's opening one, and it is
-            # visibly editable. 0.0 restores the '—' not-measured state.
-            self.sp_pack_v.setValue(float(s.get('pack_v') or 0.0))
-            # v1.66: setValue above fired valueChanged and so looks like an edit.
-            # Undo that -- a voltage carried over from the last session is not a
-            # reading anyone just took, and pack_v lines must say age_s=unknown
-            # for it rather than claiming a confident age_s=0 every launch.
-            self._pack_v_edited_wall = None
+            # v1.64's 'pack_v' key is deliberately not restored any more (v1.72).
+            # It carried the last session's closing voltage forward as a starting
+            # guess for a field the operator would edit; there is no field now,
+            # and a remembered voltage would be a stale number on a live gauge.
+            # Any stored key is simply ignored, and stops being written on save.
             # Drives idle_before_s on the next stream start. Only as good as the
             # last clean exit: settings are written on close, so a kill loses it
             # and idle_before_s reads unknown (see _idle_before_s).
@@ -8502,7 +8798,6 @@ class MainWindow(QMainWindow):
             'std_upper':       self.sp_std_upper.value(),
 
             'supply': self.cb_supply.currentText(),
-            'pack_v': self.sp_pack_v.value(),
             'last_stream_stop_iso': self._last_stream_stop_iso,
             'session_autolog': self.cb_session_autolog.isChecked(),
 

@@ -1,3 +1,81 @@
+### src/pimd_classviz.py — v1.72 — pack voltage and board temperature from firmware telemetry; Pack V / Log V removed
+
+The `Pack V` spinbox and the `Log V` button are gone, and with them the 20-minute
+`PACK_V_REMIND_S` nag. Both readings now come off the wire: `P<time_ms>,<pack_mV>,<board_temp_dC>`
+(unsolicited, ~60 s) and fields 8..10 of the `V` identify reply, shown on the same `BatteryGauge` /
+`BarGauge` widgets `pimd_gui` uses — pack SoC with its §12 zone colour, board temperature to
+0.1 °C. **Why the hand-entry had to go rather than be supplemented:** v1.64 added it precisely
+because a 6S pack falls ~2.5 V across a long run and none of it was recorded, but a typed number is
+only as complete as the operator's memory, and the 2026-07-29 dump — the one the warm-up findings
+rest on — has **1h51m between two readings**, which is exactly where interpolating voltage onto the
+frame timeline is least defensible. The firmware has been reporting this on the same wire since
+v4.28. Nothing polls: the gauges are primed by the `V` already in `connect_port()`'s handshake
+(sent while the rig is idle) and refresh from the firmware's own cadence, so no command is ever
+injected between `W` records. (2026-08-09)
+
+**Session dump.** Every accepted reading now appends its own
+`# pack_v: <iso>, <volts>, age_s=<n>, temp_c=<c|none>` line while recording, so the voltage track
+is complete by construction and a board-temperature track exists for the first time — warm-up and
+battery sag are the two confounders that move a session's levels, and only one of them was being
+written down. `temp_c` is appended to the same `key=value` tail `age_s` lives in, which
+`pimd_features._parse_kv_tail` hands back as strings and ignores when unknown, so **the new field
+is additive and every existing reader keeps working** — verified by round-tripping a written dump
+through `pimd_features.parse_session_file()` and `pack_v_at()`. The literal `none` rather than a
+number when the DS18B20 gave no reading, for the same reason `-32768` is never displayed: a later
+reader has no way to tell a sentinel from a temperature. `age_s` changes meaning — it is now the
+age of the *firmware's* report (normally under 60 s), not seconds since the value was typed — and
+the header gains a `# sensor_source:` line so a dump says which regime produced it. `PACK:` and
+`LOCKOUT` firmware messages are marked in as `# mark: firmware: …`; frames after a latched lockout
+are not the same experiment as frames before it, and offline there was no other way to know.
+
+The `P` branch anchors on a digit after the tag, which is load-bearing and is the defect
+`pimd_gui` v4.17 was cut to fix — a bare `P` test also matches `PACK: …` and the boot banner, which
+split on commas into an `IndexError` once per pack power-cycle. `'lockout cleared'` is matched
+explicitly for the same class of reason: that message contains the word "lockout" while meaning the
+opposite, so a substring test would latch on it and invert the state. The age label beside the
+gauges retargets from nagging a human (20 min) to reporting that the board went quiet
+(`SENSOR_STALE_S` 180 s ≈ three missed reports). The persisted `pack_v` settings key is no longer
+written or restored; a stored one is ignored. Constants, SoC maths and both gauge widgets are
+duplicated from `pimd_gui.py` rather than imported, per the standing rule that every PC app in
+`src/` stands alone — the four copies (`pimd_gui`, `pimd_rawlog`, `pimd_delaycal`, here) must be
+retuned together. **`pimd_features` is deliberately not touched**: it reads the extended track
+correctly today, but it does not yet expose `temp_c` as a parsed field or a corpus column, and
+doing that is a schema change with its own blast radius.
+
+---
+
+### src/pimd_delaycal.py — v1.47 — pack / board-temperature gauges, and the conditions a calibration was measured under
+
+A calibration is only comparable with another if the conditions match (§14.1), and until now the
+conditions were **not recorded anywhere at all** — the exported profile's notes carried the sweep
+parameters and the geometry, but nothing about the pack or the rig's thermal state, which is the
+variable heavy-band delays actually move with (tens of ns cold-to-warm, §10). This adds a `Rig
+State` group to the left column with the same `BatteryGauge` / `BarGauge` widgets `pimd_gui` uses,
+fed by the firmware's `P` telemetry and primed by a `V` sent once on connect. (2026-08-09)
+
+The readings are folded into a conditions span reset at connect and again at Run, and that span —
+pack first→last (min) and board temperature first→last (max) — is written into the exported
+profile's `notes`, alongside a new `#` header block in the exported CSV (export timestamp, tool and
+firmware version, sensors at export, the same span). The span deliberately keeps running through
+the THERMAL soak and Auto Nudge that follow a sweep, because those refine the delays the profile
+ships with. A temperature the firmware could not read is folded in as nothing at all, never as a
+number, so a missing DS18B20 cannot drag the recorded minimum to something that looks measured.
+
+**Placement in the serial reader is the load-bearing part.** The new branches sit *ahead* of the
+`_pending_d_ready` gate: an unsolicited `P` can land in the window between `D` being sent and its
+reply arriving, and that gate consumes every line it sees. They also sit ahead of the
+`'ERROR' in raw` catch-all. Nothing here sends a command while a sweep or a soak is running — an
+injected command would interleave with the `R` records the sweep state machine advances on — so
+the gauges live entirely on the firmware's own ~60 s cadence after the one idle `V`. A latched
+`LOCKOUT` now stops a running sweep: past that point the table is being filled with readings taken
+against a pack the firmware has cut, and nobody should calibrate against those. The `P` isdigit
+guard and the `'lockout cleared'` special case are carried over verbatim from `pimd_gui` v4.17 and
+`pimd_rawlog` v1.15 — see those entries for why both are not simplifiable. Constants, SoC maths and
+both widgets are duplicated from `pimd_gui.py`, not imported, per the standing rule that every PC
+app in `src/` stands alone.
+
+---
+
 ### src/pimd_delaycal.py — v1.46 — calibration table rows pulse-ascending, matching the two thermal tables
 
 The two thermal tables (mean, std dev) have sorted their rows by `pulse_us` since v1.17
