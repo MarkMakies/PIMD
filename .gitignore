@@ -11,11 +11,12 @@ REDO.md
 TODO.md
 assets
 
-# Previous-epoch ML tools — kept locally, not repo source (2026-07-13 epoch reset)
-# (pimd_corpus_check.py re-tracked 2026-07-15 — v1.5 reads the current v1.32+
-#  target_id/distance_mm corpus schema. pimd_v2_findings.py deleted 2026-08-09 —
-#  its rule is gone with it rather than left guarding nothing.)
-src/pimd_classify.py
+# The 2026-07-13 "previous-epoch ML tools" block is gone (2026-08-09): all three
+# files it covered are resolved. pimd_corpus_check.py was re-tracked 2026-07-15
+# (v1.5+ reads the current v1.32+ target_id/distance_mm schema); pimd_v2_findings.py
+# and pimd_classify.py were deleted at the cal_3x10_v1 epoch turnover, the latter
+# archived to history first. No rule replaces them — everything in src/*.py is now
+# repo source, and a rule guarding a deleted path only suggests it is still around.
 
 src/data/classviz_settings.json
 src/data/classify_settings.json

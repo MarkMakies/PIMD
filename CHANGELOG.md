@@ -1,3 +1,48 @@
+### repo — `pimd_classify.py` archived to history, then deleted; `src/*.py` is now all repo source
+
+The classification/heatmap surface goes the same way as the rest of the previous epoch, but in
+**two commits rather than one, and the ordering is the entire point.** `pimd_classify.py` was
+untracked at `ff3b619` as a previous-epoch ML tool, and the newest copy in any commit was
+`2f7f58a`'s **v1.2** — while local development had continued to **v1.5**. Deleting straight from
+the working tree would have silently destroyed three versions that existed nowhere else. So it was
+force-added first (**`08c9892`**, ~97 KB, verified byte-identical to the working tree before the
+removal) and deleted second. (2026-08-09)
+
+What that saved, and why it was worth a commit:
+
+- **v1.3** — heatmap rows sorted delay-descending to match the standard grid orientation.
+- **v1.4** — heatmap band order keyed on `pulse_us` rather than the `delays_us[0]` proxy. This is
+  the one that mattered: `25d6a9a` made the identical fix in `pimd_classviz` v1.71 and recorded
+  that *"the two must agree or one profile renders two different ways"*. Deleting unarchived would
+  have left a **paired** change with one half committed and the other half gone, and a CHANGELOG
+  entry describing code that no longer existed anywhere.
+- **v1.5** — `DEFAULT_CORPUS` repointed out of the `ML/` tree deleted in `16edf75`.
+
+**This is the opposite call to `pimd_v2_findings.py`**, deleted an hour earlier with no archive
+commit — and the difference is not inconsistency. That file was checked against its history copy
+and found **byte-identical**, so history already held everything; this one was three versions
+ahead. The rule worth carrying forward: *before deleting an untracked file, diff it against the
+newest copy in history — untracked does not mean unrecoverable, and tracked-once does not mean
+tracked-current.*
+
+**Nothing depended on it.** No module imports it anywhere in `src/` or `mcu/` — verified, the only
+reference is a comment in `pimd_delaycal.py` citing it for a shared display convention, which
+needs no code. It was a leaf: it consumed `pimd_features`, `pimd_corpus_check` and
+`pimd_v2_findings`, and nothing consumed it. It had also stopped running entirely — an
+`ImportError` once `pimd_v2_findings` went, on top of the older `pimd_features.DEFAULT_PROFILE`
+`AttributeError` that killed it at argument parsing.
+
+**Consequences.** The `.gitignore` block covering the 2026-07-13 "previous-epoch ML tools" is gone:
+all three files it named are resolved (`pimd_corpus_check.py` re-tracked 2026-07-15, the other two
+deleted), and **every `src/*.py` is now repo source** with nothing ignored in its place. `USAGE.md`
+→ **v1.31** records the deletion in §6 with the recovery shas for both files and the warning that
+reviving one means reviving both. *For the next §18 consolidation pass:* §15's `src/pimd_classify.py`
+row (still describing v1.3) should go, and §1's pipeline diagram and the "fourth tool in the
+gui/classviz/delaycal/classify family" framing no longer hold — it is a three-tool family plus
+`pimd_rawlog`.
+
+---
+
 ### repo — `utilities/`, `ML/`, `References/scope/` and `References/Targets v1 Analysis/` retired at the epoch turnover
 
 Four directories removed now that `cal_3x10_v1` has replaced `cal_63_air_bat_v3` (entry below).

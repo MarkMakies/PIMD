@@ -1,4 +1,4 @@
-# PIMD — Usage Guide (USAGE.md) v1.30
+# PIMD — Usage Guide (USAGE.md) v1.31
 
 Intent, operation and pipeline flow for each application in the repo — one page per
 app. This is the working orientation document; **specs, measured values, the serial
@@ -6,6 +6,9 @@ protocol and invariants live in `DESIGN.md`**, which is ground truth. Version nu
 here reflect the source headers at the time of writing.
 
 <!-- Changelog
+v1.31 2026-08-09 §6 Notes: pimd_classify.py and pimd_v2_findings.py deleted at the
+                cal_3x10_v1 epoch turnover, with the shas to recover either from
+                history and the note that reviving one means reviving both.
 v1.30 2026-08-09 delaycal v1.29 → v1.47, classviz v1.66 → v1.72. §4: new Rig State
                 gauges bullet, and the conditions span now carried in the exported
                 profile notes and the CSV header block. §5's Pack V sub-bullet
@@ -679,5 +682,10 @@ mix (DESIGN §10 invariant).
 **Notes.** Run inside the venv (DESIGN §16). `pimd_corpus_check.py` (v1.6) is the
 corpus-level acceptance checker — run it to gate a capture day; it is tracked and
 maintained against the current schema (DESIGN §15). The previous-epoch analysis tools
-(`pimd_classify.py`, `pimd_v2_findings.py`) are kept local-only and untracked pending
-the new corpus.
+`pimd_classify.py` and `pimd_v2_findings.py` were **deleted at the `cal_3x10_v1` epoch
+turnover (2026-08-09)** — both were 63/72-cell and neither ran any more. They are
+recoverable from history if the classification surface is wanted again:
+`git show 08c9892:src/pimd_classify.py` (v1.5) and
+`git show 84471fe:src/pimd_v2_findings.py`. Note `pimd_classify` delegated its
+band-mean/crossing physics to `pimd_v2_findings`, so reviving one means reviving both,
+and both need repointing at a 30-cell corpus that does not exist yet.
