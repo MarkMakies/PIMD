@@ -1,3 +1,80 @@
+### hardware — proposal — bias the RX front end ~97 mV so the null stops being thrown away
+
+**Not built. Operator has chosen Plan A; this entry is the record of the design and the acceptance
+test, written before anything is soldered.** The motivation is the finding below: the null is real
+coil physics, it responds to metal, and `cal_3x10_v2` deals with it by refusing to sample there. If
+the region can be lifted into the linear window instead, it is corpus material rather than a hole.
+
+**The mechanism is a single-supply floor, not a fault.** U3A is a unity-gain follower on +12 V and
+its output cannot go below ~2.441 mV, so air's excursion below quiescent is clipped. Lifting the DC
+operating point at pin 3 lifts the whole transient clear of that floor. **Plan A is one resistor,
+no track cuts, fully reversible:**
+
+```
+U5 pin 7 (5V-REF) ──[ 240k, 1 % metal film ]──► U3A pin 3
+```
+
+Pin 3's DC path to ground is `R8 + R9 + RX coil` ≈ **4.77 kΩ** (the coil's 19.9 Ω shorts out R1's
+1304 Ω, so R1 barely features), giving 5.0 × 4770/244770 = **97.4 mV**. Measure R_gnd at pin 3
+unpowered and re-derive from `Rb = R_gnd × (5.0 / V_offset − 1)`; the result is insensitive to it.
+
+**~97 mV is the right target, not a round number.** Air bottoms 29.3 mV below quiescent, but air is
+not the worst case — the largest measured non-ferrous excursion is −74.4 mV at the ADC, ≈ −65 mV at
+the input, so worst-case depth below quiescent is ≈ 94 mV. 50 mV would clip the strong non-ferrous
+targets that are the whole point.
+
+***Corrected during the design:*** an earlier sketch split the bias into 2 × 120 k with 100 nF at
+the midpoint and called the signal-node loading 2.5 %. **Both parts were wrong.** With the cap at
+the midpoint the node sees 120 k against `R9 + R8` = 4.747 kΩ, which is **3.8 %** attenuation; a
+single 240 k sees 240 k against the same, **1.9 %**. The LTC6655 is quiet enough not to need the RC,
+so the single resistor is preferred — fewer parts, half the signal loss, easier to remove.
+
+**Take the bias from 5V-REF, not +5V or +12V.** That net is the ADC's own reference, so offset and
+full scale drift together and the code does not move. Use metal film: the new thermal term is
+`97 mV × divider tempco`, ~2.5 µV/°C at 25 ppm/°C (invisible) but ~300 µV over a 30 °C soak at
+100 ppm/°C, which is at the noise floor on a project whose first open problem is thermal drift.
+
+**Acceptance test — re-run the 2026-08-08 scope capture at the LT6203 input with the bias fitted:**
+
+| | before | predicted after |
+|---|---|---|
+| air quiescent | +14.34 mV | **+111.7 mV** |
+| air lobe bottom | −15 mV | **+82.4 mV** |
+| worst-case non-ferrous (−65 mV at input) | below the floor | **+32.4 mV** |
+| input-referred output floor | 2.12 mV | unchanged |
+
+The pass condition is the strongest non-ferrous target at closest coupling staying above ~2 mV at
+the input.
+
+**What it costs, and it is not small.** **LTC2508 pin 6 (IN−) is grounded** *(operator confirmed)*,
+so the ADC reads `IN+ − 0` and the bias appears in the data: every `threshold_v` in the ladder
+moves, the pedestal goes ~16.5 → ~113 mV, and this is **a new profile, a new sha and a new
+measurement epoch**. Top-end headroom also tightens — the 4.85 V cell becomes 4.947 V against
+5.000 V full scale, 53 mV of margin — so re-anchor the top early cell to ~4.70 V at recalibration.
+
+**Timing, which is the decision that actually matters.** A corpus run was imminent. Capturing 30
+cells now and then fitting this resistor means capturing twice, because nothing before the mod is
+mergeable with anything after it. **Fit, scope-check, then decide** whether the profile becomes
+3 × 10 with the middle filled in or stays as it is.
+
+**Plan C, recorded but not chosen.** The spare half of the same physical DIP-8 (sheet 2's `U18B` —
+sheet 2's designators are known wrong, and its pin 7 lands on TP24) could buffer the same bias onto
+the ADC's IN−, making the offset cancel differentially: the ladder would stay valid, only the newly
+visible middle would need sweeping, and drift would be common-mode. It costs three cuts —
+`R80`/`R82` links out, IN− lifted from GND, RX cold end floated onto V_b. **If Plan A shows real
+discrimination information in the null, build Plan C before capturing**, because Plan A as a
+permanent fitting spends an epoch for no reason.
+
+**Open before anything is cut:** whether R1 is through-hole (Plan C lifts its ground leg), and D3's
+reverse leakage once permanently back-biased by ~100 mV — Schottky leakage roughly doubles per
+10 °C, and a few hundred nA through R9's 4.7 kΩ at the 54.8 °C board temperature is a few mV of
+temperature-dependent error. Probably lost in the noise; worth a bench look, not an assumption.
+
+**R1 is untouched, so ζ = 1.06 is unchanged, and no §11 invariant is involved.** No firmware change.
+(2026-08-10)
+
+---
+
 ### findings — the below-rail window is band-dependent, and §7's single figure is a 100 µs number
 
 **Operator bench result: the rail window shifts and widens with band energy.** The edges of each
