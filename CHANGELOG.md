@@ -1,11 +1,57 @@
+### findings — the below-rail window is band-dependent, and §7's single figure is a 100 µs number
+
+**Operator bench result: the rail window shifts and widens with band energy.** The edges of each
+band's skipped span were tuned by hand — nudging the bracketing cell's delay until it climbs off the
+**~2.4 mV** rail onto the **~16.5 mV** pedestal — **independently per band, not derived from the
+scope capture.** Read off the lock, the brackets are:
+
+| band | last clean early cell | first clean late cell |
+|---|---|---|
+| 100 µs @ 3.125 kHz | 13.0 µs | 30.0 µs |
+| 50 µs @ 5 kHz | 12.352 µs | 24.0 µs |
+| 10 µs @ 25 kHz | 10.36 µs | 18.44 µs |
+
+**The mechanism is consistent with §7's two-pole model, and it is worth separating two things that
+had been conflated.** The *zero crossing* is amplitude-invariant: it sits at
+`ln(A/B) / (1/τ_f − 1/τ_s)`, and driving harder scales both residues together so `ln(A/B)` does not
+move. But **the rail is not zero — it is a fixed 2.441 mV floor**, and where a curve crosses a fixed
+threshold depends on its depth. The lobe's depth scales with band energy, so a deeper lobe crosses
+the floor earlier and climbs out later. Same null, different below-rail window. That is exactly the
+ordering the bench found.
+
+**So §7's `sd 14.23–18.44` is a 100 µs / 2 kHz figure, not a global constant**, and the sentence
+"any new profile must clear sd 14.23–18.44" over-generalises a single-condition reconstruction to
+all three bands. Worth rescoping at the next consolidation pass. Note also that pack voltage scales
+the decay (§12), so these crossings drift with state of charge within a session — the brackets are
+a bench-tuned centre, not a hard edge.
+
+***Correction to the `cal_3x10_v2` entry below:*** that entry moved the 10 µs band's first late cell
+**18.0 → 18.44 µs** on the grounds that 18.0 "may still be inside the rail", reading the 100 µs
+band's reconstructed rail exit as if it applied to the 10 µs band. **It does not** — the 10 µs band
+has the shallowest lobe and therefore the *earliest* rail exit of the three, so 18.0 was already
+clear, which is the operator's assessment from the independent bench tuning. **The stated
+justification for v2 is withdrawn.** The move itself is harmless — 18.44 is on the 8 ns grid,
+validates clean, and 0.44 µs later on the pedestal costs nothing measurable — so **`cal_3x10_v2`
+stands as the lock** rather than churning a v3 for no gain, and no corpus exists against either
+version. What is retired is the reasoning, not the file.
+
+The pattern is the same one the v2 entry itself called out an hour after writing it: **a
+single-condition measurement quietly applied outside the condition it was taken in.** First time it
+was a placeholder column read as data; this time it is one band's rail exit read as every band's.
+
+`References/images/profile_3x10_timing.png` is redrawn accordingly — the shaded window is a wedge
+following the per-band brackets rather than one rectangle across all three lanes. (2026-08-10)
+
+---
+
 ### References/images — `profile_3x10_timing.png`, the sample-timing map for `cal_3x10_v2`
 
 A figure for the blog, tracked here because it is also the clearest single picture of the operating
 geometry. Three lanes, one per band, on a log delay axis: the six amplitude-anchored early cells,
-the four time-anchored late cells, and the **sd 14.23–18.44 µs** below-rail window shaded across all
-three — which lands exactly in the gap in every lane, because that is what the profile exists to do
-(§7, §10). The 10 µs band's first late cell is annotated sitting on the rail exit itself, the one
-change `cal_3x10_v2` made over v1.
+the four time-anchored late cells, and the below-rail window shaded across all three — which lands
+in the gap in every lane, because that is what the profile exists to do (§7, §10). *(Superseded on
+the same day by the findings entry above: the window is drawn as a per-band wedge, not as a single
+rectangle, and the 10 µs band's annotation is corrected.)*
 
 **The delays are read from `src/data/profiles/cal_3x10_v2.json` at render time, not transcribed**,
 so the figure cannot drift from the lock it describes; only the rail bounds are hard-coded, from §7.
