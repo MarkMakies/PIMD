@@ -1,3 +1,140 @@
+### profile — `cal_3x10_v3` — the skip is gone; a geometric ladder replaces it, and the model says the slow pole belongs to the target
+
+**Not locked, not swept, nothing captured against it.** The operator fixed the **first and last delay
+in each band by hand**; the 8 interior delays are filled in here as a **geometric ladder** between
+them — constant ratio **1.3296 / 1.2762 / 1.1836** per band — snapped to the 8 ns PWM grid. Every
+cell is strictly increasing and passes the firmware's `pulse_duties_valid()` check. Geometry stays
+3 × 10 = 30.
+
+| band | delays (µs) |
+|---|---|
+| 100 µs @ 3.125 kHz | 9.24 · 12.288 · 16.336 · 21.72 · 28.88 · 38.4 · 51.048 · 67.88 · 90.256 · 120.0 |
+| 50 µs @ 5 kHz | 8.352 · 10.656 · 13.6 · 17.36 · 22.152 · 28.272 · 36.08 · 46.048 · 58.768 · 75.0 |
+| 10 µs @ 25 kHz | 6.36 · 7.528 · 8.912 · 10.544 · 12.48 · 14.776 · 17.488 · 20.696 · 24.504 · 29.0 |
+
+**The skip spans are deliberately gone** — with the +97 mV bias fitted no cell is excluded for
+railing, so the constraint that shaped `cal_3x10_v2` no longer exists.
+
+**Geometric was chosen after an information-weighted placement was tried and rejected.** Equal arc
+length along the three targets' combined log-signature put **nine of ten cells below 18 µs** and left
+a 6.5× gap to the fixed 120 µs endpoint, because log-space arc length is dominated by the steep early
+fall. Constant ratio gives equal resolution per decade of delay, which is the same principle as the
+retired ×1.5 pulse ladder, applied to delays.
+
+**`threshold_v` is carried over from v2 UNCHANGED, and that is deliberate.** It is no longer a
+voltage in any sense — nothing was swept — but it is the **cell ordering key**: `pimd_shape` and
+`pimd_corpus_check` both sort rows by `(pulse_us, -threshold_v)`, and `pimd_rawlog` already calls the
+field vestigial. Writing modelled air voltages there would have been **non-monotonic through the
+null** and would have scrambled cell order. The profile's `notes` now says this in the file itself.
+
+**Model fits over the measured window** *(2026-08-10 captures, fitted in log space)*. **Air and brass
+need only a single repeated pole** — the free two-pole fit drives τ_fast → τ_slow, and
+`(P + Q·t)·e^(−t/τ)` fits identically well. **Steel on the two long bands needs a genuine second,
+slow pole, and that is the target's own eddy decay:**
+
+| band | air | brass | steel |
+|---|---|---|---|
+| 100 µs | τ 1.96 µs · ±5.6 mV | τ 1.79 µs · ±8.5 mV | τf 1.24, **τs 19.0 µs** · ±6.0 mV |
+| 50 µs | τ 1.89 µs · ±6.8 mV | τ 1.77 µs · ±8.4 mV | τf 1.18, **τs 23.4 µs** · ±8.7 mV |
+| 10 µs | τ 1.78 µs · ±13.4 mV | τ 1.76 µs · ±13.2 mV | τ 1.67 µs · ±12.4 mV |
+
+**The slow pole appears only when a ferrous target is present, and it vanishes again on the 10 µs
+band** — a 10 µs pulse barely excites it. That is the same conclusion the fill fractions reached by a
+different route (steel filled only 62 % of the null at 10 µs), which is worth something as
+corroboration. *Caveat on the fast pole: every capture starts at ~9–12 µs because the window
+saturates below that, so a ~1.2 µs pole is far outside the data and **τ_fast is not independently
+identifiable here** — treat it as a fitted shape parameter, not a measurement.*
+
+**Three reasons this must not be locked yet:**
+
+1. **Only two cells sit inside the measured polarity window** on the 100 µs band (9.24 and 12.288,
+   against §2's 7.97–12.30) where `cal_3x10_v2` had six. Geometric spacing buys tail resolution and
+   sells early density. **If the ferrous/non-ferrous sign split matters more than decay-rate
+   resolution, this ladder is weighted the wrong way** and wants re-cutting.
+2. **Several cells are placed beyond any measurement** — 67.88 / 90.256 / 120 µs (100 µs band),
+   58.768 / 75 (50 µs), 29.0 (10 µs). The scope record stops at 55.5 µs.
+3. **The first cells of every band sit inside the saturated region** and are unverified. One capture
+   per band at a coarser vertical (500 mV/div or 1 V/div) closes this and item 1 together.
+
+`References/images/bias_mod_delay_plot_20260810.png` is the delay plot for this profile — the same
+three bands with the fitted models overlaid dotted, so the fit quality is visible rather than
+asserted. (2026-08-10)
+
+---
+
+### findings — the bias mod is fitted and the null is real, discriminating signal
+
+**Plan A is built and it works.** 240 k from 5V-REF into U3A pin 3, as specified in the proposal
+below. Bench session 2026-08-10, `pimd_gui` Mode 1, scope on the LT6203 input (CH1) with MCLK on CH2
+as the sample-instant reference, 64 averages, all three bands, air / RHS steel tube / brass block at
+**0 cm** — pressed as close to the inner coil as possible to maximise swing. Nine traces and the
+plotting script are in `References/scope/20260810_bias_mod/`; the figure is
+`References/images/bias_mod_delay_plot_20260810.png`.
+
+**The design number was met.** The operator had already centred CH1 at **+112.8 mV** before the
+session began; the proposal predicted a biased quiescent of **+111.7 mV**. The timing chain also
+checked itself: the capture assumed scope t = 0 was sd 15.504 µs and the CH2 rising edge landed at
+**15.512** — one 8 ns PWM grid step.
+
+**Air never goes below 67.2 mV** (worst case, 100 µs band), against the old 2.441 mV output floor.
+Every cell in the previously-railed window, on all three bands, is now live signal with ≥ 65 mV of
+headroom underneath it.
+
+| band | air null bottom | depth below quiescent |
+|---|---|---|
+| 100 µs @ 3.125 kHz | 67.2 mV at **sd 17.52 µs** | 38.2 mV |
+| 50 µs @ 5 kHz | 75.0 mV at **sd 16.10 µs** | 33.7 mV |
+| 10 µs @ 25 kHz | 84.5 mV at **sd 13.99 µs** | 30.3 mV |
+
+***This retires the "amplitude-invariant crossing" argument in the entry below.*** That entry
+separated an amplitude-invariant zero crossing from an amplitude-dependent rail crossing, and
+concluded the null's *timing* was fixed across bands. **Measured, the null bottom itself moves
+1.4 µs between 100 µs and 50 µs, and 3.5 µs across the full band set.** The reasoning was incomplete:
+pulse width changes the **initial conditions** — how much energy sits in L versus C at release — so
+the ratio of the two mode amplitudes changes and `ln(A/B)` moves with it. What survives is the
+conclusion the operator's bench edges were right about: the window is band-dependent, and the
+per-band brackets in `cal_3x10_v2` were tracking a real shift in the feature.
+
+**Sign is not the discriminant inside the null — fill depth is.** Both families read *positive*
+against air there, because air is the thing that dips and both targets fill the dip in. Defining
+**fill = 1 − (target dip depth / air dip depth)**, depths taken against each trace's own late level:
+
+| band | brass fill | steel fill |
+|---|---|---|
+| 100 µs | 52 % | **100 %** — monotonic, no dip at all |
+| 50 µs | 38 % | **100 %** — monotonic |
+| 10 µs | **8 %** | 62 % |
+
+The two families are **7× apart on the shortest pulse and 2× on the longest**. Note the metric
+saturates at 100 %, so the 100/50 µs steel figures are floors rather than measurements. This is a τ
+probe read through the null rather than through amplitude — a third mechanism alongside the polarity
+split and the late-tail decay rate.
+
+**Both mechanisms are visible in one trace now.** Brass crosses from negative to positive against
+air at **~12.3 µs** on the 50 µs band and **~11.7 µs** on the 10 µs band; below that it is the
+classic sign split (§2), above it, fill. The crossover marches earlier with shorter pulse, same as
+everything else here.
+
+**The case for keeping these cells is SNR, not novelty.** The steel:brass magnitude ratio through
+the null is **6–8× on every band** — but out on the tail at sd 30 µs it is 5.8×, i.e. much the same
+discrimination. What differs is amplitude: **Δsteel is +187 mV at sd 17.5 against +78 mV at sd 30**,
+for a noise floor that does not change with delay. These are the best-SNR cells in the profile.
+
+**Three things this session did not settle, and the first is load-bearing:**
+
+1. **Everything here is at 0 cm.** Coupling dominates, and a feature that only exists on contact is
+   not corpus material. One repeat at 50 mm on the 100 µs band answers it, and **nothing should be
+   captured against a filled-in profile until it is answered.**
+2. **The top of the decay is unverified.** Everything moved up ~97 mV and the 4.85 V cell now sits
+   near 4.95 V against 5.000 V full scale. The scope window clipped above 1.4 V, so this needs a
+   delaycal sweep or a coarse capture.
+3. **All pre-mod scope values are void.** Air's dip went 29.3 → 38.2 mV, and the bias cannot deepen
+   it — a 240 k shunt attenuates ~2 %, which would make it shallower. **The replaced 7815 is the
+   likely cause**, which means §7's measured front-end values need re-taking on their own account,
+   independently of the bias. (2026-08-10)
+
+---
+
 ### hardware — proposal — bias the RX front end ~97 mV so the null stops being thrown away
 
 **Not built. Operator has chosen Plan A; this entry is the record of the design and the acceptance
