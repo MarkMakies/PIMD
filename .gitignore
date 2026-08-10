@@ -25,3 +25,6 @@ src/data/stats*
 src/data/corpora/
 src/data/sessions/
 src/data/scratch/
+
+# KiCad auto-backup zips
+Electronics/**/*-backups/

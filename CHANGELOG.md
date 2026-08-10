@@ -1,3 +1,11 @@
+### .gitignore — KiCad auto-backup zips are ignored
+
+`Electronics/**/*-backups/` — KiCad writes a timestamped zip into `<project>-backups/` every time the
+schematic is opened, and they were accumulating as untracked noise in `git status`. The rule is
+directory-scoped and does not touch the 11 tracked sources in `Electronics/PIMD604/`. (2026-08-10)
+
+---
+
 ### profile — `cal_3x10_v3` — the skip is gone; a geometric ladder replaces it, and the model says the slow pole belongs to the target
 
 **Not locked, not swept, nothing captured against it.** The operator fixed the **first and last delay
@@ -119,6 +127,19 @@ everything else here.
 the null is **6–8× on every band** — but out on the tail at sd 30 µs it is 5.8×, i.e. much the same
 discrimination. What differs is amplitude: **Δsteel is +187 mV at sd 17.5 against +78 mV at sd 30**,
 for a noise floor that does not change with delay. These are the best-SNR cells in the profile.
+
+**Two things only visible when the traces are read cell-by-cell through the null** *(sampled at the
+null bottom ±3 µs; reproducible from the CSVs)*:
+
+- **On the 10 µs band brass and air are 3–5 mV apart across the whole null**, against a 12–13 mV fit
+  RMS on that band. That is at or below the noise, so **the 10 µs band contributes essentially
+  nothing to non-ferrous discrimination in the null** — the 7× fill ratio quoted above is carried by
+  the ferrous side alone.
+- **Past the bottom, steel's slope is opposite to air's and brass's.** On the 100 µs band air and
+  brass recover (67 → 91 mV, 94 → 111 mV over the following 4 µs) while steel keeps falling
+  (254 → 223 mV). **The sign of the slope is a cleaner discriminator than the levels**, and reading
+  it needs at least two cells past each band's null bottom — a placement constraint that no other
+  finding here implies.
 
 **Three things this session did not settle, and the first is load-bearing:**
 
