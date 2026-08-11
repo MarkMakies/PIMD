@@ -1,3 +1,68 @@
+### profile — `cal_3x10_v5` — the new baseline: nothing rails, and the null is sampled on purpose
+
+**Hand-tuned in `pimd_delaycal` v1.48 Manual Nudge against fw v4.35, 2026-08-11, over a 1866 s
+run.** Not swept — no threshold crossing was measured for any cell; these are the operator's
+placements, verified live against the measured means. The operator's shorthand notes are
+rewritten in the file itself; the two unit slips in them (cells 5 and 6 were "60-80us" and
+"90us" for what the table shows as **mV**) are corrected there, and the geometric span was
+"8,9" for what is actually cells **7,8,9**.
+
+| band | delays (µs) |
+|---|---|
+| 100 µs @ 3.125 kHz | 10.792 · 13.032 · 13.912 · 14.816 · 16.92 · 21.16 · 32.656 · 50.392 · 77.76 · 120.0 |
+| 50 µs @ 5 kHz | 10.016 · 12.256 · 13.144 · 14.08 · 16.08 · 19.36 · 27.152 · 38.088 · 53.432 · 75.0 |
+| 10 µs @ 25 kHz | 8.04 · 10.208 · 11.064 · 11.984 · 13.8 · 16.16 · 18.704 · 21.648 · 25.056 · 29.0 |
+
+**The substantive change is that cells 1-4 are amplitude-anchored and matched ACROSS the three
+bands**, not just within one. Cell *n* means the same point on the decay whichever band it is
+in, to within ~0.2 %:
+
+| cell | target | measured (100 / 50 / 10 µs) |
+|---|---|---|
+| 1 | 2.4 V | 2396 / 2400 / 2401 mV |
+| 2 | 0.5 V | 498 / 499 / 499 mV |
+| 3 | 250 mV | 248 / 250 / 249 mV |
+| 4 | 125 mV | 124 / 125 / 124 mV |
+| 5 | null minimum | 59 / 64 / 69 mV |
+| 6 | rising out, ~90 mV | 91 / 90 / 90 mV |
+
+Cells 7-9 are a geometric ladder interpolated between cell 6 and cell 10 (constant ratio
+1.5431 / 1.4027 / 1.1574 per band, all on the 8 ns grid), landing on the ~110 mV air pedestal by
+cell 7-8, so they carry **decay rate** rather than amplitude. Cell 10 is the band's longest
+delay.
+
+**No cell rails.** The largest reading is 2.4 V against 5.000 V full scale, so every cell is a
+measurement rather than a limit — **the first `cal_3x10_*` profile for which that is true.**
+`cal_3x10_v3` and the original `cal_3x10_v4` both clipped cell 1 of every band, and the
+2026-08-11 findings entry below shows v3 still doing it. It also leaves real headroom rather
+than sitting just under the limit, which matters because the operating point moves with pack
+state and board temperature.
+
+**The null is now sampled deliberately at its minimum** (cell 5) with cell 6 on the way out,
+rather than skipped. That closes the arc from `cal_3x10_v2`, which had to skip the whole span
+because the front end clipped there, through v3 which removed the skip once the +97 mV bias was
+fitted, to v5 which puts a cell *on* the feature. Cell 5 also shows the null depth is
+band-dependent — deepest at 59 mV on the 100 µs band, shallowest at 69 mV on the 10 µs — which
+independently corroborates the 2026-08-10 "below-rail window is band-dependent" finding by a
+different route.
+
+**Two caveats, both about where it was tuned.** Conditions were **pack 21.89 V (22 % SoC — the
+LOW end of the §12 clean window) and board 70.3 °C**, i.e. nearly the opposite corner from that
+morning's 23.5 V / 31.5 °C. Amplitude-anchored delays are a function of pack state (43-51 mV/V,
+§12) and of board temperature, so cells 1-4 will not sit on those voltages at full charge or on
+a cold board — the anchors are verified at one corner only. And the file's "10: max possible" is
+true only of the 10 µs band (29.0 against a 29.095 µs hardware limit, 95 ns of margin); the 100
+and 50 µs bands sit at 120 and 75 µs against limits of 219.091 and 149.093, carried over from
+v3 rather than pushed out.
+
+Validated offline: all 30 cells pass the firmware's `pulse_duties_valid()`, every band strictly
+ascending, every delay on the 8 ns PWM grid, `averages` 32 inside the v4.35 `D` bound. Std dev
+across the whole table was **0.00-0.10 mV, every cell green**, which against the v4.35 findings
+entry's measured floor (56-72 µV on tail cells) is a quiet table on a hot board at low pack.
+**Not locked** — nothing has been captured against it yet. (2026-08-11)
+
+---
+
 ### findings — v4.35 bench-verified: the latch is gone on the geometry that caused it
 
 Regression run on the original failing cell geometry (`cal_3x10_v4_railtest`, `profile_sha8
