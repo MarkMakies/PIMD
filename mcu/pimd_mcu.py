@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.34, coil v4
+# Pulse Induction Metal Detector, v4.35, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -36,10 +36,14 @@
 #         in src/ splits V by field count, so this breaks no consumer.)
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
 #   B/b   diagnostic counters, reset on read
-#         -> B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>
+#         -> B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>,
+#            <gate_reject_count>,<gate_reprime_count>
 #         emit_block_* (v4.27) count Mode 2 emits whose print() blocked longer than
 #         EMIT_BLOCK_WARN_MS — i.e. the host stopped draining USB CDC. Non-zero means
 #         the sweep was paused and the rig's thermal load changed with it.
+#         gate_* (v4.35) count outlier-gate rejections and the re-primes that bound
+#         them. Rejections without re-primes = the gate catching glitches; re-primes
+#         tracking the signal = the gate fighting real signal (see OUTLIER_GATE_FRAC).
 #   (unsolicited, both modes) pack-voltage / board-temp telemetry, every SENSOR_REPORT_MS:
 #         -> P<time_ms>,<pack_mV>,<board_temp_dC>
 #         Both fields are REAL calibrated readings: pack_mV since v4.29 (22k/2k7
@@ -63,6 +67,7 @@
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.35 FIX acquire_mode2: outlier gate was an absorbing state — cells latched permanently
 #   v4.34 FIX acquire_mode2: boundary settle measured from the config write, not the loop top
 #   v4.33 DS18B20 board temperature on GP6 (1-Wire); GP27 pot placeholder path retired
 #   v4.32 pack absent->present transition always announces itself, so 'failsafe armed' is observable
@@ -120,7 +125,7 @@ try:
 except ImportError:
     onewire = None
 
-FW_VERSION = '4.34'
+FW_VERSION = '4.35'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -262,6 +267,18 @@ OUTLIER_GATE_MIN = 164  # absolute gate floor in raw14 counts (≈100 mV, 1% FS)
                         # a 0 threshold and a negative mean a negative one — every
                         # sample rejected, cell latched at its warm-up value (v4.25;
                         # bit-truncation glitches are volts-scale, still caught).
+OUTLIER_GATE_MAX_RUN = 4  # consecutive rejections a cell may take before the gate
+                        # YIELDS: it empties the ring and accepts the sample. This is
+                        # what keeps the gate a glitch filter instead of a lock (v4.35).
+                        # The §7 artefacts it exists for are single-sample events at
+                        # exactly 1/2 and 1/4 of the true value, and a cell is sampled
+                        # once per sweep, so four in a row is not a glitch population —
+                        # it is the signal having moved. 4 costs at most 3 sweeps of
+                        # lag (~0.24 s at 12.7 Hz) on a genuine step; going lower
+                        # starts letting real truncation artefacts re-prime a cell.
+                        # DO NOT raise this to "be safer": time spent rejecting is
+                        # time the cell is not measuring, and the v4.34 failure was
+                        # precisely an unbounded rejection run.
 
 # ---------------------------------------------------------------------------
 # Pack-voltage sensing + low-voltage failsafe (v4.28)
@@ -579,6 +596,17 @@ emit_block_count = 0  # DIAGNOSTIC (v4.27): emits whose print() took longer than
                       # 100 us). Silent until now — hence these counters.
 emit_block_ms_max = 0 # DIAGNOSTIC (v4.27): longest single emit print(), ms.
                       # Both read out and reset via 'B'.
+gate_reject_count = 0   # DIAGNOSTIC (v4.35): outlier-gate rejections — samples dropped
+                        # as implausible. Read out via 'B'. Before v4.35 the gate was
+                        # entirely silent, which is why a latched profile cost a bench
+                        # session to diagnose rather than one 'B'.
+gate_reprime_count = 0  # DIAGNOSTIC (v4.35): times a cell hit OUTLIER_GATE_MAX_RUN
+                        # consecutive rejections and the gate yielded, emptying the ring.
+                        # Read out via 'B'. The ratio to gate_reject_count is the number
+                        # that matters: reject-heavy with near-zero reprimes means the
+                        # gate is catching glitches, which is its job; reprimes climbing
+                        # with the signal means the gate is fighting real signal and
+                        # OUTLIER_GATE_FRAC is too tight for the profile in use.
 
 
 def raw14_from_bytes(data_bytes):
@@ -683,6 +711,7 @@ def acquire_mode2(profile):
     """
     global mode2_profile_changed, overrun_count
     global emit_block_count, emit_block_ms_max
+    global gate_reject_count, gate_reprime_count
 
     avg_depth = profile['averages']
 
@@ -711,6 +740,9 @@ def acquire_mode2(profile):
     rolling_sum = [0] * n
     rolling_count = [0] * n
     rolling_idx = [0] * n
+    # v4.35: consecutive outlier-gate rejections per cell. Bounds how long the
+    # gate may hold out against the ADC — see the gate block in the loop below.
+    reject_run = [0] * n
 
     # Prime: fire cell[n-1] so that iteration i=0 stores the result in
     # rolling[(0-1)%n] = rolling[n-1] with no startup transient.
@@ -786,8 +818,19 @@ def acquire_mode2(profile):
             t_cfg = ticks_us()
             raw = raw14_from_bytes(data_bytes)
 
+            # Outlier gate. v4.35 rebuilt this so it cannot become an absorbing
+            # state (CHANGELOG.md v4.35 has the session that proved it was one).
+            # Three properties the old shape lacked, all of them load-bearing:
+            #   (a) a rejected sample is DROPPED, never substituted back into the
+            #       ring, so "every slot equals the mean" is no longer a fixed
+            #       point of the update and there is no floor-division ratchet;
+            #   (b) a run of OUTLIER_GATE_MAX_RUN rejections means the signal has
+            #       genuinely moved, so the gate yields and re-primes the cell;
+            #   (c) it arms only on a FULL ring, so a cell still settling after
+            #       G/Q cannot seed the gate with a warm-up value.
+            accept = True
             cnt = rolling_count[prev]
-            if cnt >= 8:
+            if cnt >= avg_depth:
                 mean_raw = rolling_sum[prev] // cnt
                 dev = raw - mean_raw
                 if dev < 0:
@@ -797,13 +840,43 @@ def acquire_mode2(profile):
                 if gate < OUTLIER_GATE_MIN:
                     gate = OUTLIER_GATE_MIN
                 if dev > gate:
-                    raw = mean_raw
-            idx = rolling_idx[prev]
-            rolling_sum[prev] += raw - rolling[prev][idx]
-            rolling[prev][idx] = raw
-            rolling_idx[prev] = (idx + 1) % avg_depth
-            if rolling_count[prev] < avg_depth:
-                rolling_count[prev] += 1
+                    run = reject_run[prev] + 1
+                    if run < OUTLIER_GATE_MAX_RUN:
+                        # Isolated glitch: DROP the sample. The ring keeps its
+                        # real history and the reported mean simply holds for
+                        # this sweep. Nothing is written back, so there is no
+                        # state the gate can drive itself into.
+                        reject_run[prev] = run
+                        gate_reject_count += 1
+                        accept = False
+                    else:
+                        # Sustained excursion — this is signal, not a glitch.
+                        # Empty the ring and take the sample: the cell then
+                        # re-converges on the new operating point in avg_depth
+                        # sweeps, with the gate disarmed until the ring refills,
+                        # instead of crawling there one accepted sample in
+                        # OUTLIER_GATE_MAX_RUN.
+                        reject_run[prev] = 0
+                        rolling_sum[prev] = 0
+                        rolling_count[prev] = 0
+                        rolling_idx[prev] = 0
+                        gate_reprime_count += 1
+                else:
+                    reject_run[prev] = 0
+            if accept:
+                # The fill branch adds without subtracting. v4.34 and earlier
+                # always subtracted, which was correct only because `rolling`
+                # is zero-initialised and each slot is therefore 0 on its first
+                # write. That holds for the first fill and NOT for a re-prime,
+                # where the slots still carry the previous generation's values.
+                idx = rolling_idx[prev]
+                if rolling_count[prev] < avg_depth:
+                    rolling_sum[prev] += raw
+                    rolling_count[prev] += 1
+                else:
+                    rolling_sum[prev] += raw - rolling[prev][idx]
+                rolling[prev][idx] = raw
+                rolling_idx[prev] = (idx + 1) % avg_depth
 
             # Sleep out the remainder of this cell's period.
             # At band/drive-energy boundaries add settle_i extra periods
@@ -1199,6 +1272,7 @@ def check_for_commands(timeout_ms=1):
     global state, sample_frequency_hz, pulse_width_us, sample_delay_us, down_sample
     global active_profile_index, mode2_profile_changed, dynamic_profile
     global busy_high_count, overrun_count, emit_block_count, emit_block_ms_max
+    global gate_reject_count, gate_reprime_count
 
     try:
         if not serial_poll.poll(timeout_ms):
@@ -1277,6 +1351,15 @@ def check_for_commands(timeout_ms=1):
                 body = line[1:].strip()
                 avg_part, *band_parts = body.split(';')
                 averages = int(avg_part)
+                # v4.35: bound it. averages=0 builds zero-length rings and kills
+                # acquire_mode2 on `% avg_depth` (ZeroDivisionError, caught by the
+                # v4.14 try/except and reported as an opaque Mode 2 failure); large
+                # values are the v4.14 memory crash, where 128 was fine and 256 was
+                # not. Refuse both here, where the operator can see why.
+                if not 1 <= averages <= 128:
+                    print('Command Input ERROR: D rejected, averages must be '
+                          '1..128 (got {0:d})'.format(averages))
+                    return
                 bands = []
                 n_delays = None
                 for bp in band_parts:
@@ -1383,12 +1466,16 @@ def check_for_commands(timeout_ms=1):
             # diagnostic response: nothing in src/ parses 'B' (it is read by a
             # human over the §16 serial terminal), so the two new trailing fields
             # break no consumer. Reset-on-read, matching the two before them.
-            print('B{0:d},{1:d},{2:d},{3:d}'.format(
-                busy_high_count, overrun_count, emit_block_count, emit_block_ms_max))
+            # v4.35 appends the two outlier-gate counters on the same terms.
+            print('B{0:d},{1:d},{2:d},{3:d},{4:d},{5:d}'.format(
+                busy_high_count, overrun_count, emit_block_count, emit_block_ms_max,
+                gate_reject_count, gate_reprime_count))
             busy_high_count = 0
             overrun_count = 0
             emit_block_count = 0
             emit_block_ms_max = 0
+            gate_reject_count = 0
+            gate_reprime_count = 0
 
         else:
             print('Command Input ERROR: unknown command')

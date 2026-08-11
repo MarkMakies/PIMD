@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.72
+# PIMD Signature Visualiser (ClassViz) v1.73
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -22,6 +22,8 @@
 #           temperature v4.33+; board_temp_dC = -32768 means NO READING)
 #
 # History (full detail in CHANGELOG.md):
+#   v1.73 ADC-rail marking on clipped cells; Load & Run holds Q/G until the
+#         firmware acknowledges the D
 #   v1.72 pack voltage and board temperature come from firmware telemetry, on
 #         pimd_gui's gauges; the Pack V / Log V hand-entry controls are gone and
 #         the session dump's '# pack_v:' track is written automatically
@@ -145,9 +147,26 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.72'
+APP_VERSION = '1.73'
 
 REDRAW_MS   = 33    # ~30 Hz
+
+# How long to wait for the firmware's response to a D (dynamic profile) command
+# before giving up and refusing to start the stream (v1.73). The firmware always
+# answers -- 'D OK' or a 'Command Input ERROR' -- so this only fires on a dropped
+# line or a board that is not listening. Generous: D is a long line at 115200 and
+# the board may be finishing a sweep before it polls stdin.
+D_ACK_TIMEOUT_MS = 3000
+
+# Raw Mode 2 samples are signed 14-bit, so a cell that reaches +8191 / -8192 is
+# CLIPPED and its reported value is a limit, not a measurement (DESIGN §9's µV
+# scaling: raw14 * 10_000_000 / 2**14). Firmware sends no clip flag, so the rail
+# is detected here, from the value itself. Positive FS lands on 4999389 µV; the
+# tolerance covers the firmware's rolling average pulling the mean a code or two
+# below FS while individual samples are still pinned there.
+RAIL_POS_UV  = (2 ** 13 - 1) * 10_000_000 // 2 ** 14   # +4999389
+RAIL_NEG_UV  = -(2 ** 13) * 10_000_000 // 2 ** 14      # -5000000
+RAIL_TOL_UV  = 2 * 10_000_000 / 2 ** 14                # 2 raw14 codes ≈ 1.2 mV
 
 # Gap between the auto-start connect and the profile send, so the board has
 # answered the E/V/Q4 handshake before the D/Q/G burst arrives -- the same beat
@@ -728,6 +747,12 @@ class MainWindow(QMainWindow):
         self._last_cmd    = ''
         self._last_packet = ''
         self._fw_version_line: 'str | None' = None
+        # v1.73: callback awaiting the firmware's D response; see
+        # _send_dynamic_profile() / process_packet().
+        self._pending_d_ready = None
+        self._d_ack_timer = QTimer(self)
+        self._d_ack_timer.setSingleShot(True)
+        self._d_ack_timer.timeout.connect(self._on_d_ack_timeout)
 
         # Profile dimensions (n_bands, n_cells, labels, etc) — instance state so
         # the heatmap/stats table/single-cell selectors can resize at runtime
@@ -736,6 +761,14 @@ class MainWindow(QMainWindow):
 
         # Data state — sweep
         self._latest_raw: 'np.ndarray | None' = None   # shape (n_channels,)
+        # v1.73: per-cell ADC clip state. _rail_mask is this frame's; _rail_seen
+        # is the set reported so far, so the status line and the session mark
+        # fire on a TRANSITION rather than once per frame at the sweep rate.
+        self._rail_mask: 'np.ndarray | None' = None    # shape (n_channels,) bool
+        self._rail_seen: set = set()
+        self._rail_label_text = ''     # last text pushed to lbl_rail, so the
+                                       # per-frame refresh is a no-op when the
+                                       # rail count has not changed
         self._baseline_mean: 'np.ndarray | None' = None  # shape (n_bands, n_cells)
         self._baseline_std:  'np.ndarray | None' = None  # shape (n_bands, n_cells)
         self._baseline_mode = 'static'   # 'static' | 'rolling' | 'nominal'
@@ -1194,6 +1227,15 @@ class MainWindow(QMainWindow):
         self._frame_count    = 0
         self._ch_glitch_buf  = None
         self._ch_glitch_pos  = 0
+        # v1.73: rail state is per-geometry -- channel indices mean something
+        # different under a new profile, and which cells clip is precisely what
+        # changing the delay ladder changes. Reset so the new profile reports
+        # its own rails afresh.
+        self._rail_mask      = None
+        self._rail_seen      = set()
+        self._rail_label_text = ''
+        self.lbl_rail.setText('')
+        self.lbl_rail.setStyleSheet('')
 
         # Shape Space state is invalidated BEFORE anything redraws: the cached
         # features and the live trail were computed under the old geometry,
@@ -1307,6 +1349,20 @@ class MainWindow(QMainWindow):
         # _rate_timer/_update_rate. Answers "is data flowing at full speed".
         self.lbl_rate = QLabel('Rate: — (idle)')
         row1.addWidget(self.lbl_rate)
+
+        # v1.73: ADC-rail indicator, same reasoning as lbl_rate above -- a
+        # standing condition needs a standing readout. This started as a
+        # status-bar message and that was wrong: the bar is shared with ~80
+        # other showMessage() callers, so a one-shot line announcing a
+        # condition that then persists for the whole run is gone before anyone
+        # looks (bench, 2026-08-11). Blank when nothing is clipping, so it
+        # costs no space in the normal case.
+        self.lbl_rail = QLabel('')
+        self.lbl_rail.setToolTip(
+            'Cells sitting at the ADC full scale. Their values are limits, not\n'
+            'measurements, and any feature computed over them inherits that.\n'
+            'Fix it at the delay ladder, not in software.')
+        row1.addWidget(self.lbl_rail)
         layout.addLayout(row1)
 
         # Tab widget
@@ -1632,9 +1688,28 @@ class MainWindow(QMainWindow):
         if not self.serial.isOpen():
             self.statusBar().showMessage('Not connected')
             return
-        cmd = self._build_d_command(profile)
-        self.send_command('E')
-        self.send_command(cmd)
+        if self._pending_d_ready is not None:
+            # v1.73: one handshake at a time. Two overlapping sends would let
+            # the FIRST D's reply fire the SECOND profile's callback, sending
+            # Q/G before the second D had been acknowledged -- reintroducing
+            # the exact race the handshake exists to close.
+            self.statusBar().showMessage(
+                'A profile send is already in flight — wait for it to finish')
+            return
+        # v1.73: hold Q/G back until the firmware confirms the D actually took.
+        # Sending them blind is how a session ends up recording one profile's
+        # geometry under another profile's name -- see _send_dynamic_profile().
+        self._send_dynamic_profile(
+            profile,
+            lambda: self._finish_load_run_profile(profile, profile_raw_bytes, name))
+        self.statusBar().showMessage('Sending profile {0}...'.format(
+            profile.get('name', name)))
+
+    def _finish_load_run_profile(self, profile, profile_raw_bytes, name):
+        """Second half of _on_load_run_profile, run only once the firmware has
+        acknowledged the D. Everything here commits to the new geometry -- the
+        profile the GUI displays, the profile the session header records -- so
+        none of it may happen against a D that was refused."""
         self.send_command('Q{0}'.format(DYNAMIC_PROFILE_INDEX))
         self.send_command('G')
         self._apply_profile(profile, DYNAMIC_PROFILE_INDEX, profile_raw_bytes)
@@ -1649,6 +1724,44 @@ class MainWindow(QMainWindow):
         self._maybe_autostart_session('profile load + run')
         self.statusBar().showMessage('Loaded and running profile: {0}'.format(
             profile.get('name', name)))
+
+    # ------------------------------------------------------------------
+    # Dynamic-profile handshake (v1.73)
+    # ------------------------------------------------------------------
+    def _send_dynamic_profile(self, profile, on_ready):
+        """Send E + D for `profile`, then hold Q<n>/G back until the firmware's
+        own D response confirms it took -- process_packet() calls `on_ready`
+        once that arrives. Ported from pimd_delaycal.py v1.41, which has run
+        this shape since.
+
+        Q<n>/G must never fire after a D the firmware rejected. The firmware
+        refuses the WHOLE D on any invalid cell and leaves the previous dynamic
+        profile in place, so Q<n> would then select that stale profile and G
+        would stream its geometry -- while _apply_profile() had already told the
+        GUI, and the session header, that the new one was running. That is a CSV
+        that names a profile it does not contain, which no amount of offline
+        analysis can detect afterwards."""
+        self._pending_d_ready = on_ready
+        self.send_command('E')
+        self.send_command(self._build_d_command(profile))
+        # A reply always comes (D OK or a Command Input ERROR), but a dropped
+        # line must not leave the app waiting forever -- this path is also the
+        # v1.53 launch auto-start, where a silent stall reads as "ClassViz never
+        # started" with nothing on screen to say why.
+        self._d_ack_timer.start(D_ACK_TIMEOUT_MS)
+
+    def _on_d_ack_timeout(self):
+        """No D response inside D_ACK_TIMEOUT_MS. Drop the pending callback --
+        Q/G are NOT sent. Failing closed is the whole point: streaming on an
+        unconfirmed profile is exactly the mislabelled-session outcome this
+        handshake exists to prevent."""
+        if self._pending_d_ready is None:
+            return
+        self._pending_d_ready = None
+        self.statusBar().showMessage(
+            'No response to the profile (D) command after {0:.0f} s -- profile NOT '
+            'loaded, stream not started. Check the board and try Load & Run again.'
+            .format(D_ACK_TIMEOUT_MS / 1000.0))
 
     # ------------------------------------------------------------------
     # Tab 2 — Analysis
@@ -7422,6 +7535,28 @@ class MainWindow(QMainWindow):
                 self._append_mark('firmware: {0}'.format(line))
             return
 
+        if self._pending_d_ready is not None:
+            # v1.73: the dynamic-profile handshake. 'E' (sent immediately before
+            # 'D') prints nothing, so once the V/P/PACK lines above are out of
+            # the way the next line here is D's own response -- either it
+            # succeeded and Q/G proceed, or it is the real rejection reason and
+            # Q/G never get sent at all. Placed AFTER the sensor handlers for
+            # the same reason delaycal places it there: an unsolicited 'P' can
+            # land inside the D window, and this gate consumes every line it
+            # sees.
+            if line.startswith('D OK'):
+                on_ready = self._pending_d_ready
+                self._pending_d_ready = None
+                self._d_ack_timer.stop()
+                on_ready()
+            elif 'ERROR' in line:
+                self._pending_d_ready = None
+                self._d_ack_timer.stop()
+                self.statusBar().showMessage('Profile rejected by firmware: {0}'.format(line))
+                if self._recording and self._session_file and not self._session_paused:
+                    self._append_mark('firmware: {0}'.format(line))
+            return
+
         if line.startswith('LOCKOUT'):
             # The v4.28 low-voltage failsafe latching. Marked into the dump as
             # well as shown: frames after this point are not the same experiment
@@ -7473,6 +7608,18 @@ class MainWindow(QMainWindow):
         glitch_mask = np.abs(raw_mv - med_mv) > 100.0
         raw_display = np.where(glitch_mask, med_mv * 1000.0, raw)
         self._latest_raw = raw_display
+
+        # v1.73: rail detection. A clipped cell reports the converter's limit,
+        # which reads exactly like a measurement -- and the mean of clipped
+        # samples is not the mean of the signal, so every feature computed over
+        # such a cell is wrong by an unknown amount. Deliberately NOT filtered
+        # or substituted: the value is left alone and the operator is told. That
+        # is the difference between this and the glitch mask above, and it is
+        # the right call for a rail -- a railed cell is a profile problem to fix
+        # at the delay ladder, not a sample to clean up in software.
+        self._rail_mask = ((raw >= RAIL_POS_UV - RAIL_TOL_UV)
+                           | (raw <= RAIL_NEG_UV + RAIL_TOL_UV))
+        self._note_railed_cells(now)
 
         self._frame_count += 1
         self._rolling_buf.append((now, raw))
@@ -7676,6 +7823,49 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Stats table update
     # ------------------------------------------------------------------
+    def _note_railed_cells(self, now):
+        """Report newly-railed cells once, not once per sweep.
+
+        Follows the firmware's own convention for this kind of state (see
+        _ds_mark_present in pimd_mcu.py): announce the transition, stay quiet
+        while it holds. A cell that clips does so on most frames, so a
+        per-frame message would be a solid wall of status-bar text and a
+        session dump made mostly of marks.
+
+        Only entries are reported. A cell leaving the rail is not news -- it is
+        the normal case, and a target passing through lifts and drops cells
+        constantly -- whereas a cell that has clipped even once has produced at
+        least one frame whose value is a limit rather than a measurement, and
+        that fact does not expire for the rest of the run.
+
+        The top-bar lbl_rail readout is refreshed FIRST and unconditionally,
+        because it shows current state rather than transitions -- it has to be
+        able to clear itself when the last railed cell comes back down."""
+        n_rail = 0 if self._rail_mask is None else int(self._rail_mask.sum())
+        txt = '⚠ RAIL: {0} cell{1}'.format(n_rail, '' if n_rail == 1 else 's') if n_rail else ''
+        if txt != self._rail_label_text:
+            self._rail_label_text = txt
+            self.lbl_rail.setText(txt)
+            self.lbl_rail.setStyleSheet(self.MY_RED if n_rail else '')
+
+        if not n_rail:
+            return
+        new = {int(ch) for ch in np.flatnonzero(self._rail_mask)} - self._rail_seen
+        if not new:
+            return
+        self._rail_seen |= new
+        # _band_labels / _cell_labels are indexed by the TRUE band and cell
+        # index, not by display order, so a channel maps straight through.
+        cells = ', '.join(
+            '{0} {1}'.format(self._band_labels[ch // self._n_cells],
+                             self._cell_labels[ch % self._n_cells])
+            for ch in sorted(new))
+        msg = ('ADC RAIL: {0} cell(s) clipped at full scale ({1}) — those values '
+               'are limits, not measurements'.format(len(new), cells))
+        self.statusBar().showMessage(msg)
+        if self._recording and self._session_file and not self._session_paused:
+            self._append_mark(msg)
+
     def _update_stats_table(self):
         if self._freeze_stats or self._latest_raw is None:
             return
@@ -7698,7 +7888,20 @@ class MainWindow(QMainWindow):
             for c in range(self._n_cells):
                 row      = d * self._n_cells + c
                 proto_ch = b * self._n_cells + c
-                self.tbl_stats.item(row, 3).setText(_fmt(raw[proto_ch]))
+                item3 = self.tbl_stats.item(row, 3)
+                item3.setText(_fmt(raw[proto_ch]))
+                # v1.73: mark the clipped cells. Latest is the right column for
+                # it -- Mean and Std are window statistics, but Latest is the
+                # single value that IS the converter's limit. Red, not a
+                # substitution: the number stays visible and wrong on purpose.
+                if self._rail_mask is not None and self._rail_mask[proto_ch]:
+                    item3.setBackground(QBrush(QColor(246, 97, 81)))
+                    item3.setToolTip('At the ADC rail — this value is a limit, not a '
+                                     'measurement. Any feature computed over this cell '
+                                     'inherits that.')
+                else:
+                    item3.setBackground(QBrush())
+                    item3.setToolTip('')
                 item4 = self.tbl_stats.item(row, 4)
                 item5 = self.tbl_stats.item(row, 5)
                 if blocked:

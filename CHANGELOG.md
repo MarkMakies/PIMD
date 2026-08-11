@@ -1,3 +1,330 @@
+### findings — v4.35 bench-verified: the latch is gone on the geometry that caused it
+
+Regression run on the original failing cell geometry (`cal_3x10_v4_railtest`, `profile_sha8
+43379c54` — the same delays as the latched `69d51733`), fw v4.35, ClassViz v1.73,
+`session_20260811_095403.csv`, 1578 frames. **Every channel that latched on v4.34 now tracks
+continuously.**
+
+| ch | delay | v4.34 (session_20260810_174641) | v4.35 (session_20260811_095403) |
+|---|---|---|---|
+| 2 | 12.8 µs | frozen at 720214, 1813 frames | 1562 unique, longest identical run **2** |
+| 3 | 13.6 µs | frozen at 384521 | 1500 unique, longest run **3** |
+| 12 | 11.904 µs | frozen at 664062 | 1424 unique, longest run **4** |
+| 13 | 12.8 µs | frozen at 332641 | 1235 unique, longest run **5** |
+| 21 | 7.0 µs | frozen at 4015503 | 541 unique, longest run **4** |
+| 22 | 9.904 µs | frozen at 624389 | 408 unique, longest run **7** |
+| 23 | 10.8 µs | frozen at 293579 | 320 unique, longest run **7** |
+
+Longest identical run anywhere among the live channels is **9 frames**, against 1813-and-still-
+frozen-at-end-of-file on v4.34.
+
+**ch0/1/10/11/20 are still constant, and that is hard ADC saturation, not the latch.** All 1578
+frames sit at exactly 4999389 µV (8191 codes, positive full scale), so the converter really does
+return the same code every sweep — there is no firmware change that can move it, and the fix is
+at the delay ladder, which is what the operating `cal_3x10_v4` did on 2026-08-10. Worth noting
+they rail *harder* than they did yesterday: ch0 was 46.7 % at the rail on 2026-08-10 at 52.5 °C
+board temperature, and is 100 % at 31.5 °C today. Consistent with the v4.27 observation that
+cooling moves the operating point up, and a reminder that **which cells clip is a function of
+board temperature and pack state, not a static property of the ladder.**
+
+**The gate did not fire at all** — `B47400,42007,0,0,0,0` over 1580 sweeps, and
+`B34740,30756,0,0,0,0` over 1158 sweeps on the re-cut profile before it. That is the arming
+change (`cnt >= avg_depth`, was `>= 8`) doing the work: the v4.34 latch was seeded by the gate
+going live a quarter of the way through the first ring fill, while the cell was still settling
+after the profile change, and locking onto that warm-up value. Arm after the transient and the
+rejection that started it never happens. Note also that **a railed cell does not itself provoke
+rejections** — pinned samples are all 8191, so deviation from the rolling mean is ~zero; on
+2026-08-10 ch0 varied by ~93 codes against a gate of 811.
+
+Zero rejections across 34,740 and 47,400 samples is *lower* than the 2026-07 cell-0 finding
+would predict (outliers above 100 mV at 23.3 per 1000, which over these windows would be ~80 and
+~110 events). The likeliest reading is that the v4.26 IRQ critical section and the v4.34 settle
+fix between them largely cleared that population — both postdate the measurement — but it is an
+inference, not a result. The counters are now in place to settle it whenever it matters.
+
+**`overrun_count` is ~88.6 % of `busy_high_count` on every run** (30756/34740, 42007/47400), and
+that is structural, not a regression: per-cell interpreter cost is ~2.3 ms against band periods
+of 320/200/40 µs, so `remaining` is negative on every non-boundary cell by construction. The
+arithmetic confirms it — 47400 − 42007 = 5393 non-overruns against 1580 sweeps × 3 boundary
+cells = 4740, i.e. the cells that do not overrun are essentially the ones receiving the settle
+budget. (2026-08-11)
+
+---
+
+### profile — `cal_3x10_v4_railtest` — new — the geometry that latched, kept as a regression case
+
+**DIAGNOSTIC ONLY. Never capture a corpus against this.** The exact cell geometry of the
+`cal_3x10_v4` that latched on fw v4.34 — reconstructed byte-for-byte from the
+`# profile_json:` header of `session_20260810_174641.csv` (`profile_sha8 69d51733`), not
+retyped — so the v4.35 outlier-gate fix has a reproducible regression case. The operating
+`cal_3x10_v4` had its early cells re-cut out of saturation on 2026-08-10 (100 µs band
+8.848→10.0, 9.0→11.0, 12.8→13.0; 50 µs 7.936→9.0, 8.0→10.0, 11.904→12.0; 10 µs 5.744→7.0,
+7.0→8.0, 9.904→10.0), which is the right move for capture and removes the condition the fix
+needs to be tested against.
+
+| band | delays (µs) |
+|---|---|
+| 100 µs @ 3.125 kHz | 8.848 · 9.0 · 12.8 · 13.6 · 17.52 · 20.4 · 30.0 · 45.0 · 60.0 · 120.0 |
+| 50 µs @ 5 kHz | 7.936 · 8.0 · 11.904 · 12.8 · 16.48 · 19.2 · 24.0 · 30.0 · 41.0 · 75.0 |
+| 10 µs @ 25 kHz | 5.744 · 7.0 · 9.904 · 10.8 · 13.992 · 18.48 · 20.0 · 22.0 · 26.0 · 29.0 |
+
+**Cells 0/1 of every band sit inside ADC saturation and that is the point** — they read 8191
+codes (4999389 µV, positive full scale) and railing them is the condition under test, not a
+defect to fix here. On v4.34, cells 0-3 of every band bar ch20 froze bit-identical within ~20 s
+and never recovered. On v4.35 every channel must keep changing.
+
+**The `name` field is deliberately `cal_3x10_v4_railtest`, not `cal_3x10_v4`.** Two files
+carrying the same `name` with different geometry is precisely what DESIGN §10's "locked
+profiles are never edited in place" rule exists to prevent — `pimd_features`' cross-epoch
+`(profile_name, profile_sha8)` guard would have no way to tell the railed diagnostic geometry
+from the operating one. `threshold_v` is the 5.0 → 0.5 V placeholder ordering key carried over
+from `cal_3x10_v4` unchanged; it is not a voltage and must not be mined as one.
+
+Validated offline: geometry identical to the latched session, all 30 cells pass the firmware's
+`pulse_duties_valid()`, `threshold_v` strictly descending in every band, `averages` 32 inside
+the v4.35 `D` bound. (2026-08-11)
+
+---
+
+### src/pimd_classviz.py — v1.73 — clipped cells are marked as clipped, and Load & Run waits for the firmware to accept the profile
+
+The two PC-side items from the v4.35 Mode 2 audit below, split out to keep the firmware change
+reversible on its own. Neither is a new discovery; both are gaps that audit named and that the
+`cal_3x10_v4` session made concrete.
+
+**1. ADC rail marking.** Raw Mode 2 samples are signed 14-bit, so a cell that reaches +8191 /
+−8192 is clipped and its reported value is a *limit*, not a measurement. The firmware sends no
+clip flag and ClassViz had no rail detection at all, so a railed cell arrived as 4999389 µV and
+read exactly like a reading — in `session_20260810_174641.csv`, ch0/ch10/ch20 sat there for the
+opening ~140 frames and nothing said so. Detection is now done here, from the value itself:
+`RAIL_POS_UV` / `RAIL_NEG_UV` derived from DESIGN §9's `raw14 * 10_000_000 / 2**14` scaling, with
+a 2-code (~1.2 mV) tolerance so the firmware's rolling average pulling the mean a code below full
+scale while individual samples are still pinned there does not hide it.
+
+Surfaced three ways, and the split between them matters. **Current state** gets a standing
+readout: a top-bar `lbl_rail` label beside `lbl_rate`, blank when nothing is clipping and a red
+`⚠ RAIL: N cells` when something is, visible on every tab. **Per-cell detail** gets the Stats
+tab's **Latest (mV)** cell turning red with a tooltip — Latest is the right column for it,
+because Mean and Std are window statistics while Latest is the single number that *is* the
+converter's limit. **Transitions** get a status-bar line and a session mark, following the
+firmware's own `_ds_mark_present` convention: only entries are reported, because a cell leaving
+the rail is the normal case and a target passing through lifts and drops cells constantly,
+whereas a cell that has clipped even once has produced at least one frame that is not a
+measurement, and that does not expire for the run. Rail state resets on a profile change, because
+which cells clip is precisely what changing the delay ladder changes.
+
+**The standing label was added after the bench found the first shape wrong** (2026-08-11, in this
+same pass, so there is no released v1.73 without it). The transition message alone was invisible
+in practice: the status bar has ~80 other `showMessage()` callers, so a one-shot line announcing
+a condition that then persists for the entire run is gone long before anyone looks at it. The
+detection had been right all along — the run's session dump carried the correct mark, naming
+exactly the five clipped cells, written on the first frame — but a standing condition needs a
+standing readout, which is the same reasoning `lbl_rate`'s own comment gives for living in the
+top bar.
+
+**The value is deliberately NOT filtered or substituted**, which is the opposite of the 100 mV
+glitch mask sitting a few lines above it. A glitch is a sample to clean up; a rail is a profile
+problem to fix at the delay ladder, and hiding it would remove the only evidence that it needs
+fixing.
+
+**2. `Load & Run` no longer sends `Q`/`G` blind.** The firmware refuses the *whole* `D` on any
+invalid cell and leaves the previous dynamic profile in place, so the old sequence — `E`, `D…`,
+`Q5`, `G`, then `_apply_profile()` with the file's contents regardless — would select that stale
+profile, stream its geometry, and write a session header naming the profile it had just failed to
+load. **A CSV that names a profile it does not contain, with nothing in it that offline analysis
+could use to notice.** `pimd_delaycal` has guarded this since v1.41; the guard is ported here as
+`_send_dynamic_profile(profile, on_ready)` plus the second half of the load path split out as
+`_finish_load_run_profile()`, so everything that commits to the new geometry happens only after
+`D OK`. The gate sits after the V/P/PACK handlers in `process_packet()` for the reason delaycal
+puts it there: an unsolicited `P` can land inside the D window and the gate consumes every line
+it sees.
+
+Two things delaycal does not have, both because this path is also the v1.53 launch auto-start
+where a silent stall reads as "ClassViz never started" with nothing on screen to explain it. A
+`D_ACK_TIMEOUT_MS` (3 s) single-shot timer **fails closed** — no reply means no `Q`/`G` and a
+status line saying the profile was not loaded, never a stream on an unconfirmed profile. And a
+second `Load & Run` is refused while one handshake is in flight, since two overlapping sends
+would let the first `D`'s reply fire the second profile's callback and re-open the exact race
+this closes.
+
+**Verified headless** (offscreen Qt, feeding `process_packet()` directly, which is what the serial
+reader does): `E`+`D` sent with `Q`/`G` withheld; an unsolicited `P` inside the window neither
+consumes the gate nor fires the callback; `D OK` fires it once and stops the timer; a
+`Command Input ERROR` clears the gate with `Q`/`G` never sent; the timeout fails closed and is
+idempotent; rail reporting fires once per newly-railed cell, stays quiet while it holds, reports
+again for a new cell, and is silent when cells leave the rail; the standing label tracks the
+current count, clears itself when the last cell comes down, and gets the singular/plural right.
+Against the real bench frame, the detector flags exactly ch0/ch10/ch20 and none of the tail
+cells. What offscreen rendering cannot confirm is the red Latest cell and its tooltip — check
+that on the bench. (2026-08-10, standing label 2026-08-11)
+
+---
+
+### mcu/pimd_mcu.py — v4.35 — the outlier gate was an absorbing state; cells latched and never came back
+
+**Symptom, on the bench:** running `cal_3x10_v4` in ClassViz, the early cells of every band
+read "stuck" — flat lines in the Analysis grids, near-zero σ everywhere except one cell, no
+response to a target. `pimd_delaycal` showed the same thing as inflated std-devs and frozen
+cells. **Reloading the profile into the MCU cleared it for a while**, which is the detail that
+puts it in firmware state rather than in the analogue front end.
+
+**Proof, from `src/data/sessions/session_20260810_174641.csv`** (2213 frames, fw v4.34,
+`cal_3x10_v4` / `69d51733`): eleven of thirty channels — ch0-3, ch10-13, ch21-23, i.e. cells
+0-3 of every band bar ch20 — stop changing between 17:46:58 and 17:47:01 and are then
+**byte-identical for the remaining 1813 frames**. Not quiet: the same integer, repeated. The
+last step before each freeze is exactly −19 µV on all eleven, which is −1 raw14 code
+(10 V / 2¹⁴ / 32 averages = 19.07 µV) — an integer floor-division ratchet, not noise. The one
+bright cell in the heatmap (10 µs row, 5.00 V column) is ch20, the only early cell that did
+*not* latch, and so the only one still reporting real σ. Nothing was wrong with the analogue
+side.
+
+**Root cause.** The v4.21 plausibility gate rejected a sample by *substituting the rolling
+mean and writing that back into the ring*. Three consequences, all fatal together:
+
+1. **"Every slot equals the mean" is an exact fixed point** — `rolling_sum // cnt` returns
+   that value, the substitution writes it, the sum does not move. No path out.
+2. **Floor division makes the approach monotone**, so the mean walks down one code at a time
+   until it converges — the observed −19 µV/frame ratchet, then the hard stop.
+3. **It is self-reinforcing.** Once the mean sits further than `gate` from the true signal,
+   every subsequent sample is rejected, which is exactly what holds the mean there.
+
+`gate = max(|mean_raw| // 10, 164)` counts is a 10 % proportional band, so anything that moves
+a cell more than 10 % — a cell still settling after `G`/`Q`, a warming rig, a fast waveform, a
+railed cell dropping into the linear window — walks out of the band and cannot walk back. Two
+things made it easy to fall in: the gate armed at `cnt >= 8` against an `avg_depth` of 32, so
+it went live a quarter of the way through the ring's first fill and could lock onto a warm-up
+value; and only re-entering `acquire_mode2` rebuilds `rolling`/`rolling_count`, which is why a
+profile reload bought a working detector until it re-latched.
+
+**v4.25 fixed a different latch path** — near-zero and negative means flooring the threshold to
+0 or below — by adding `OUTLIER_GATE_MIN`. It did not touch the write-back, so the proportional
+band kept an independent latch of its own. Do not read the v4.25 line and assume this was
+covered.
+
+**The fix keeps the gate and removes its ability to become a state.** The §7 bit-truncation
+artefacts it exists for are real, land at exactly 1/2 and 1/4 of the true value, and are
+volts-scale. Four changes in `acquire_mode2`:
+
+- **A rejected sample is dropped, never substituted.** No `rolling_sum` update, no ring write,
+  no index advance, no count change. The ring keeps its real history, the reported mean simply
+  holds for that sweep, and the fixed point and the ratchet both cease to exist.
+- **`OUTLIER_GATE_MAX_RUN = 4` bounds the rejection run.** Per-cell `reject_run[]` increments
+  on rejection and clears on acceptance; on the fourth consecutive rejection the gate yields —
+  it empties the cell's ring and takes the sample, so the cell re-converges on the new
+  operating point in `avg_depth` sweeps with the gate disarmed while it refills. A cell is
+  sampled once per sweep and the artefacts are single-sample events, so four in a row is not a
+  glitch population, it is the signal having moved. 4 costs at most 3 sweeps (~0.24 s at
+  12.7 Hz) on a genuine step.
+- **The gate arms only on a full ring** (`cnt >= avg_depth`, was `>= 8`), so a settling cell
+  can no longer seed it. This makes it inert at `averages == 1`, which is correct — profile 2
+  is the single-sample scope-correlation profile and must not be filtered.
+- **The fill branch adds without subtracting.** v4.34 and earlier always subtracted the slot
+  being overwritten, which was right only because `rolling` is zero-initialised and each slot
+  is therefore 0 on its first write. True for the first fill, **not** for a re-prime, where the
+  slots still hold the previous generation's values. Without this the re-prime would corrupt
+  `rolling_sum`.
+
+**Observability, because the gate was completely silent** — which is why this cost a bench
+session instead of one `B`. Two counters, `gate_reject_count` and `gate_reprime_count`, appended
+to the `B` response: `B<busy_high>,<overrun>,<emit_block>,<emit_block_ms_max>,<gate_reject>,
+<gate_reprime>`, reset-on-read like the rest. Additive, on the v4.27 precedent; nothing in
+`src/` parses `B`. The ratio is the number to read: rejections with near-zero re-primes means
+the gate is catching glitches, which is its job; re-primes climbing with the signal means it is
+fighting real signal and `OUTLIER_GATE_FRAC` is too tight for the profile in use.
+
+**Also in this version:** `D` now bounds `averages` to 1..128. It was unvalidated — `averages=0`
+builds zero-length rings and kills `acquire_mode2` on `% avg_depth`, reported as an opaque Mode 2
+failure through the v4.14 try/except, and large values are the v4.14 memory crash (128 fine, 256
+not). Refused in the parser now, where the operator can see why.
+
+**Offline differential test.** A throwaway harness mirroring the firmware's per-cell
+bookkeeping exactly (integer maths, floor division as MicroPython does it), running the v4.34
+rule and the v4.35 rule over identical sample streams, with a per-push assertion that
+`rolling_sum` still equals the sum of the ring's live entries. Not tracked in the repo — the
+results are the record:
+
+| case | v4.34 | v4.35 |
+|---|---|---|
+| railed at +FS, then drops into the linear window | **frozen at 8191 forever, 2191 codes (1.3 V) off** | recovers to within 4 codes, 1 re-prime |
+| 400 random (seed, truth) pairs × 800 frames | **latched 382/400** | **latched 0/400** |
+| stationary + 2 % truncation glitches | 14 rejects, tracks | 14 rejects, tracks — filtering unchanged |
+| fast sweep through the cell | 82 rejects, tracks | 12 rejects, 3 re-primes, tracks |
+| slow thermal drift 1150 → 900 codes | 0 rejects | 0 rejects — no regression on the quiet case |
+
+The railed-cell row is the bench failure reproduced: it is what ch0/ch10/ch21 did.
+
+**Not done, deliberately.** A *structural* gate — reject only when `raw*2` or `raw*4` lands
+within a few codes of the mean, since that is what bit truncation actually produces — is the
+more precise filter and would drop false rejections to ~nil. It is a bigger behavioural change
+than this defect warrants and wants its own bench A/B; the new counters are what would justify
+it. Removing the gate outright is also defensible (v4.26's IRQ critical section is the primary
+defence and this is explicitly secondary) but discards protection that works when it is not
+latching.
+
+**Invariants (DESIGN §11) untouched:** no PWM/slice change, no scan scheduler, no flash writes,
+no change to the `W` wire format. **Bench-verified 2026-08-11 on the original failing geometry —
+see the findings entry above.** Still outstanding: a fast target sweep, a delaycal THERMAL run,
+and a `cal_3x10_v3` sweep-rate regression. (2026-08-10)
+
+---
+
+### findings — audit of Mode 2 against the wider capture range
+
+Prompted by the v4.35 latch above: with fast, slow and near-stationary waveforms now in the same
+sweep, what else in the acquisition path assumes a narrow or slow-moving signal. Everything below
+was checked; only the two items folded into v4.35 were changed. Recorded so they are not
+re-derived.
+
+**Left alone, by decision:**
+
+- **`cal_3x10_v4`'s first two cells per band are inside ADC saturation.** ch0/ch10/ch20 read 8191
+  codes (4999389 µV, positive full scale) for the opening ~140 frames — delays 8.848/9.0,
+  7.936/8.0, 5.744/7.0 µs. This is what tripped the gate. The v3 entry already flagged it ("the
+  first cells of every band sit inside the saturated region and are unverified"). **Operator
+  decision 2026-08-10: leave as is.** With the gate fixed those cells are readable for what they
+  are, which is the right basis for any later re-cut. Note `cal_3x10_v4.json` is still untracked
+  and its *delays* have never been recorded here — only its `threshold_v` change was.
+- **The 32-deep across-sweep rolling average is a ~2.5 s low-pass** at 12.7 Hz, and ClassViz's
+  64-frame display median can add ~2.5 s more. For genuinely fast waveforms this is the dominant
+  limit, well before the gate. No code change — `averages` is per-profile and tunable — but
+  wider-range profiles should pick a depth deliberately rather than inheriting 32.
+- **The 10 µs / 25 kHz band caps delay at 29.095 µs** (`pulse_duties_valid`: pulse + delay +
+  0.904 µs must fit the period), and `cal_3x10_v4` already sits at 29.0 — 95 ns of margin, as
+  DESIGN §10 records. Extending the range on that band is not possible without dropping the
+  frequency. The refusal is correct; check an extended profile against it *before* a bench
+  session.
+- **`service_sensors()` runs inside the sweep loop.** At `i == 0` the DS18B20 scratchpad read
+  blocks ~7.6 ms while the PWM free-runs at cell 0's config, once per `DS18B20_INTERVAL_MS` —
+  the same class of perturbation as the emit stall in the v4.24/v4.27 notes. Known and bounded;
+  logged here so it is not mistaken for a new effect.
+
+**Split out to a ClassViz pass — both done in v1.73, see the entry above:**
+
+- **Saturation is invisible end to end.** `raw14_from_bytes` clips at +8191/−8192, the emitted
+  mean carries no flag, and ClassViz has no rail detection anywhere — a railed cell reports
+  4999389 µV and reads as a measurement. Six channels spent time there in this session. The
+  information is already on the wire, so this is a PC-side marker: flag any cell within ~1 code
+  of ±full scale.
+- **A rejected `D` leaves the previous dynamic profile live, and the session header lies about
+  it.** `check_for_commands` rejects the *whole* `D` on any invalid cell; `dynamic_profile` keeps
+  its old value and a following `G` streams the old geometry, while the CSV header records
+  `profile_json` from the file. `pimd_delaycal` has guarded this since v1.41 by confirming
+  `D OK`; ClassViz's `_on_load_run_profile` fires `E`, `D…`, `Q5`, `G` blind and then applies the
+  file's profile regardless. Port delaycal's guard. This gets more likely as the range widens
+  into the duty limit above.
+
+**Checked and clear:** `rolling_sum` cannot overflow (256 × 8191 ≈ 2.1 M). The `mean_uV` float
+path is fine on RP2040 single-precision floats (worst case < 1 µV at full scale). Sign handling
+in `raw14_from_bytes` and in the gate's `abs()` is correct for bipolar data. ClassViz's own
+100 mV display gate **cannot** latch — it feeds its median buffer the *raw* value, not the
+substituted one, which is precisely the property the firmware gate lacked and the property v4.35
+restores; it does still mask real transitions above 100 mV for up to ~32 frames after a step. The
+`dd`/`sd` CC-write skip is safe at v4's spacing — the hardware grid is 8 ns on all three bands and
+v4's tightest gap (64 ns) is 8 grid steps — but two cells closer than ~8 ns would silently
+collapse into one, so keep 8 ns as the hard minimum when cutting wider profiles. (2026-08-10)
+
+---
+
 ### profile — `cal_3x10_v4` — the first three delays of every band move out of ADC saturation
 
 The early cells were re-cut by hand in `pimd_delaycal` v1.48 (file saved 2026-08-10 18:06:30; the
