@@ -107,6 +107,23 @@ would predict (outliers above 100 mV at 23.3 per 1000, which over these windows 
 fix between them largely cleared that population — both postdate the measurement — but it is an
 inference, not a result. The counters are now in place to settle it whenever it matters.
 
+**No sweep-rate cost.** v4.35 adds a list index, a comparison and an occasional ring re-prime to
+`acquire_mode2`'s per-cell path, so the question is whether that shows up as a slower sweep. It
+does not. Measured from the firmware clock in the two session dumps, over the **identical**
+30-cell geometry:
+
+| session | fw | frames | span | rate |
+|---|---|---|---|---|
+| `session_20260810_174641` | 4.34 | 2213 | 179.9 s | **12.30 Hz** (369 cells/s) |
+| `session_20260811_095403` | 4.35 | 1578 | 126.6 s | **12.45 Hz** (374 cells/s) |
+
+v4.35 is marginally *faster*, i.e. the difference is run-to-run variation. This supersedes the
+`cal_3x10_v3` regression run the fix entry originally called for — that would have compared a
+different profile against no published v4.34 baseline (DESIGN §8 records 11.49 Hz for 3 × 11 = 33
+cells and notes no 3 × 10 measurement exists), whereas these two runs are the same delays on the
+same rig either side of the change. **A 30-cell 3-band profile runs at ~12.3-12.5 Hz on fw
+v4.34/v4.35**, which is the figure §8 was missing.
+
 **`overrun_count` is ~88.6 % of `busy_high_count` on every run** (30756/34740, 42007/47400), and
 that is structural, not a regression: per-cell interpreter cost is ~2.3 ms against band periods
 of 320/200/40 µs, so `remaining` is negative on every non-boundary cell by construction. The
@@ -328,8 +345,8 @@ latching.
 
 **Invariants (DESIGN §11) untouched:** no PWM/slice change, no scan scheduler, no flash writes,
 no change to the `W` wire format. **Bench-verified 2026-08-11 on the original failing geometry —
-see the findings entry above.** Still outstanding: a fast target sweep, a delaycal THERMAL run,
-and a `cal_3x10_v3` sweep-rate regression. (2026-08-10)
+see the findings entry above**, and it costs nothing in sweep rate (measured, same entry). Still
+outstanding: a fast target sweep. (2026-08-10)
 
 ---
 
