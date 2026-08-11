@@ -1,3 +1,202 @@
+### hardware — a 38 mm fan on the regulator/FET cluster; **3.125 kHz is now a forced-air-only setting**
+
+**A 25 VDC 38 mm fan was fitted, blowing directly onto U1 from 50 mm**, with the same airstream
+covering the load resistor and Q1. It is **powered directly from the pack**, unswitched and
+unregulated. Under it the 100 µs band runs at **3.125 kHz** — the cut that had been tripping U1
+every ~42 s — and the operator reports the +15 V rail *"appears very stable"*.
+
+**Powering it from the pack makes the cooling track the dissipation, which is the right direction.**
+U1's heat is `(V_pack − 15) × I`, worst at a full pack; fan speed rises with pack voltage over the
+same span. At the 21.0 V floor the fan sees 84 % of its rated 25 V — comfortably above the ~60 %
+where a DC fan stalls — while U1's drop has fallen from 9.7 V to 6.0 V. So the weakest cooling
+coincides with the lightest load. **Favourable, and not by design** — worth stating so it is not
+mistaken for a specified behaviour.
+
+**Why this is the second of two exits, not a tweak.** The entry below meters the trip at **≈ 2.0×**
+the U1 dissipation `cal_3x10_v5` was proven at, arriving as **1.40×** from the profile's heavy-band
+duty and **1.41×** from running a full pack at 24.70 V. There are only two ways out: **cut the
+watts** (the 2 kHz re-cut, which lands at 1.07× and costs the whole sweep-rate gain, 15.87 → 12.08 Hz)
+or **cut the thermal resistance**. The fan takes the second, and it is the one that keeps the speed.
+
+> **Operating rule this establishes — the pair is the specification, not the profile alone.**
+> **The 100 µs band at 3.125 kHz requires the fan running.** At **2 kHz** the geometry is safe on
+> passive cooling. Running `cal_2x11_v5.json` (3125 Hz) with the fan off reproduces the ~42 s trip
+> cycle and 37 % frame loss described below. A profile is now specified by *(delays × pack window ×
+> cooling)*, the same way §10 already makes it *(delays × pack window)*.
+
+⚠ **Four things this does not yet establish.**
+
+1. **"Appears very stable" is a short observation, and not at the bad corner.** The trip scaled with
+   pack voltage — worst at **24.70 V** — and the 2 kHz evidence it is being compared against was
+   only 132.6 s. **A full warm-up from cold on fresh cells is scheduled for 2026-08-12**, which is
+   the right test: it walks the worst thermal corner (full pack, maximum drop) and the cold-start
+   corner in one run. Until it lands, the operating rule above rests on a short observation.
+2. **`board_temp_dC` will now read much lower, and it still means nothing about U1.** The sensor is
+   on the **load resistor** — directly in the new airstream. It was already blind to the regulator
+   die (see below); the fan makes it optimistic as well as blind. **Do not read a cool board as
+   evidence the regulator is cool.** What would settle it is a thermocouple or IR read on U1's tab
+   during the 08-12 run, which costs nothing extra while the lid is off.
+3. **The noise floor has not been re-measured, and the pack feed adds a second path.** A brushless DC
+   fan is a commutating motor beside a front end whose noise floor is a first-order concern (§3,
+   §12) — the same objection that applies to a switching pre-regulator. Feeding it **directly from
+   the pack** adds a *conducted* path on top of the radiated one: its commutation current now shares
+   the `+20V` rail with everything else, upstream of D4 and FB1, and that rail is also the
+   pack-sense divider's node (§12). §3's raw figures (**± 1400 µV** on the slope, **709 µV**
+   per-sample past the lobe) are the check, and the 08-12 run can carry it at no extra cost — an air
+   capture fan-on against fan-off. **Nothing should be captured against a fan-cooled rig until this
+   is measured**, alongside §14.8's outstanding gate. If it does show up, a separate feed or local
+   decoupling for the fan is the obvious first move.
+4. **The enclosure.** §12 describes U1's dissipation as a problem specifically *"inside a sealed
+   shielded enclosure"*; forced air implies vents. What that does to the shielding is a mechanical
+   question not determined here.
+
+**Minor:** the fan is unswitched, so it is a continuous pack load whenever the pack is connected —
+order 1–2 W for a 38 mm 25 V part, and drawing most at full charge. §12's **620 streaming-minutes**
+capacity figure is therefore now slightly optimistic, and its next re-measure should state whether
+the fan was running. (2026-08-11)
+
+---
+
+### findings — U1 thermal shutdown, reproduced and metered: a profile's geometry is a thermal budget
+
+**The 2026-08-10 failure mode, reproduced on the replacement part and its larger heatsink.** The
+entry below records U1's death with the root cause *inferred* from the mitigation, because no
+post-mortem was done. This one is the same failure caught live, on the new regulator, in a session
+that was recorded end to end. **It is no longer an inference.**
+
+**What the operator measured, and it is the primary evidence.** A DMM across the +15 V output while
+`cal_2x11_v5` streamed: the rail sits at **15.22–15.3 V**, drifts slowly down to **15.0 V**, then
+**collapses to ~7 V** and recovers — repeatedly, with the TO-220 hot to the touch **even with the
+lid off**. Re-cutting the 100 µs band from 3.125 kHz to 2 kHz removed the problem entirely.
+
+**Thermal shutdown rather than current limit.** The cycle in `session_20260811_161828.csv` has
+period **42.1 s and 42.9 s**, ~15.8/18.9/19.2 s down against ~26.1/23.2/23.8 s up, and it took out
+**37 % of 1891 frames**. Four things point the same way: the regularity, the slow pre-collapse
+droop, recovery without a power cycle, and a fix that reduces *average* current. Current limit keys
+on peak current, not on time-since-start, and would not produce a slow ramp into collapse.
+
+**The signature is TX-side only, which the pedestal proves.** Comparing a healthy frame (t = 30 s)
+against a collapsed one (t = 58 s), measured above each band's own pedestal:
+
+| | healthy | collapsed | |
+|---|---|---|---|
+| band 0 (100 µs) cell 1 | +2574 mV | **−54 mV** | 47× down, now *below* the pedestal |
+| band 1 (10 µs) cell 1 | +2290 mV | +69 mV | 33× down |
+| pedestal, band 0 / band 1 | 113.0 / 111.9 mV | 117.4 / 128.9 mV | intact |
+
+The pedestal surviving means the RX front end, U5's reference and the +97 mV bias are all healthy.
+Only the drive is gone.
+
+**§7's second-order prediction, observed.** The null minimum migrates from **cell 7 to cell 2** on
+band 0 (16.92 → 11.90 µs) and from **cell 7 to cell 4** on band 1 (13.80 → 11.06 µs). §7 flagged
+exactly this as *"second-order and worth a check rather than an assumption"*: a sagging rail changes
+the initial conditions at release, hence the residue ratio `A/B`, and the crossing sits at
+`ln(A/B) / (1/τ_f − 1/τ_s)` — so the crossing time moves while ζ holds. Band 1's lobe also goes
+**shallower**, 40.1 → 32.1 mV below pedestal, the direction §7 predicts for reduced drive. *Band 0's
+lobe figure is not a clean measurement in this state* — the whole waveform has moved inside the
+sampled window, so the grid no longer straddles the minimum.
+
+**The mechanism: sweep rate and coil-drive dissipation are the same knob, not two.** Pulse width is
+fixed per band, so mean coil-drive current tracks **100 µs pulses per second** with no modelling
+assumptions:
+
+| profile | sweep | 100 µs pulses/s | wall clock driving the heavy coil |
+|---|---|---|---|
+| `cal_3x10_v5` | 12.45 Hz | 1245 | 12.45 % |
+| `cal_2x11_v5` @ 3125 Hz | 15.87 Hz | 1746 | **17.46 % — 1.40×** |
+| `cal_2x11_v5` @ 2000 Hz | 12.08 Hz | 1329 | 13.29 % — 1.07× |
+
+**Total TX on-time barely moved — 19.9 % → 19.2 %.** What moved is the *heavy band's share*.
+Dropping the 50 µs band removed the dilution that had been holding the 100 µs band at 12 % of wall
+clock. **Fewer band boundaries buys sweep rate by deleting dead time, and dead time is also the
+cooling.** §10's "fewer cells and fewer band boundaries is faster" is true and incomplete: faster is
+also hotter, and there is a ceiling.
+
+**Then multiply by the pack.** At 24.70 V the 7815 drops **9.70 V/A** against **6.89 V/A** at the
+21.89 V corner `cal_3x10_v5` was tuned at — **1.41×**. Net **≈ 2.0× the dissipation** of the
+conditions the known-good profile was proven at, which is why a profile that looked fine in delaycal
+tripped the regulator in classviz. The 2 kHz re-cut lands at **1.5×** — under the trip, still above
+the corner. **Pack voltage is therefore a thermal multiplier as well as a signal one**, and §12's
+"above ceiling" zone above 24.0 V now has a second, demonstrated reason to exist.
+
+**The fix works, and it costs the entire speed gain.** `session_20260811_163830.csv` ran 132.6 s on
+the 2 kHz cut with **11 frames below 1500 mV against 697 of 1891**, at **12.08 Hz** — statistically
+the same sweep rate as `cal_3x10_v5`'s 12.45 Hz. So `cal_2x11_v5` @ 2 kHz buys 2 bands × 11 cells at
+the 3×10 sweep rate; it does not buy a faster sweep. **Read the fan entry above before treating
+2 kHz as the only option** — forced air attacks the thermal path instead of the duty, and restores
+the 3.125 kHz cut and its 15.87 Hz. 2 kHz remains the setting that is safe *without* the fan.
+
+**Timing model, for sizing future geometries — a fit, not a measurement.** Three measured sweep
+rates on fw v4.35 solve `sweep = K·Σ(cells/freq) + O` for **K ≈ 10 pulse periods per cell** and
+**O ≈ 23.4 ms of per-sweep overhead**. Fitted on the two `2x11` points it predicts `cal_3x10_v5` at
+79.4 ms against 80.32 ms measured — 1.1 %. **One lever falls out of it and is recorded as an option,
+not a proposal:** because `O` is fixed dead time, halving `averages` shortens the sweep *and* lowers
+duty. At `averages` 16 the model puts the 3.125 kHz geometry at ~23 Hz with a heavy-band share of
+~12.7 % — thermally equivalent to `cal_3x10_v5` and nearly twice as fast, at √2 more noise (§3).
+**Untested.**
+
+⚠ **Two gaps let this run silently for 37 % of a session, and neither is fixed here.**
+*(a)* **The failsafe is blind to it by construction** — `board_temp_dC` is sensed on the load
+resistor, **not on U1**, so no telemetry sees the regulator's die. The board read a placid
+53.5–54.1 °C throughout. *(b)* **classviz's `flagged` column does not mark it.** `flagged` is a
+64-frame rolling-median glitch mask at 100 mV, so it re-centres on the collapsed level in ~4 s:
+**53 % of deep-collapsed frames carry `flagged = 0`**. A collapsed detector is quiet and stable, and
+reads as good data. **A corpus run would ingest those frames as valid** — live against §14.8, which
+already gates capture on a null-sampling profile.
+
+⚠ **This does not close §14.2's "+15 V rail under a TX pulse".** A DMM reads an average and cannot
+see per-pulse sag; the scope measurement is still the cheapest open item on the list, and it is now
+also the thing that would confirm the replacement U1 is healthy under a duty it can survive.
+
+**Also touched:** §14.3 — the 100 µs band's pulses per second rose **40 %** on a Q1 (IRF610) already
+run well above the schematic's < 2 % duty note. (2026-08-11)
+
+---
+
+### profile — `cal_2x11_v5` — 2 bands × 11 cells: the 50 µs band drops out, the early ladder gains two
+
+**Not locked, not swept, and now known to need a re-cut** — read the thermal entry above before
+using it. Two files sit untracked in `src/data/profiles/`, differing only in the 100 µs band's PRF:
+`cal_2x11_v5.json` at 3125 Hz (the one that tripped U1) and `cal_2x11_v5 thermal test.json` at
+2000 Hz (the one that does not).
+
+**Why the 50 µs band went.** Read off the classviz sample-delay-band profiles by eye, the 50 µs
+band's centre point sits essentially **on the straight line between the 100 µs and 10 µs bands** —
+so it spends a band boundary's settle budget, the dominant per-sweep cost (§8), on information the
+other two already carry. 2 × 11 = 22 channels against 3 × 10 = 30.
+
+**Why 11 cells.** `cal_3x10_v5` spent **4 cells before the null, 1 in it, 5 after**; this spends
+**6 before, 1 in it, 4 after** — two more in the early amplitude-anchored region where polarity
+separates the families (§2), one fewer on the pedestal where three interpolated points were carrying
+much the same decay-rate information.
+
+**The two new cells, and both are interpolations rather than measurements.** Cell 2 at **~1.1 V**
+fills the biggest hole in the old ladder, the 2.24 / 2.17 µs jump from 2.4 V to 0.5 V; it is placed
+at the geometric midpoint of its measured neighbours (1092 / 1095 mV) by log-linear interpolation,
+which the decay supports to ~3 % across that span. Cell 6 at **~85 / ~92 mV** fills the other hole,
+the descent into the null, and is anchored **in time** at the midpoint between cell 5 and the null
+minimum — it cannot be amplitude-matched across bands because the null depth is band-dependent
+(59 vs 69 mV). Read it as a fill-depth cell, not an amplitude anchor.
+
+**What the change buys geometrically:** pre-null gaps are now **0.86–1.13 µs across both bands**,
+against a tight 0.9 µs cluster with 2.2 µs holes either side in `cal_3x10_v5`. **Cross-band
+amplitude matching now holds for cells 1–5**; cells 6–8 are null-region and band-dependent by
+construction; cells 9–11 are a geometric time-anchored ladder (ratio 1.7834 / 1.2152 per band)
+between cell 8 and the band's longest delay. All 22 delays are exact 8 ns PWM-grid multiples with
+both duties inside the 16-bit ceiling; only the 10 µs band is near the wall, at 29.0 against
+29.095 µs.
+
+**Measured sweep rate 15.87 Hz** at 3125 Hz and **12.08 Hz** at 2000 Hz (fw v4.35), against
+`cal_3x10_v5`'s 12.45 Hz.
+
+⚠ **Open, and it must be settled before anything is captured against either file.** Both JSONs
+carry the internal `name` **`cal_2x11_v5`** with different geometry. The `profile_sha8` guard does
+distinguish them, but §10 makes the **`name` field** what corpora record and what the cross-epoch
+guard reports — so the recorded name is ambiguous between two profiles that are not comparable.
+Left as-is at the operator's direction; **no file renamed by this entry.** (2026-08-11)
+
+---
+
 ### hardware — U1 L7815CV **failed** on 2026-08-10 and was replaced like-for-like on a larger heatsink
 
 **Operator record, supplied 2026-08-11 to close the gap the Doc-rev 1.16 pass had to leave open.**
