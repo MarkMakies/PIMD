@@ -1,39 +1,69 @@
-### repo — retired profiles move to `src/data/profiles/archive/`; the live directory is the four in use
+### DESIGN.md — Doc-rev 1.16 — §18 consolidation: the null is sampled on purpose, and the retired profiles go
 
-Thirteen profiles in one flat directory had made the ClassViz and delaycal selectors unusable.
-Nine are moved to an `archive/` subdirectory; **none is deleted, and git recorded all nine as
-renames**, so history follows each file.
+Consolidation pass over the twenty entries above the 2026-08-09 marker. Net state rather than
+replay: firmware **v4.35**, classviz **v1.73**, delaycal **v1.48**, hardware **6.04 + the
+2026-08-10 RX bias mod**, operating profile **`cal_3x10_v5`**. DESIGN.md 869 → 1068 lines; the
+growth is almost entirely §7 and §10, which had to be rewritten rather than trimmed.
 
-**Archiving rather than deleting is deliberate, because deleting would reverse Doc-rev 1.15.7
-one day after it landed.** That pass restored six of these same files from git history precisely
-so "a retired lock can no longer be lost by a working-copy accident", and dropping them back out
-of the working tree is the state it moved away from. Archiving gets the selector clutter without
-touching that guarantee.
+**The substantive reversal, and it runs through six sections.** §7's "⚠ Design constraint: no
+profile may sample inside the rail" is **deleted**, along with the `sd 14.23–18.44` window it
+imposed and §17.4's ~3.5× compression fact. The 240 k bias resistor lifted air's worst case from
+clipped to **67.2 mV**, so nothing rails and no geometry has to avoid anything. In its place §7
+carries the mod itself (design number predicted +111.7 mV, measured +112.8 mV), the per-band null
+bottoms, and the case for sampling there — **6–8× steel:brass through the null against 5.8× on the
+tail, at +187 mV instead of +78 mV** for a noise floor that does not vary with delay. §2 goes from
+one discriminant to **three** (polarity → fill depth → decay rate), with the fill table and the
+opposite-slope observation that sets a placement constraint. §13's "stepping over the front end's
+own artefact" bullet becomes its opposite and says so.
 
-**It works because no tool recurses.** `pimd_classviz._list_profile_files()` and
-`pimd_delaycal`'s selector rescan both do `os.listdir(PROFILES_DIR)` filtered on `.json`, so a
-subdirectory is invisible to them — the dropdowns go from 13 entries to 4 with no code change.
-The Import Profile / Load Profile file dialogs in delaycal and rawlog open *at* `PROFILES_DIR`,
-so `archive/` stays one click away when an old lock is genuinely wanted.
+**§7's 2026-08-08 voltages are marked void, and that is a deliberate downgrade.** The air lobe
+deepened 29.3 → 38.2 mV between that capture and the bias session, which a 240 k shunt cannot do.
+The shape and the 1.149 gain are kept; the voltages are not, and §14.2's first item is now the
+front end itself. **The suspected cause — a replaced 7815 — has no changelog entry of its own**,
+so there is no record of when it happened or what went in. Recorded as a gap, not resolved.
 
-**Live (4)** — `cal_3x10_v5` (the baseline), `cal_3x10_v4_railtest` (the v4.35 regression case),
-`cal_63_air_v2` and `cal_63_air_bat_v3`. **The last two are not optional:** the two corpora in
-`src/data/corpora/` were captured against them (`gui_signatures_targets_v1_20260723.csv` and
-`gui_signatures_targets_v3_20260728_142316.csv`), and DESIGN §16's `pimd_shape --selftest` runs
-against the first. A corpus whose profile is gone cannot be interpreted — that pairing is the
-firmware↔ML contract of §10.
+**§10 is rewritten around `cal_3x10_v5`**, including the property the older locks did not have:
+cells 1–4 are amplitude-anchored **across** the three bands, so cell *n* is the same point on the
+decay in every band to ~0.2 %. Both caveats travel with it — it is **not locked**, and its anchors
+are verified only at the 21.89 V / 70.3 °C corner. The sweep-rate table gains the 30-cell figure
+(**12.30 Hz on v4.34, 12.45 Hz on v4.35**) that §10 had been explicitly missing, and drops the
+63/45-cell rows.
 
-**Archived (9)** — `cal_3x10_v1` · `v2` · `v3` · `v4` (the four superseded steps to v5),
-`cal_63_air_v1`, `cal_72_air_v2`, `cal_72_air_v3`, `cal_110_full_range_v4`,
-`sweep_100us_decay_v1`. None has a corpus. Every remaining mention of them in `src/*.py` is a
-**comment** — no tool loads a profile by name — so nothing breaks; `pimd_shape --selftest`
-re-run after the move still reports PASS on acceptance items 1-4.
+**Every superseded profile is cut as design material.** `cal_3x10_v1…v4`, `cal_3x10_v4_railtest`,
+`cal_63_air_v1`, `cal_72_air_v2/v3`, `cal_110_full_range_v4` and `sweep_100us_decay_v1` are named
+once, in §15, as out-of-tree and git-recoverable. `cal_63_air_v2` and `cal_63_air_bat_v3` stay, and
+§15 now says **why** — the two corpora were captured against them and §16's `--selftest` runs
+against the first, so a corpus whose profile is gone cannot be interpreted. §3's `[63-cell]` tags
+become `[prev-epoch]`: same warning, no dead profile names.
 
-Note `cal_3x10_v2` is archived while DESIGN §10 still describes it at length as "the operating
-profile". That is doc drift the §18 consolidation pass resolves, not a reason to keep the file
-live: `cal_3x10_v5` is the baseline as of today. (2026-08-11)
+**§14 goes from 7 open problems to 10.** New: **8** — the null's discrimination is measured at
+**0 cm only**, and nothing should be captured against a null-sampling profile until one 50 mm
+repeat on the 100 µs band confirms it (flagged as the highest-priority item, because it gates the
+corpus); **9** — `cal_3x10_v5` is unlocked and single-corner; **10** — Plan C, the differential
+bias onto the ADC's IN−, whose argument is precisely that Plan A worked. §14.5 grows a third limb:
+the bias resistor is not on the schematic either. §14.1 gains the finding that board temperature
+does not merely drift the reading, it decides where the ladder lands (46.7 % → 100 % railed on the
+same cell between 52.5 °C and 31.5 °C).
+
+**§8 and §9, minimally.** §8's v4.25 outlier-gate bullet is replaced by the v4.35 rule, stated as
+four properties to preserve rather than as the story of the latch; the v4.25 note stays as an
+explicit "do not assume this was covered". Added: the structural ~88.6 % overrun ratio, the 8 ns
+minimum cell spacing, and the `D OK` requirement. §9 changes in exactly two places, both real wire
+changes — `B` is **6 fields** since v4.35, and `D` bounds `averages` to 1..128. No rewording
+elsewhere; §11 is byte-identical.
+
+**§17 renumbered 17.1–17.23** with the six new front-end and firmware facts folded in and the
+epoch column re-tagged. **§15** corrects two things the file had wrong: `References/scope/` is
+tracked again (`20260810_bias_mod/`, the evidence behind §2 and §7) after being listed as retired,
+and `targets_v4.csv` is tracked and read by `pimd_rawlog` alone despite never being mentioned —
+flagged in place as **not** a successor to `targets_v3.csv`. `profile_3x10_timing.png` is demoted
+to history, since it renders a geometry that no longer exists. (2026-08-11)
 
 ---
+
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-11
 
 ### profile — `cal_3x10_v5` — the new baseline: nothing rails, and the null is sampled on purpose
 
@@ -167,41 +197,6 @@ of 320/200/40 µs, so `remaining` is negative on every non-boundary cell by cons
 arithmetic confirms it — 47400 − 42007 = 5393 non-overruns against 1580 sweeps × 3 boundary
 cells = 4740, i.e. the cells that do not overrun are essentially the ones receiving the settle
 budget. (2026-08-11)
-
----
-
-### profile — `cal_3x10_v4_railtest` — new — the geometry that latched, kept as a regression case
-
-**DIAGNOSTIC ONLY. Never capture a corpus against this.** The exact cell geometry of the
-`cal_3x10_v4` that latched on fw v4.34 — reconstructed byte-for-byte from the
-`# profile_json:` header of `session_20260810_174641.csv` (`profile_sha8 69d51733`), not
-retyped — so the v4.35 outlier-gate fix has a reproducible regression case. The operating
-`cal_3x10_v4` had its early cells re-cut out of saturation on 2026-08-10 (100 µs band
-8.848→10.0, 9.0→11.0, 12.8→13.0; 50 µs 7.936→9.0, 8.0→10.0, 11.904→12.0; 10 µs 5.744→7.0,
-7.0→8.0, 9.904→10.0), which is the right move for capture and removes the condition the fix
-needs to be tested against.
-
-| band | delays (µs) |
-|---|---|
-| 100 µs @ 3.125 kHz | 8.848 · 9.0 · 12.8 · 13.6 · 17.52 · 20.4 · 30.0 · 45.0 · 60.0 · 120.0 |
-| 50 µs @ 5 kHz | 7.936 · 8.0 · 11.904 · 12.8 · 16.48 · 19.2 · 24.0 · 30.0 · 41.0 · 75.0 |
-| 10 µs @ 25 kHz | 5.744 · 7.0 · 9.904 · 10.8 · 13.992 · 18.48 · 20.0 · 22.0 · 26.0 · 29.0 |
-
-**Cells 0/1 of every band sit inside ADC saturation and that is the point** — they read 8191
-codes (4999389 µV, positive full scale) and railing them is the condition under test, not a
-defect to fix here. On v4.34, cells 0-3 of every band bar ch20 froze bit-identical within ~20 s
-and never recovered. On v4.35 every channel must keep changing.
-
-**The `name` field is deliberately `cal_3x10_v4_railtest`, not `cal_3x10_v4`.** Two files
-carrying the same `name` with different geometry is precisely what DESIGN §10's "locked
-profiles are never edited in place" rule exists to prevent — `pimd_features`' cross-epoch
-`(profile_name, profile_sha8)` guard would have no way to tell the railed diagnostic geometry
-from the operating one. `threshold_v` is the 5.0 → 0.5 V placeholder ordering key carried over
-from `cal_3x10_v4` unchanged; it is not a voltage and must not be mined as one.
-
-Validated offline: geometry identical to the latched session, all 30 cells pass the firmware's
-`pulse_duties_valid()`, `threshold_v` strictly descending in every band, `averages` 32 inside
-the v4.35 `D` bound. (2026-08-11)
 
 ---
 
@@ -1068,8 +1063,6 @@ assuming the critically-damped form and fitting τ = 2RC can only ever report ζ
 2026-08-07. Cutting it made the same mistake available again. (2026-08-09)
 
 ---
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-09
 
