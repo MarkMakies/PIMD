@@ -1,3 +1,40 @@
+### repo — retired profiles move to `src/data/profiles/archive/`; the live directory is the four in use
+
+Thirteen profiles in one flat directory had made the ClassViz and delaycal selectors unusable.
+Nine are moved to an `archive/` subdirectory; **none is deleted, and git recorded all nine as
+renames**, so history follows each file.
+
+**Archiving rather than deleting is deliberate, because deleting would reverse Doc-rev 1.15.7
+one day after it landed.** That pass restored six of these same files from git history precisely
+so "a retired lock can no longer be lost by a working-copy accident", and dropping them back out
+of the working tree is the state it moved away from. Archiving gets the selector clutter without
+touching that guarantee.
+
+**It works because no tool recurses.** `pimd_classviz._list_profile_files()` and
+`pimd_delaycal`'s selector rescan both do `os.listdir(PROFILES_DIR)` filtered on `.json`, so a
+subdirectory is invisible to them — the dropdowns go from 13 entries to 4 with no code change.
+The Import Profile / Load Profile file dialogs in delaycal and rawlog open *at* `PROFILES_DIR`,
+so `archive/` stays one click away when an old lock is genuinely wanted.
+
+**Live (4)** — `cal_3x10_v5` (the baseline), `cal_3x10_v4_railtest` (the v4.35 regression case),
+`cal_63_air_v2` and `cal_63_air_bat_v3`. **The last two are not optional:** the two corpora in
+`src/data/corpora/` were captured against them (`gui_signatures_targets_v1_20260723.csv` and
+`gui_signatures_targets_v3_20260728_142316.csv`), and DESIGN §16's `pimd_shape --selftest` runs
+against the first. A corpus whose profile is gone cannot be interpreted — that pairing is the
+firmware↔ML contract of §10.
+
+**Archived (9)** — `cal_3x10_v1` · `v2` · `v3` · `v4` (the four superseded steps to v5),
+`cal_63_air_v1`, `cal_72_air_v2`, `cal_72_air_v3`, `cal_110_full_range_v4`,
+`sweep_100us_decay_v1`. None has a corpus. Every remaining mention of them in `src/*.py` is a
+**comment** — no tool loads a profile by name — so nothing breaks; `pimd_shape --selftest`
+re-run after the move still reports PASS on acceptance items 1-4.
+
+Note `cal_3x10_v2` is archived while DESIGN §10 still describes it at length as "the operating
+profile". That is doc drift the §18 consolidation pass resolves, not a reason to keep the file
+live: `cal_3x10_v5` is the baseline as of today. (2026-08-11)
+
+---
+
 ### profile — `cal_3x10_v5` — the new baseline: nothing rails, and the null is sampled on purpose
 
 **Hand-tuned in `pimd_delaycal` v1.48 Manual Nudge against fw v4.35, 2026-08-11, over a 1866 s
