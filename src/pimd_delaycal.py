@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.47
+# PIMD Delay Calibration v1.48
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -35,6 +35,7 @@
 # exported profile's notes and in the exported CSV's header block.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.48 Manual Nudge cells are type-in editable, not just −/+ steppable
 #   v1.47 pack-voltage and board-temperature gauges (P/V telemetry); sweep conditions
 #         recorded in the profile notes and the exported CSV header
 #   v1.46 calibration table rows pulse-ascending, matching the two thermal tables
@@ -107,9 +108,9 @@ from PyQt6.QtWidgets import (  # noqa: E402
 )
 from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QEvent, QIODevice, QPointF, QRectF, Qt, QTimer  # noqa: E402
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen  # noqa: E402
+from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QPainter, QPen  # noqa: E402
 
-APP_VERSION = '1.47'
+APP_VERSION = '1.48'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -277,6 +278,58 @@ def pack_zone(pack_mV):
         if pack_mV <= upper:
             return colour, caption
     return PACK_ZONES[-1][1], PACK_ZONES[-1][2]
+
+
+class NudgeCellEdit(QLineEdit):
+    """The delay readout inside a Manual Nudge cell overlay — a line edit rather
+    than a label, so a delay can be typed straight in as well as stepped with
+    the −/+ buttons.
+
+    Frameless and transparent so the QTableWidgetItem's std-dev heat colour
+    still shows through (the overlay only occludes the item visually; the item
+    stays the single source of truth). Escape or a rejected value reverts to
+    the item's text via the revert callback, so a half-typed number can never
+    be left standing as if it had been applied."""
+
+    def __init__(self, text, commit, revert, parent=None):
+        super().__init__(text, parent)
+        self._commit = commit
+        self._revert = revert
+        self.setFrame(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setValidator(QDoubleValidator(0.0, 1e6, 3))
+        self.setStyleSheet(
+            'QLineEdit { background: transparent; border: none; padding: 0px; '
+            'margin: 0px; font-size: %dpt; }'
+            'QLineEdit:focus { background: palette(base); '
+            'border: 1px solid palette(highlight); }' % TABLE_FONT_PT)
+        self.editingFinished.connect(self._on_editing_finished)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        # Deferred: a click-to-focus places the caret after focusInEvent, which
+        # would undo an immediate selectAll().
+        QTimer.singleShot(0, self.selectAll)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self._revert()
+            self.clearFocus()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        # editingFinished only fires when the validator calls the text
+        # acceptable, so an empty or half-typed entry would otherwise be left
+        # on screen looking like a set value. Put the cell's real value back.
+        if not self.hasAcceptableInput():
+            self._revert()
+        super().focusOutEvent(event)
+
+    def _on_editing_finished(self):
+        # Fires on Return and on focus-out alike; the commit callback decides
+        # whether the value is acceptable and reverts the text if not.
+        self._commit(self.text())
 
 
 class BatteryGauge(QWidget):
@@ -1013,9 +1066,10 @@ class MainWindow(QMainWindow):
 
         self.cb_manual_nudge = QCheckBox('Manual Nudge')
         self.cb_manual_nudge.setToolTip(
-            'Adds a −/+ button to every delay-table cell and colours the Std dev\n'
-            'table by value, so cells can be nudged by hand while watching the\n'
-            'result live (start THERMAL first to see the reaction).\n'
+            'Makes every delay-table cell editable -- type a delay in µs, or step\n'
+            'it with the cell\'s −/+ buttons -- and colours the Std dev table by\n'
+            'value, so cells can be set by hand while watching the result live\n'
+            '(start THERMAL first to see the reaction).\n'
             'Mutually exclusive with Auto Nudge -- enabling this stops Auto Nudge\n'
             'if it is running, and Auto cannot be started while this is checked.')
         self.cb_manual_nudge.toggled.connect(self._on_manual_nudge_toggled)
@@ -1863,12 +1917,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Manual Nudge
     #
-    # A −/+ overlay on every delay-table cell, shown only while cb_manual_
-    # nudge is checked. The underlying QTableWidgetItem (text + background
-    # colour) stays the single source of truth exactly as it is for every
-    # other table path (_fill_cell, _auto_color_cell, _build_profile) --
-    # setCellWidget only occludes it visually, so toggling Manual Nudge off
-    # reveals the plain item exactly as it was.
+    # An editable readout with −/+ buttons over every delay-table cell, shown
+    # only while cb_manual_nudge is checked. A delay can be typed straight into
+    # the cell or stepped by the buttons; both go through _apply_manual_delay.
+    # The underlying QTableWidgetItem (text + background colour) stays the
+    # single source of truth exactly as it is for every other table path
+    # (_fill_cell, _auto_color_cell, _build_profile) -- setCellWidget only
+    # occludes it visually, so toggling Manual Nudge off reveals the plain item
+    # exactly as it was.
     # ------------------------------------------------------------------
     def _on_manual_nudge_toggled(self, checked):
         # Mutually exclusive with Auto Nudge -- both want to own the profile
@@ -1884,7 +1940,7 @@ class MainWindow(QMainWindow):
             if self._thermal_state != 'running':
                 self.statusBar().showMessage(
                     'Manual Nudge on -- press THERMAL to start streaming, '
-                    'then use each cell\'s −/+ buttons.')
+                    'then type into each cell or use its −/+ buttons.')
         else:
             self._clear_manual_nudge_overlay()
             self.pb_auto.setEnabled(
@@ -1924,13 +1980,16 @@ class MainWindow(QMainWindow):
         pb_minus.clicked.connect(lambda: self._on_manual_nudge_clicked(r, c, -1))
         h.addWidget(pb_minus)
 
-        lbl = QLabel(text)
-        lbl.setObjectName('manual_nudge_label')
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        le = NudgeCellEdit(text,
+                           commit=lambda s: self._on_manual_nudge_typed(r, c, s),
+                           revert=lambda: self._revert_manual_nudge_edit(r, c))
+        le.setObjectName('manual_nudge_edit')
         font = QFont()
         font.setPointSize(TABLE_FONT_PT)
-        lbl.setFont(font)
-        h.addWidget(lbl, stretch=1)
+        le.setFont(font)
+        le.setToolTip('Type a delay in µs and press Enter (snapped to the 8 ns\n'
+                      'PWM grid), or step it with the −/+ buttons.')
+        h.addWidget(le, stretch=1)
 
         pb_plus = QPushButton('+')
         pb_plus.setFixedSize(14, TABLE_ROW_PX - 2)
@@ -1940,6 +1999,18 @@ class MainWindow(QMainWindow):
         h.addWidget(pb_plus)
 
         return w
+
+    def _manual_nudge_edit(self, r, c):
+        widget = self.table.cellWidget(r, c)
+        return widget.findChild(NudgeCellEdit, 'manual_nudge_edit') if widget else None
+
+    def _revert_manual_nudge_edit(self, r, c):
+        """Put the cell item's text back into its editor -- the item is the
+        source of truth, so this undoes any typing that was not applied."""
+        le = self._manual_nudge_edit(r, c)
+        item = self.table.item(r, c)
+        if le is not None and item is not None and le.text() != item.text():
+            le.setText(item.text())
 
     def _on_manual_nudge_clicked(self, r, c, sign):
         item = self.table.item(r, c)
@@ -1952,7 +2023,43 @@ class MainWindow(QMainWindow):
 
         step_us   = self.sp_manual_nudge_ns.value() / 1000.0
         new_delay = _snap_8ns(old + sign * step_us)
+        self._apply_manual_delay(r, c, old, new_delay,
+                                 f'{sign * self.sp_manual_nudge_ns.value():+d} ns → ')
 
+    def _on_manual_nudge_typed(self, r, c, text):
+        """A delay typed straight into a cell. Same apply path as the −/+
+        buttons -- snapped to the 8 ns grid, PWM-validated, then pushed to the
+        running stream -- so typing and stepping cannot diverge."""
+        item = self.table.item(r, c)
+        # The guard also covers the focus-out that tearing the overlay down
+        # emits: leaving Manual Nudge discards an uncommitted edit rather than
+        # applying it on the way out.
+        if item is None or not self.cb_manual_nudge.isChecked():
+            return
+        try:
+            new_delay = _snap_8ns(float(text))
+        except ValueError:
+            self._revert_manual_nudge_edit(r, c)
+            return
+        try:
+            old = float(item.text())
+        except ValueError:
+            old = None          # cell was blank / 'N/R' -- typing gives it a value
+
+        if old is not None and abs(new_delay - old) < 1e-9:
+            # Unchanged (or only re-snapped): repaint the editor in case the
+            # typed text differed in formatting, but don't reconfigure the
+            # stream and don't spend a log line on it.
+            self._revert_manual_nudge_edit(r, c)
+            return
+
+        self._apply_manual_delay(r, c, old, new_delay, 'typed → ')
+
+    def _apply_manual_delay(self, r, c, old, new_delay, prefix):
+        """Validate and apply new_delay to cell (r, c); shared by the −/+
+        buttons and by a typed-in value. `old` is the pre-edit delay (None if
+        the cell had none) and is only used for the refusal message."""
+        old_str = f'{old:.3f} µs' if old is not None else 'its previous value'
         if r < len(self._fp_pairs):
             freq_hz, pulse_us = int(round(self._fp_pairs[r][0] * 1000)), self._fp_pairs[r][1]
             dd, sd = _compute_pulse_duties(pulse_us, new_delay, freq_hz)
@@ -1968,24 +2075,23 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f'Nudge refused: {new_delay:.3f} µs exceeds the PWM duty limit for '
                     f'{freq_hz}Hz/{pulse_us:.1f}µs (max ≈ {max_str}) -- cell left at '
-                    f'{old:.3f} µs.')
+                    f'{old_str}.')
                 self._log(f'Manual nudge refused: {freq_hz}Hz/{pulse_us:.1f}µs @ '
                           f'{new_delay:.3f} µs invalid (sample_duty={sd} > 65535, '
-                          f'max ≈ {max_str}); cell left at {old:.3f} µs.')
+                          f'max ≈ {max_str}); cell left at {old_str}.')
+                self._revert_manual_nudge_edit(r, c)
                 return
 
+        item = self.table.item(r, c)
         item.setText(f'{new_delay:.3f}')
 
-        widget = self.table.cellWidget(r, c)
-        if widget:
-            lbl = widget.findChild(QLabel, 'manual_nudge_label')
-            if lbl:
-                lbl.setText(f'{new_delay:.3f}')
+        le = self._manual_nudge_edit(r, c)
+        if le is not None:
+            le.setText(f'{new_delay:.3f}')
 
         band = (self._row_label(*self._fp_pairs[r]) if r < len(self._fp_pairs) else f'row{r}')
         volt = (f'{self._targets_v[c]:.1f}V' if c < len(self._targets_v) else f'col{c}')
-        self._log(f'Manual nudge {band} / {volt}: '
-                  f'{sign * self.sp_manual_nudge_ns.value():+d} ns → {new_delay:.3f} µs')
+        self._log(f'Manual nudge {band} / {volt}: {prefix}{new_delay:.3f} µs')
 
         if self._thermal_state == 'running':
             self._manual_push_profile()

@@ -1,3 +1,87 @@
+### profile — `cal_3x10_v4` — the first three delays of every band move out of ADC saturation
+
+The early cells were re-cut by hand in `pimd_delaycal` v1.48 (file saved 2026-08-10 18:06:30; the
+profile's own `notes` records the session — no sweep, delays imported or edited by hand, pack
+23.39→23.18 V, board 64.4→55.5 °C). Cells 3-9 of every band are unchanged.
+
+| band | cells 0 · 1 · 2 — was | now |
+|---|---|---|
+| 100 µs @ 3.125 kHz | 8.848 · 9.0 · 12.8 | **10.0 · 11.0 · 13.0** |
+| 50 µs @ 5 kHz | 7.936 · 8.0 · 11.904 | **9.0 · 10.0 · 12.0** |
+| 10 µs @ 25 kHz | 5.744 · 7.0 · 9.904 | **7.0 · 8.0 · 10.0** |
+
+**This closes the saturation problem the v3 entry flagged and left open** ("the first cells of
+every band sit inside the saturated region and are unverified"). On the old ladder, cells 0/1 of
+every band read a flat 8191 codes — 4999389 µV, positive full scale — which is a limit rather
+than a measurement; the geometry is preserved as `cal_3x10_v4_railtest` and the evidence is in
+the v4.35 findings entry above.
+
+**Evidence for the re-cut ladder is one REPL frame, not a recorded session** — `W5,582028,`
+`4388599,2841510,759563,483531,64315,83847,…`, whose largest cell is 4.39 V against a 5.0 V rail,
+with the null visible as the 64 mV dip at cell 4 (17.52 µs) recovering to 84 mV at cell 5. That
+is consistent with clearing the rail on all three bands, but it is a single frame and **no
+capture session has been recorded against this ladder yet.** The rationale for these particular
+values is the operator's and is not recorded here; the ClassViz v1.73 rail readout is the quick
+way to confirm the ladder stays clear across pack state and board temperature, which the v4.35
+findings entry shows is exactly what moves it — `cal_3x10_v3` still rails ch0/ch10 at today's
+31 °C (`session_20260811_095143.csv`). (2026-08-10)
+
+---
+
+### src/pimd_delaycal.py — v1.48 — Manual Nudge cells take a typed delay, not just −/+ steps
+
+In Manual Nudge, reaching a delay that is far from the calibrated one meant clicking −/+ dozens of
+times (the step is capped at 9600 ns, and each click reconfigures the running stream). The cell
+readout in the overlay is now a `NudgeCellEdit` (a frameless, transparent `QLineEdit`) instead of a
+`QLabel`: **type a delay in µs, press Enter, done**. Transparent and frameless so the item's std-dev
+heat colour still shows through — the `QTableWidgetItem` remains the single source of truth, the
+overlay only occludes it, exactly as before. Focus selects the existing value so typing replaces it;
+the editor gets a visible border and a solid background only while focused.
+
+Typing and stepping share one apply path, `_apply_manual_delay()`, factored out of
+`_on_manual_nudge_clicked()`: snap to the 8 ns PWM grid → `_pulse_duties_valid()` pre-check → write
+the item → log → `_manual_push_profile()`. So a typed value cannot bypass the duty-limit refusal
+that protects against the firmware silently rejecting the whole `D` command (v1.41). A refusal, a
+non-numeric entry, or Escape reverts the editor to the item's text, so a half-typed number is never
+left standing as if it had been applied — `editingFinished` only fires on validator-acceptable
+input, so `focusOutEvent` reverts the unacceptable rest. Leaving Manual Nudge discards an
+uncommitted edit rather than applying it on the way out (the commit path is guarded on
+`cb_manual_nudge.isChecked()`). A value re-typed identically is a no-op — no log line, no
+reconfigure. A blank or `N/R` cell can now be given a delay by typing, which the −/+ buttons
+(needing a number to step from) still cannot do.
+
+Space-to-capture-baseline was already guarded against `QLineEdit` focus (v1.39), and `NudgeCellEdit`
+is a `QLineEdit`, so typing in a cell does not capture a Compare baseline. Verified headless
+(offscreen Qt): grid snapping 12.345 → 12.344, refusal at 39.0 µs on 25 kHz/10 µs (max ≈ 29.095 µs)
+leaving the cell untouched, garbage reverting, `N/R` accepting a typed value, −/+ still stepping
+through the shared path, and an uncommitted edit discarded on exit. The transparent-background
+colour show-through is the one thing offscreen rendering can't confirm — check it on the bench.
+(2026-08-10)
+
+---
+
+### profile — `cal_3x10_v4` — `threshold_v` is now an obvious placeholder countdown
+
+The `threshold_v` list in all three bands was still the measured ladder inherited from
+`cal_3x10_v1` — `4.85 · 2.17 · 1.05 · 0.48 · 0.19 · 0.07 · 0.017 · 0.016 · 0.015 · 0.014`. Those
+numbers are meaningless for `cal_3x10_v4` (nothing was swept against it and no threshold crossing
+was measured for any cell), but they still *read* as real measurements, and the bunched
+0.017→0.014 tail rendered as four near-identical `{:.3f}V` cell labels in `pimd_classviz`. Replaced
+with a plain **5.0 → 0.5 V countdown in 0.5 V steps**, the same synthetic-ladder idiom already used
+at `pimd_classviz.py:558`. The `notes` field now states outright that the field is a placeholder and
+an ordering key only.
+
+Nothing load-bearing moved. `threshold_v` is consumed three ways: as the cell ordering key
+(`argsort(-threshold_v)` in `pimd_classviz`, `sort by -threshold_v` in `pimd_shape` /
+`pimd_corpus_check`), which needs only strict descent — preserved, and the sort is still the
+identity permutation; as a unique `(freq_hz, pulse_us, threshold_v)` dict key in
+`pimd_delaycal._profile_cells` — still 30 distinct keys; and as `_nominal_baseline_uv` behind the
+optional `nominal` baseline mode and the crossings label, both of which were already meaningless
+against placeholder voltages and remain so. Delays, band geometry and the 8 ns grid are untouched.
+(2026-08-10)
+
+---
+
 ### .gitignore — KiCad auto-backup zips are ignored
 
 `Electronics/**/*-backups/` — KiCad writes a timestamped zip into `<project>-backups/` every time the

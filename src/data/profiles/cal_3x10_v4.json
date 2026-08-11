@@ -1,0 +1,91 @@
+{
+  "name": "cal_3x10_v4",
+  "notes": "No sweep this session \u2014 delays as imported or edited by hand. Saved 2026-08-10 18:06:30, delaycal v1.48. Sweep parameters: start 4.00 \u00b5s, coarse step 0.8 \u00b5s, fine step 40 ns, max delay 200.0 \u00b5s, averages N=32, signal detect 5.0 V. Auto Nudge parameters: threshold 1.30 mV, step 800 ns, soak 5 s, max iter 20, parallel, std dev N=8. Conditions since connect: pack 23.39\u219223.18 V (min 22.77), board 64.4\u219255.5 \u00b0C (max 74.7). Geometry: 3 bands \u00d7 10 thresholds = 30 cells; thresholds 5 \u2192 0.5 V.",
+  "averages": 32,
+  "bands": [
+    {
+      "freq_hz": 3125,
+      "pulse_us": 100.0,
+      "delays_us": [
+        10.0,
+        11.0,
+        13.0,
+        13.6,
+        17.52,
+        20.0,
+        30.0,
+        45.0,
+        60.0,
+        120.0
+      ],
+      "threshold_v": [
+        5.0,
+        4.5,
+        4.0,
+        3.5,
+        3.0,
+        2.5,
+        2.0,
+        1.5,
+        1.0,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 5000,
+      "pulse_us": 50.0,
+      "delays_us": [
+        9.0,
+        10.0,
+        12.0,
+        12.8,
+        16.48,
+        19.0,
+        24.0,
+        30.0,
+        41.0,
+        75.0
+      ],
+      "threshold_v": [
+        5.0,
+        4.5,
+        4.0,
+        3.5,
+        3.0,
+        2.5,
+        2.0,
+        1.5,
+        1.0,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 25000,
+      "pulse_us": 10.0,
+      "delays_us": [
+        7.0,
+        8.0,
+        10.0,
+        10.8,
+        13.992,
+        18.4,
+        20.0,
+        22.0,
+        26.0,
+        29.0
+      ],
+      "threshold_v": [
+        5.0,
+        4.5,
+        4.0,
+        3.5,
+        3.0,
+        2.5,
+        2.0,
+        1.5,
+        1.0,
+        0.5
+      ]
+    }
+  ]
+}
