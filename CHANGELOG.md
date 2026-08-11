@@ -1,3 +1,87 @@
+### hardware — U1 L7815CV **failed** on 2026-08-10 and was replaced like-for-like on a larger heatsink
+
+**Operator record, supplied 2026-08-11 to close the gap the Doc-rev 1.16 pass had to leave open.**
+The +15 V coil-drive regulator **died**; the replacement is the same L7815CV part with a **larger
+heatsink**. It failed **about the same time the 240 k bias resistor was fitted**, which is why the
+two changes are confounded in the 2026-08-10 session and why this entry matters more than a parts
+note would.
+
+**This was predicted, in writing, and the prediction was cut from DESIGN.md as history two weeks
+later.** The 2026-07-24 6S entry recorded that adding a cell rather than replacing like-for-like
+would **roughly double U1's dissipation, ≈ 2.5 W → ≈ 4.6 W** at the measured ~0.5 A average,
+**inside a sealed shielded enclosure, on a project whose first open problem is thermal drift.**
+Doc-rev 1.15.6 kept that bullet deliberately, calling it "the one place the enclosure does bite, and
+a live concern, not a stale measurement". **Doc-rev 1.15.7 cut it as duplicated history on
+2026-08-10.** The part died the same day. The larger heatsink is the mitigation that bullet implied,
+so the bullet goes back into §12 as a **failure record**, not as background.
+
+**It explains the lobe deepening, and in the right direction.** The Doc-rev 1.16 pass voided §7's
+2026-08-08 voltages because air's lobe went **29.3 → 38.2 mV** below quiescent between that capture
+and 2026-08-10, which a 240 k shunt cannot do — it attenuates ~2 %, making a lobe *shallower*. A
+degraded 7815 does exactly the opposite: it sags the +15 V rail under pulse load, which cuts coil
+drive, which cuts flyback and decay amplitude, which makes the lobe **shallower**. So the 08-08
+capture reads as **the compromised measurement and 08-10 as the healthy one** — the direction fits
+and the void stands, now for a specific reason rather than an unexplained step.
+
+⚠ **Consistent, not proven, and the onset is unknown.** Nothing here establishes *when* the part
+began to degrade — only when it finally died. A regulator can fail abruptly from a healthy state, in
+which case 08-08 was fine and the deepening needs another explanation. **This cannot be settled from
+the record; it needs the scope measurement §12 has been carrying as unmade** — the +15 V rail
+during a TX pulse, which would have caught a sagging rail directly. That measurement is now the
+cheapest way to confirm the new part is healthy as well as to establish the floor it was written for.
+
+**What survives, and it is the split the consolidation already made.** ζ = 1.06 and the pole ratio
+are properties of the RX network (R1, L, C) and **do not depend on drive amplitude** — a linear
+RLC's poles do not move with excitation. So "the shape stands, the voltages do not" is *reinforced*
+by this, not overturned. **One second-order caveat worth a check rather than an assumption:** a
+sagging rail changes the *initial conditions* at release, hence the residue ratio A/B, and the zero
+crossing sits at `ln(A/B) / (1/τ_f − 1/τ_s)` — so the **crossing time** can move while ζ holds. The
+per-band null bottoms now in §7 (17.52 / 16.10 / 13.99 µs) were measured on 2026-08-10, i.e. on the
+new part, so they are current either way.
+
+**Everything current is post-swap, which is the good news.** `cal_3x10_v5` was hand-tuned 2026-08-11
+and the v4.35 bench verification ran 2026-08-11, both on the new regulator. The 2026-08-10 bias
+session is the only one where ordering is ambiguous — but its measured quiescent of **+112.8 mV**
+against a predicted **+111.7 mV** implies a healthy 5 V reference and a sane rail at that point, so
+those figures are most likely post-replacement too. Not asserted: the operator's ordering within
+that day is what settles it.
+
+**No post-mortem was done, so the root cause is inferred from the mitigation.** Doubled dissipation
+in a sealed enclosure is a sufficient explanation and a larger heatsink is the matching fix, but
+nothing confirms it — and if the cause was something else (an input transient, or **C18 sitting at
+~100 % of its 25 V rating on the same rail, §14.4**), it can recur. **Two consequences to watch:**
+the larger heatsink changes U1's thermal mass, so the warm-up and soak figures in §3 and the thermal
+drift fingerprint in §14.1 may have shifted; and this is now a **known failure mode of the 6S
+decision**, not a hypothetical cost of it. (2026-08-11, event 2026-08-10)
+
+---
+
+### DESIGN.md — Doc-rev 1.16.1 — the 7815 failure is recorded; §12's cut dissipation bullet comes back
+
+Post-consolidation correction, on the 1.13.1 / 1.15.1 precedent. **No new bench data** — it lands
+the operator record above into the four places Doc-rev 1.16 had written around it.
+
+**Hardware rev line** gains `U1 L7815CV replaced 2026-08-10 (failed; larger heatsink)`.
+
+**§7's void paragraph** said the deepened lobe meant "the replaced 7815 is the likely cause" with a
+parenthetical that the swap "has no changelog entry of its own; it is known only as an aside". Both
+are now wrong. It states the mechanism instead — a degraded regulator sags the rail, cutting drive
+and making the lobe shallower, so 08-08 is the compromised capture — with the onset flagged as
+unestablished and the +15 V pulse-load scope measurement named as what settles it.
+
+**§14.2** loses "the regulator swap has no changelog entry, so there is no record of when it
+happened or which part went in" and gains the date, the part and the open question of *why* it
+died. **§14.4 (C18)** gains a line noting it sits on the rail feeding the regulator that just
+failed, so it is a candidate contributor rather than an independent item.
+
+**§12 gets the dissipation bullet back**, which is the substantive change. It was cut at 1.15.7 as
+duplicated history; the part it described failed the same day. It returns as **≈ 2.5 W → ≈ 4.6 W
+inside a sealed enclosure — and U1 failed under it on 2026-08-10**, with the larger heatsink as the
+fitted mitigation. The lesson is recorded in place: **a standing risk that has not yet fired reads
+as history right up until it does.** (2026-08-11)
+
+---
+
 ### DESIGN.md — Doc-rev 1.16 — §18 consolidation: the null is sampled on purpose, and the retired profiles go
 
 Consolidation pass over the twenty entries above the 2026-08-09 marker. Net state rather than

@@ -1,8 +1,15 @@
 # Pulse Induction Metal Detector (PIMD)
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** · **Firmware:** v4.35 · **PC tools:** gui v4.17 · classviz v1.73 · delaycal v1.48 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v5` (2026-08-11, 3 × 10 = 30 cells, **not locked, no corpus**). Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** · **Firmware:** v4.35 · **PC tools:** gui v4.17 · classviz v1.73 · delaycal v1.48 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_3x10_v5` (2026-08-11, 3 × 10 = 30 cells, **not locked, no corpus**). Bump this line on every edit.
 **Last bench update:** 2026-08-11 (bias mod fitted and characterised; fw v4.35 bench-verified; `cal_3x10_v5` hand-tuned)
+**Doc rev:** 1.16.1 (2026-08-11) — post-consolidation correction: **U1 (the +15 V regulator) failed
+on 2026-08-10** and was replaced like-for-like on a larger heatsink. That is the explanation for
+§7's voided voltages, in the right direction — a sagging rail makes the lobe *shallower*, so
+2026-08-08 is the compromised capture. **§12's U1 dissipation bullet, cut at 1.15.7 as duplicated
+history, is restored as a failure record**: it predicted this failure and the part died the same day
+the bullet was removed.
+
 **Doc rev:** 1.16 (2026-08-11) — **§18 consolidation.** The front end is **biased +97 mV** (§7), so
 its negative lobe now sits inside the linear window instead of on the output rail. That reverses the
 constraint the last three profiles were built around: **"no profile may sample inside the rail" is
@@ -16,7 +23,8 @@ its own account (§14.2). Every superseded profile is **cut as design material**
 the two `cal_63*` files that remain exist solely because the two corpora were captured against them.
 
 *Rev lineage (detail in `CHANGELOG.md`):*
-*1.15.7 — content already carried by `CHANGELOG.md` cut · 1.15.6 — the 2026-07-13 enclosure is not a
+*1.16 — §18 consolidation; the rail constraint retired, superseded profiles cut ·
+1.15.7 — content already carried by `CHANGELOG.md` cut · 1.15.6 — the 2026-07-13 enclosure is not a
 measurement epoch · 1.15.5 — §10 epoch ledger dropped; §3 epoch tags condensed · 1.15.4 — §13/§10
 design principles corrected, they described the retired profile · 1.15.3 — staleness audit; R1 is
 1.5k ∥ 10k as built; ζ shown independent of R · 1.15.1 — legacy critical-damping figure withdrawn as
@@ -345,10 +353,24 @@ volt-scale region and does not extrapolate past it.**
 
 ⚠ **The 2026-08-08 *voltages* are void; only the shape and the gain carry.** Between that capture
 and 2026-08-10 the air lobe deepened **29.3 → 38.2 mV below quiescent**, and the bias cannot do
-that — a 240 k shunt attenuates ~2 %, which makes a lobe shallower, not deeper. **The replaced 7815
-is the likely cause**, which means the pole fit itself wants re-taking on its own account,
-independently of the mod (§14.2). *(That regulator swap has no changelog entry of its own; it is
-known only as an aside in the 2026-08-10 bias-mod findings.)*
+that — a 240 k shunt attenuates ~2 %, which makes a lobe shallower, not deeper. **U1 (the +15 V
+coil-drive regulator) failed on 2026-08-10 and was replaced**, and that fits in the right direction:
+a degraded regulator sags the rail under pulse load, cutting coil drive, flyback and decay
+amplitude, which makes the lobe **shallower**. On that reading **2026-08-08 is the compromised
+capture and 2026-08-10 the healthy one**, and the pole fit wants re-taking on its own account,
+independently of the mod (§14.2).
+
+⚠ **Consistent, not proven — the onset is unknown.** Nothing establishes *when* the part began to
+degrade, only when it died; an abrupt failure from a healthy state would leave 08-08 fine and the
+deepening unexplained. **This cannot be settled from the record.** What settles it is the scope
+measurement §12 has carried as unmade: the **+15 V rail during a TX pulse**, which sees a sagging
+rail directly and would equally confirm the new part is healthy.
+
+**What the failure does *not* touch:** ζ and the pole ratio are properties of the RX network
+(R1, L, C) and do not depend on drive amplitude — a linear RLC's poles do not move with excitation.
+*Second-order and worth a check rather than an assumption:* a sagging rail changes the initial
+conditions at release, hence the residue ratio `A/B`, and the zero crossing sits at
+`ln(A/B) / (1/τ_f − 1/τ_s)` — so the **crossing time** can move while ζ holds.
 
 ### The +97 mV bias mod — built and characterised *(2026-08-10)*
 
@@ -728,6 +750,20 @@ regulation across the whole usable discharge.
 
 - **Working discharge floor 21.0 V** (3.5 V/cell) — comfortably above the ≈ 18 V at which the 7815
   loses headroom, and coincident with the cells' own useful-capacity limit.
+- ⚠ **The cost of 6S is U1's dissipation, and U1 has now failed under it.** Adding a cell rather
+  than replacing like-for-like roughly **doubled the dissipation in the 7815, ≈ 2.5 W → ≈ 4.6 W** at
+  the measured ~0.5 A average, **inside a sealed shielded enclosure**, on a project whose first open
+  problem is thermal drift. **U1 died on 2026-08-10** and was replaced like-for-like on a **larger
+  heatsink** — the mitigation that cost implies. No post-mortem was done, so doubled dissipation is
+  the inferred cause rather than the established one; if it was something else (an input transient,
+  or C18 at ~100 % of rating on the same rail, §14.4) it can recur. **Treat this as a known failure
+  mode of the 6S decision, not a hypothetical one**, and note the larger heatsink changes U1's
+  thermal mass, so the warm-up figures in §3 and the drift fingerprint in §14.1 may have shifted.
+- **The unmade measurement this failure argues for:** a scope on the **+15 V rail during a TX
+  pulse**, fresh pack vs near-flat. It establishes the real discharge floor (a depleted pack's
+  internal resistance may sag the rail at the pulse instant in a way a DMM cannot show), it would
+  have caught a degrading regulator directly, and it is now the cheapest way to confirm the
+  replacement is healthy (§7, §14.2).
 
 ### Pack-voltage sense and failsafe — built and calibrated *(fw v4.29–v4.32)*
 
@@ -832,9 +868,13 @@ nominal OCV shape rather than a measured one.
 
 2. **Re-measurement backlog. First item is now the front end itself.** §7's 2026-08-08 scope
    voltages are **void**: the air lobe deepened 29.3 → 38.2 mV between that capture and 2026-08-10,
-   which the bias cannot cause, and the replaced 7815 is the suspect. **The two-pole fit wants
-   re-taking on the current hardware**, and the regulator swap itself has no changelog entry — so
-   there is no record of when it happened or which part went in. Also open, in order: the **filtered
+   which the bias cannot cause, and **U1's failure and replacement that day is the explanation that
+   fits the direction** (§7). **The two-pole fit wants re-taking on the current hardware.** Two
+   questions ride with it: **when did U1 start degrading** — unknown, and it bounds how far back the
+   contamination reaches — and **why did it die**, since no post-mortem was done and doubled
+   dissipation (§12) is inferred from the mitigation rather than confirmed. The **+15 V rail under
+   a TX pulse** answers the first and validates the new part; it is the cheapest measurement on this
+   list. Also open, in order: the **filtered
    path's two unreconciled figures** (§3's ≈ ±200 µV against §7's ≈ ±450 µV for the same SDOA path,
    2.25× apart, with §7's boxcar arithmetic built on the larger — nothing downstream depends on it,
    which is how it survived, but one of them is wrong); the §12 supply-noise table's **5S battery
@@ -847,7 +887,9 @@ nominal OCV shape rather than a measured one.
    warranted.
 
 4. **C18 under-rated.** 4700 µF **25 V** on a rail that reaches 25.2 V on a fresh pack. 35 V
-   replacement identified, not fitted.
+   replacement identified, not fitted. **It sits on the `+20V` rail feeding the regulator that
+   failed on 2026-08-10** (§12), so it is a candidate contributor to that failure rather than an
+   independent tidy-up — untested either way, since no post-mortem was done.
 
 5. **The schematic no longer matches the build in three places, all at the RX front end.**
    *(a)* **The 240 k bias resistor from 5V-REF to U3A pin 3 is not drawn at all** *(§7)* — the
