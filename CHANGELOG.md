@@ -1,7 +1,7 @@
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-12
-**The user undertook a full and independent review of document and rewrote/culled many sections.
+**The user undertook a full and independent review of document and rewrote/culled many sections.**
 
 ---
 

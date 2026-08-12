@@ -511,11 +511,6 @@ python pimd_rawlog.py     # raw verbatim session logger — ground truth for off
 # Offline: registry validation (-f is required; there is no default)
 python pimd_target_check.py -f data/targets/targets_v3.csv
 
-# Offline: feature-maths acceptance check. NOTE: expectations are hard-coded from
-# the 2026-07-23 63-cell analysis, so this FAILs against any other epoch. This is
-# why cal_63_air_v2.json is still in the repo (§15).
-python pimd_shape.py --selftest data/corpora/gui_signatures_targets_v1_20260723.csv
-
 # Offline: corpus acceptance checks (exit 1 on any FAIL, so it can gate a capture day).
 # NOTE: the v3-corpus FAILs were never diagnosed. Read the table, not the exit code.
 python pimd_corpus_check.py data/corpora/<corpus>.csv
