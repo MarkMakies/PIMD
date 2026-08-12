@@ -3,7 +3,7 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **38 mm forced-air fan on the U1/FET cluster — mandatory, fitted 2026-08-11, used in all cases** · **Firmware:** v4.35 · **PC tools:** gui v4.17 · classviz v1.73 · delaycal v1.48 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
 **Last bench update:** 2026-08-11 (bias mod fitted and characterised; fw v4.35 bench-verified; `cal_2x11_v5` hand-tuned)
-**Doc rev:** 2.0.1 (2026-08-12) Manual cleanup, corrected after audit
+**Doc rev:** 2.1 (2026-08-12) Mini consolidation: thermal/battery sweep results into §3, §10, §12, §17
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -72,20 +72,42 @@ that air and non-ferrous do not have.
   against the amplifier's 2.441 mV output floor, all three bands, now has ≥ 65 mV of headroom underneath it.
 - **Sample-timing precision** ≈ **5 ns** *(measured)*.
 - **Thermal drift** ≈ **−50 µV/s** at 10 kHz / 20 µs *(measured)*. 
-- **Standard Operating Conditions (SoC):** Mode 1 · 10.0 kHz / 20.0 µs pulse / 10.0 µs delay /
+- **Noise floor ≈ 65 µV** *(measured 2026-08-12, `cal_2x11_v5`, 32 × 256 averaging, 32-sweep σ)* —
+  flat across every null/pedestal cell and **independent of delay**, i.e. **37× below** the 2.441 mV
+  amplifier output floor. **Null-cell SNR ≈ 1000 : 1.** Band 0's largest cell is ~3× noisier than
+  band 1's at the same amplitude (93 vs 38 ppm) — unexplained. Noise does **not** rise as the pack
+  falls.
+- **Warm-up from cold: allow 10 min** *(measured 2026-08-12, 6S pack)*. Band-0 mean is **+12.2 %
+  high at switch-on** and settles with **τ = 2.15 min** — 2 % at 3.9 min, **1 % at 5.4 min, 0.5 % at
+  6.9 min**, 0.2 % at 8.8 min. Total excursion: band 0 **−7.6 %**, band 1 **−0.46 %**. The DS18B20
+  reaches its final reading at **4.9 min, well before the signal settles**. *(Supersedes the 4 min
+  figure, which was taken on the retired 20 V bench supply and lands at only ~2 %.)*
+- **Standard Operating Conditions:** Mode 1 · 10.0 kHz / 20.0 µs pulse / 10.0 µs delay /
   DS 256 · coil in air, no targets. Reference capture:
-  `References/images/GUI-steady-state-256-1024.jpg`. Two caveats, both live: the **4 min warm-up**
-  figure was established on the **20 V bench supply that no longer exists** and **warm-up is longer
-  on the 6S pack** 
-- **Board temperature moves the operating point, and it moves it *up* on cooling** *(measured
-  2026-08-10/11)*.
+  `References/images/GUI-steady-state-256-1024.jpg`.
+- **Board temperature moves the operating point — but the DS18B20 does not predict it** *(measured
+  2026-08-12)*. At the **same indicated 44.1 °C** band-0 mean read 543.8 and 533.9 mV five minutes
+  apart: **1.8 % spread at identical sensor temperature**. Bulk warm-up and airflow changes move
+  band 0 in **opposite directions** against the same sensor — nudging the fan off the U1/FET cluster
+  took the sensor 41.0 → 46.0 °C and band 0 **+3.7 %**, where warm-up over that span moves it down.
+  A single µV/°C referred to this sensor is therefore **not well defined**. Which component dominates
+  is **not determinable from the logs** — it needs a thermocouple on U1/Q1.
+- **The fan mount is measurement-critical.** A slight nudge is worth **3.7 % on band 0** — more than
+  the entire discharge range (below) and more than many target effects. It needs a fixed mount.
+- **State of charge barely reaches the operating point** *(measured 2026-08-12, at flat board
+  temperature, two windows spanning 23.05 → 19.07 V)*: **~1 mV/V grid mean** (0.17–0.23 %/V), one
+  sign. Total movement across a full 2.1 V discharge window is **−0.69 %** grid mean / −0.81 % band 0
+  / −0.54 % band 1. **Thermal drift dominates supply drift by ~10×.**
+- **Full-scale headroom:** the coldest capture of 2026-08-12 was **3633 mV at 19.5 °C** on a full
+  pack — the day's maximum on any cell, **1367 mV (27 %) below** the 5.000 V full scale. Nothing
+  railed or floored in 3.1 h of pulsing. **Untested below 19 °C.**
 
 ---
 
 ## 4. System block diagram (text)
 
 ```
- 6S Li-ion (19.8–25.2 V, working floor 21.0 V)
+ 6S Li-ion (19.8–25.2 V, working floor 19.0 V)
         │  F1 2A ─ D4 reverse-prot ─ FB1 ──► `+20V` rail (raw pack, after fuse + toroid — feeds
         │                                     the three linear regs below and GPIO26's divider)
         ├── U1 L7815CV ──► +15 V  (coil drive rail)
@@ -350,8 +372,12 @@ count does *not* imply comparability — comparability rests entirely on the
 
 #### cal_2x11_v5 — Cell / Zone / Delay Range / Anchor Table
 
-Derived on paper, 2026-08-11. 2 bands × 11 cells (22 cells total). **Not swept or bench-verified.**
+Derived on paper, 2026-08-11. 2 bands × 11 cells (22 cells total). **Not swept**, but bench-run for
+3.1 h on 2026-08-12 with zero flagged rows in 63 813 uninterrupted sweeps.
 The sole profile in use — no other geometry is current.
+
+**Sweep rate: 16.13 Hz** (62.0 ms/sweep) *(measured 2026-08-12)*, against 12.45 Hz for the retired
+`cal_3x10_v5` — **+29.6 %**, confirming the rate rise the two-band plan was designed for.
 
 **Runs at 3.125 kHz on the 100 µs band, and requires the cooling fan running.** Without the fan,
 this band trips the +15 V regulator (U1) on a ~42 s cycle. The fan is a mandatory part of the
@@ -403,12 +429,25 @@ build (hardware-rev line) and runs in all cases — there is no fan-off operatin
 
 Input: **6S Li-ion (19.8–25.2 V)** — 18650 cells (ICR18650-26C, recovered laptop cells). F1 2 A, D4
 1N4004 reverse protection, FB1 ferrite bead. A **dedicated** battery powers the detector; the
-rover's 40 V supply was too noisy.
+rover's 40 V supply was too noisy.  **Confirmed 2026-08-12:** The 15V rail held 15.20 V from
+24.69 V down to 19.07 V and the operating point moved **−0.8 % across a 2.1 V pack swing** (§3).
 
-**Why 6S.** At 5S (16.5–21 V) the pack falls below the L7815's dropout headroom over the back half
-of its discharge, so coil drive — and therefore decay amplitude, and therefore the voltage each
-amplitude-anchored delay lands on — sags with state of charge. 6S holds the +15 V rail in
-regulation across the whole usable discharge.
+**Measured envelope** *(2026-08-12, full charge → 19.0 V, `cal_2x11_v5`, board at temperature)*:
+
+| Parameter | Value |
+|---|---|
+| Endurance, pulsing | **3.10 h** (186 min), 24.69 → 19.00 V, 4 sessions with 2 long rests |
+| Endurance, single continuous run | **83.5 min**, 24.69 → 21.00 V |
+| Rest recovery at 21.0 V | **+2.04 V** in 44 min unloaded |
+| Discharge rate, loaded | −32.8 mV/min at 23 V, rising to **−72.7 mV/min** over the last 13 min |
+| Discharge rate, drive off (lockout latched) | **−30.2 mV/min** — ~58 % of the loaded rate |
+| Sag under load | 850 mV at full charge → **2.43 V** at the trip |
+| +15 V rail | **15.20–15.21 V, flat to 50 mV** across the whole discharge *(DMM, 4 spot checks)* |
+| Pack telemetry vs DMM | agrees to **< 80 mV, typically < 20 mV** (1 LSB = 7.35 mV) |
+
+**Working floor: 19.0 V** — `PACK_VOLTAGE_TRIP_MV` 19_000 / `PACK_REARM_MV` 19_500. The two
+constants must always move together; 500 mV is the hysteresis and nothing else depends on the
+re-arm level. 
 
 ---
 
@@ -430,10 +469,7 @@ regulation across the whole usable discharge.
 ## 14. Open problems
 
 1. **Thermal drift.** Wider pulses heat the TX damping/gate
-   resistors; the drive circuit drifts and the RX side drifts with it. **Fingerprint:** heavy bands
-   drift low, light bands high, monotonic with pulse width; warm recalibration moves delays by tens
-   of ns. **The sign test that separates it from a supply shift:** thermal moves light and heavy
-   bands in opposite directions; a supply shift moves all bands the same way (§17.14).
+   resistors; the drive circuit drifts and the RX side drifts with it. 
 
 2. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET duty
    note; Q1 (IRF610) is being pushed past its noted SOA. A higher-rated replacement is probably
@@ -446,8 +482,8 @@ regulation across the whole usable discharge.
 
 4. **The schematic no longer matches the build in two places, both at the RX front end.**
    *(a)* **The 240 k bias resistor from 5V-REF to U3A pin 3 is not drawn at all.**  
-   *(b)* **R1 is two resistors in parallel — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective** — the schematic
-   still draws a single 1.3 kΩ.
+   *(b)* **R1 is two resistors in parallel — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective — the schematic
+   still shows a single 1.3 kΩ.**
 
 ---
 
@@ -555,12 +591,12 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 | 17.5 | **The null is the best-SNR region on the ladder.** Steel:brass magnitude ratio through the null is 6–8× on every band against 5.8× at sd 30 µs — the same discrimination at **+187 mV instead of +78 mV**, against a noise floor that does not change with delay. | current |
 | 17.6 | **A ferrous target adds a genuine slow pole of its own** — τ_s 19.0 µs (100 µs band), 23.4 µs (50 µs) — which air and non-ferrous do not have, and which vanishes on the 10 µs band because a 10 µs pulse barely excites it. | current |
 | 17.7 | **The +97 mV bias mod met its design number**: predicted quiescent +111.7 mV, measured +112.8 mV, and air's worst case moved from clipped to **67.2 mV** above the 2.441 mV floor . | current |
-| 17.11 | **Board temperature moves the operating point, upward on cooling** — the same cell was 46.7 % railed at 52.5 °C and 100 % railed at 31.5 °C. Which cells are usable is a function of (pack × temperature), not a static property of the ladder . | current |
+| 17.11 | **Board temperature moves the operating point, upward on cooling** — the same cell was 46.7 % railed at 52.5 °C and 100 % railed at 31.5 °C. Which cells are usable is a function of temperature, not a static property of the ladder. *(Qualified 2026-08-12: the **pack** term is weak — ~1 mV/V, see 17.23 — and the DS18B20 is not a sufficient predictor of the operating point, see §3.)* | current |
 | 17.14 | **Thermal and supply drift are separable by sign:** thermal moves light and heavy bands in opposite directions (r = +0.99 across bands); supply moves all bands the same way. | all |
 | 17.16 | **31.25 kHz is a bad rep rate** — an entire band unusable at 31.25 kHz / 9 µs, restored by moving to 25 kHz with the pulse unchanged. Noise followed the rep rate, not the decay alignment. | all |
 | 17.21 | **Family is an orientation coordinate, not a material one.** The early-band sign splits by *placement*: 90.9 % accurate transverse, 53.8 % axial. The **late**-band sign — iron-bearing vs non-ferrous — is the robust axis at **97.2 % ungated**. | prev-epoch |
 | 17.22 | **The signature is rank 2 in orientation** and the Pasion–Oldenburg two-basis mixing law is confirmed on oblique captures, so orientation becomes a fitted parameter rather than a confound. | prev-epoch |
-| 17.23 | **The data-quality noise zone sits at a fixed place on the decay while pack voltage scales the decay** — so which threshold columns it hits is a function of state of charge. Mechanism of *why that region is noisy* remains open. | prev-epoch |
+| 17.23 | **Pack voltage does NOT materially scale the decay** *(corrected 2026-08-12)*. With U1 healthy and the fan fitted, supply sensitivity is **~1 mV/V grid mean** and the operating point moves **−0.8 % over a 2.1 V pack swing** (§3, §12). | current |
 
 ---
 
