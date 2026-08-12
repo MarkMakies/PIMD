@@ -1,3 +1,7 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-13
+
 ### src/pimd_classviz.py — v1.74 — FIX Load & Run never armed the soak/stall run state
 
 `_finish_load_run_profile()` — the Load & Run path, which is **also** the v1.53 launch autostart and
@@ -71,13 +75,13 @@ Also unchanged: `PACK_ZONES` / `PACK_WINDOW_LO_MV` in the four PC tools still pa
 at 21.0 V, so the gauges will disagree with the firmware for the duration of the test build — left
 deliberately, as the mismatch is a standing reminder that this is not the §12 floor. (2026-08-12)
 
-> **Superseded 2026-08-13.** The pack this entry describes has been replaced with new, balanced
-> cells, so the "must be reverted before any pack that is meant to survive" warning above no longer
-> applies and **must not be acted on**: 19.0 V is now the working floor, not a test-build
-> divergence. The imbalance arithmetic (a weak pair reaching 2.0–2.1 V at the trip) was true of the
-> retired pack only. The `PACK_ZONES` / `PACK_WINDOW_LO_MV` mismatch it signs off on was resolved
-> the same day — those constants no longer exist. See the pack-replacement entry at the top of this
-> file.
+> **Superseded 2026-08-13.** The "must be reverted before any pack that is meant to survive"
+> warning above **must not be acted on**. It rested on a per-cell figure inferred from a partial
+> measurement, which the 2026-08-12 sweep's direct readings did not support; the floor was decided
+> kept on that day's results, and the pack in question has since been replaced. 19.0 V is the
+> working floor, not a test-build divergence. The `PACK_ZONES` / `PACK_WINDOW_LO_MV` mismatch this
+> entry signs off on was resolved on 2026-08-13 — those constants no longer exist. The firmware
+> source comments that carried the same instruction have been reworded.
 
 ### mcu/pimd_mcu.py — v4.37 — FIX the unbounded IRQ-off BUSY spin that silenced the board on rail loss
 
@@ -274,8 +278,8 @@ the next §18 consolidation pass. (2026-08-12)
 ### findings — 2026-08-12 — thermal / battery sweep, `cal_2x11_v5` on the 6S pack
 
 Four sessions, **186 min of pulsing**, full charge 24.69 V to the 19.0 V trip; fw v4.35 then the
-v4.36 test build; classviz v1.73/v1.74; coil in air, no targets. Per-session narrative is in
-`thermal-test.md` — only the load-bearing results are here.
+v4.36 test build; classviz v1.73/v1.74; coil in air, no targets. Only the load-bearing results are
+here; the raw evidence is the four `session_20260812_*.csv` dumps in `src/data/sessions/`.
 
 **How thermal and supply were separated**, because it is what makes these numbers re-takeable: both
 levers already exist in an ordinary run and neither needed a special test. *Thermal* — a cold start
@@ -380,14 +384,14 @@ same 6S ICR18650-26C arrangement, balanced. Two things follow, and both matter m
 hardware swap itself.
 
 **The v4.36 warning is void.** That entry ends "this is a deliberate, temporary divergence from §12
-and must be reverted before any pack that is meant to survive", because at a 19_000 trip the old
-pack's weak pair reached roughly 2.0–2.1 V — under the 2.75 V cell cutoff and into
-copper-dissolution territory. That hazard was a property of the imbalance, not of the trip level. On
-a balanced string, pack volts ÷ 6 describes the cells again and 19.0 V is 3.17 V/cell, comfortably
-inside the part's rating. `PACK_VOLTAGE_TRIP_MV` 19_000 / `PACK_REARM_MV` 19_500 therefore stand as
-the working floor, and a supersede note has been added to the v4.36 entry so the old warning cannot
-be read as current. The two constants still move together; 500 mV is the hysteresis and nothing else
-depends on the re-arm level.
+and must be reverted before any pack that is meant to survive". That instruction rested on an
+inferred per-cell figure which the 2026-08-12 sweep's own direct measurements did not bear out, and
+the floor was decided **kept** on that day, before any swap — nothing electrical or measurement-side
+objects to 19.0 V, the L7815 keeps ample headroom, and noise, SNR and railing are unchanged down
+there. The new pack adds margin; it is not what settled the question. `PACK_VOLTAGE_TRIP_MV` 19_000
+/ `PACK_REARM_MV` 19_500 stand as the working floor, and a supersede note has been added to the
+v4.36 entry so the old warning cannot be read as current. The two constants still move together;
+500 mV is the hysteresis and nothing else depends on the re-arm level.
 
 **Every discharge figure measured on 2026-08-12 is now epoch-bound.** The §12 envelope — 3.10 h
 endurance, 83.5 min continuous, 850 mV → 2.43 V sag, −32.8 rising to −72.7 mV/min, the +2.04 V rest
@@ -516,7 +520,67 @@ property: the import does weaken standalone-ness slightly, but the pack row is n
 logging path, and the verbatim-line guarantee is untouched. `PackTracker` is fed `note_pulse()` from
 the `W` branch and reset on disconnect. (2026-08-13)
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+### mcu/pimd_mcu.py — v4.37 — the pack-floor comments no longer instruct a revert to 21_000
+
+**Comment-only; no version bump** (per `CLAUDE.md`, pure comment edits do not bump). The behaviour,
+the constants and the wire format are untouched — but the comments around them were actively
+dangerous, which is why this is recorded rather than folded in silently.
+
+`PACK_VOLTAGE_TRIP_MV`'s block still opened "TEST BUILD FLOOR — 19_000, NOT the DESIGN §12 working
+floor of 21_000" and closed "it must go back to 21_000 before any pack that is meant to survive";
+`PACK_REARM_MV`'s block ended "Restore BOTH to 21_500/21_000 together"; and the header lineage's
+v4.36 line read "Revert before a keeper pack". The 2026-08-12 sweep had already decided the opposite
+— the floor was **kept** — and flagged these three sites to be reworded when the file was next
+touched. They were not, so the source was instructing a future reader to undo a deliberate decision.
+That is the whole risk here: nobody rereads a decision they think they are simply restoring.
+
+Reworded to state the floor is settled and why (nothing electrical or measurement-side objects to
+it; D4 is a shunt clamp with no series drop so the L7815 keeps ample headroom over its ~17.2 V
+requirement; noise, SNR and railing are unchanged at the bottom of the range; the trip protects the
+cells, not the rail), and to record explicitly that the restore-21_000 instruction is **withdrawn**.
+The per-cell arithmetic the old warning rested on is not restated — it came from measuring part of a
+string and inferring the rest, the direct readings did not support it, and that pack is gone. The
+re-arm block keeps the one rule that still matters, now stated without version archaeology: it
+tracks the trip, moves only in the same edit, and a wider gap breaks recovery because a USB-powered
+MCU outlives the rail and cannot be reset by pulling the pack. (2026-08-13)
+
+### DESIGN.md — Doc-rev 2.2 — full consolidation pass
+
+Human-directed §18 consolidation. **Header**: firmware v4.35 → **v4.37** (bench-verified, which is
+what Doc-rev 2.1 was waiting for before bumping); PC tools to gui **v4.18**, classviz **v1.75**,
+delaycal **v1.49**, rawlog **v1.17**, plus **pack v1**; hardware-rev gains the **6S pack replaced
+2026-08-13**; last-bench-update corrected 2026-08-11 → **2026-08-12**, the sweep it actually
+describes.
+
+**§9** — two protocol corrections, the first found by reading firmware against the doc rather than
+from any changelog entry: `B` is **9 fields, not 6**, the v4.37 rail-loss abort having added
+`busy_timeout_count`, `busy_spin_min_left` and `rail_absent_ms_max`; DESIGN had been describing a
+record the firmware stopped emitting. The `avg` bound drops its "since v4.35" qualifier. §11 and the
+rest of §9 are verbatim.
+
+**§12** — the working floor is restated as **settled, not a test build**, with the reasoning that
+kept it; the measured envelope is marked **epoch-bound to the retired pack** rather than deleted,
+since its shape still carries and only its absolute figures are pack-specific; pack rotation is
+recorded as a standing condition; and state of charge is defined as a runtime fraction, with the
+note that a resting per-cell OCV curve on a loaded pack voltage is not a valid gauge here. Retired
+per-cell voltages are deliberately **not** carried forward.
+
+**§14** — one live open problem added, as 14.5: classviz's `streamed_s` counting a silent source as
+streamed (70 minutes of it on 2026-08-12, unfixed). A second candidate — supply sensitivity at
+~1 mV/V against a standing pre-U1-replacement figure of 43–51 mV/V — was drafted and then
+**dropped at the builder's direction**, on the grounds that the older figure is not believed ever to
+have been correct. That figure is now cited nowhere in DESIGN; ~1 mV/V stands unqualified in §3 and
+17.23.
+
+**§15** — new row for `src/pimd_pack.py`; five version bumps; and `README.md` / `TODO.md` added,
+which the inventory claims a line per file but had never listed.
+
+Dangling references fixed: the 2026-08-12 findings entry pointed at a `thermal-test.md` that does
+not exist in the repository, now redirected to the four `session_20260812_*.csv` dumps that are the
+actual evidence. Every asset DESIGN cites was verified present in `References/`; **17 files in
+`References/images/` are cited nowhere** and were left alone rather than guessed into place — mostly
+epoch-bound to retired profiles and corpora. (2026-08-13)
+
 
 ## Archive — consolidated 2026-08-12
 **The user undertook a full and independent review of document and rewrote/culled many sections.**

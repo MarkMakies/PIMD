@@ -1,9 +1,9 @@
-# Pulse Induction Metal Detector (PIMD)
+# Pulse Induction Metal Detector (PIMD) 
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **38 mm forced-air fan on the U1/FET cluster — mandatory, fitted 2026-08-11, used in all cases** · **Firmware:** v4.35 · **PC tools:** gui v4.17 · classviz v1.73 · delaycal v1.48 · rawlog v1.16 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
-**Last bench update:** 2026-08-11 (bias mod fitted and characterised; fw v4.35 bench-verified; `cal_2x11_v5` hand-tuned)
-**Doc rev:** 2.1 (2026-08-12) Mini consolidation: thermal/battery sweep results into §3, §10, §12, §17
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **38 mm forced-air fan on the U1/FET cluster — mandatory, fitted 2026-08-11, used in all cases** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.75 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
+**Last bench update:** 2026-08-12 (thermal/battery sweep, 186 min of pulsing; fw v4.37 bench-verified; new pack fitted 2026-08-13)
+**Doc rev:** 2.2 (2026-08-13) Full consolidation: fw v4.37, the shared pack fuel gauge, the settled 19.0 V floor
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -293,7 +293,7 @@ at the amplifier input on the current hardware.
 
 ## 8. Digital / timing (RP2040)
 
-- **MCU:** Waveshare RP2040-Zero (U10), MicroPython. Firmware `mcu/pimd_mcu.py` **v4.35**.
+- **MCU:** Waveshare RP2040-Zero (U10), MicroPython. Firmware `mcu/pimd_mcu.py` **v4.37**.
 - **Pulse + sample generation:** two PWM channels on the **same slice** (GPIO4 = PWM2A drive,
   GPIO5 = PWM2B sample). Same slice ⇒ both rising edges align at period start; drive falls at
   `pulse_width`, sample falls at `pulse_width + sample_delay`. **This phase-locking is the core
@@ -328,7 +328,7 @@ parsers tolerate either. All timing fields are exact integers: freq in Hz, pulse
 **Mode 2 — raw interleaved moving-average sweep** (the active path):
 - **in:** `Q<n>` select profile · `G`/`g` start streaming · `E`/`e` stop ·
   `D<avg>;<freq_hz>,<pulse_us>,<d0>,…;…` define the RAM-only dynamic profile (index 5).
-  **`avg` is bounded 1..128 since v4.35**; the whole `D` is refused on any invalid cell, and a
+  **`avg` is bounded 1..128**; the whole `D` is refused on any invalid cell, and a
   refused `D` leaves the previous dynamic profile live — **wait for `D OK`** (§8).
 - **out:** `W<profile_idx>,<time_ms>,<mean_ch0>,<mean_ch1>,...`
 - **rate:** one W record per full sweep, rate-limited to one per `MIN_EMIT_MS = 10` ms (never
@@ -347,9 +347,14 @@ parsers tolerate either. All timing fields are exact integers: freq in Hz, pulse
 - `L` list profiles → one `L<idx>,<freq_hz>,<n_bands>,<n_cells>,<averages>,<name>` per profile
 - `A<n>` raw boxcar average (idle / Mode 1 only) →
   `R<time_ms>,<mean_uV>,<std_uV>,<count>,<freq_hz>,<pulse_ns>,<delay_ns>,<min_uV>,<max_uV>`
-- `B` diagnostic counters, **reset-on-read** — **6 fields since v4.35** →
+- `B` diagnostic counters, **reset-on-read** — **9 fields** →
   `B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>,<gate_reject_count>,`
-  `<gate_reprime_count>`. No parser exists in `src/` — read by a human over a serial terminal.
+  `<gate_reprime_count>,<busy_timeout_count>,<busy_spin_min_left>,<rail_absent_ms_max>`. The last
+  three arrived with the v4.37 rail-loss abort: `busy_timeout_count` says whether a rail loss
+  happened at all, `busy_spin_min_left` is how close a *healthy* spin came to `BUSY_SPIN_LIMIT`
+  (it resets to the limit, not to 0, so a small value means the cap is too tight), and
+  `rail_absent_ms_max` is the longest rail-absent rest. No parser exists in `src/` — read by a
+  human over a serial terminal.
   **The ratio is the number to read:** rejections with near-zero re-primes means the outlier gate is
   catching glitches, which is its job; re-primes climbing with the signal means it is fighting real
   signal and `OUTLIER_GATE_FRAC` is too tight for the profile in use (§8).
@@ -427,12 +432,17 @@ build (hardware-rev line) and runs in all cases — there is no fan-off operatin
 | +2V5 | U7 LT1762-2.5 | ADC |
 | 5 V ref | U5 LTC6655-5 | precision reference |
 
-Input: **6S Li-ion (19.8–25.2 V)** — 18650 cells (ICR18650-26C, recovered laptop cells). F1 2 A, D4
-1N4004 reverse protection, FB1 ferrite bead. A **dedicated** battery powers the detector; the
-rover's 40 V supply was too noisy.  **Confirmed 2026-08-12:** The 15V rail held 15.20 V from
-24.69 V down to 19.07 V and the operating point moved **−0.8 % across a 2.1 V pack swing** (§3).
+Input: **6S Li-ion (19.8–25.2 V)** — 18650 cells, ICR18650-26C. F1 2 A, D4 1N4004 reverse
+protection, FB1 ferrite bead. A **dedicated** battery powers the detector; the rover's 40 V supply
+was too noisy. **More than one pack is in rotation** — packs are swapped as they charge, so no
+single stored calibration describes "the" pack (§15, `pimd_pack.py`). **Confirmed 2026-08-12:** the
+15 V rail held 15.20 V from 24.69 V down to 19.07 V and the operating point moved **−0.8 % across a
+2.1 V pack swing** (§3).
 
-**Measured envelope** *(2026-08-12, full charge → 19.0 V, `cal_2x11_v5`, board at temperature)*:
+**Measured envelope** *(2026-08-12, full charge → 19.0 V, `cal_2x11_v5`, board at temperature)*.
+**Epoch-bound: measured on the pack retired on 2026-08-13**, which was tired and reached its knee
+early. The *shape* is expected to carry to a current pack — same cells, same load — but the absolute
+figures are not a spec for one, and want re-measuring on a single continuous run-down:
 
 | Parameter | Value |
 |---|---|
@@ -445,9 +455,21 @@ rover's 40 V supply was too noisy.  **Confirmed 2026-08-12:** The 15V rail held 
 | +15 V rail | **15.20–15.21 V, flat to 50 mV** across the whole discharge *(DMM, 4 spot checks)* |
 | Pack telemetry vs DMM | agrees to **< 80 mV, typically < 20 mV** (1 LSB = 7.35 mV) |
 
-**Working floor: 19.0 V** — `PACK_VOLTAGE_TRIP_MV` 19_000 / `PACK_REARM_MV` 19_500. The two
-constants must always move together; 500 mV is the hysteresis and nothing else depends on the
-re-arm level. 
+**Working floor: 19.0 V — settled, and not a test build.** `PACK_VOLTAGE_TRIP_MV` 19_000 /
+`PACK_REARM_MV` 19_500. Introduced as a test floor on 2026-08-12 and **kept** on that day's results:
+nothing electrical or measurement-side objects to it. D4 is a shunt clamp with no series drop, so
+the L7815 sees the pack directly and keeps ample headroom against the ~17.2 V it needs — the rail
+measured flat to 50 mV all the way down — and noise, SNR and railing are unchanged at the bottom of
+the range. The trip protects the **cells**, not the rail. The two constants must always move
+together; 500 mV is the hysteresis and nothing else depends on the re-arm level. Earlier revisions
+of the firmware carried an instruction to restore a 21.0 V floor; that instruction is **withdrawn**
+and the source comment now says so.
+
+**State of charge is a runtime fraction, not a cell voltage.** The PC tools read SoC as the fraction
+of usable pulsing runtime left against the 19.0 V floor, from a curve of *loaded* terminal volts →
+minutes-to-trip, with time remaining fitted live over a trailing window (§15, `pimd_pack.py`). A
+resting per-cell open-circuit curve applied to a loaded pack voltage is **not** a valid gauge here
+and was withdrawn on 2026-08-13. 
 
 ---
 
@@ -485,6 +507,13 @@ re-arm level.
    *(b)* **R1 is two resistors in parallel — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective — the schematic
    still shows a single 1.3 kΩ.**
 
+5. **`streamed_s` counts a silent source as streamed** *(classviz, unfixed)*. It tracks wall-clock
+   since the run armed rather than the arrival of records, so a firmware source that goes quiet
+   without closing the port is invisible to it — after the 2026-08-12 lockout it logged **70 minutes
+   of zero data as streamed**, with the stall detector never firing. Distinct from the v1.74 arming
+   fix: this is a defect in what the armed counter *measures*, and it matters precisely for the long
+   unattended run that soak accounting exists to watch.
+
 ---
 
 ## 15. Repository / file inventory
@@ -494,13 +523,14 @@ in `CHANGELOG.md` and in each file's own header lineage.
 
 | Path | Role |
 |------|------|
-| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.35**) — both modes, all profiles, the RAM-only dynamic profile (index 5), pack sense and board temperature. MicroPython **pure-Python only**. |
+| `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.37**) — both modes, all profiles, the RAM-only dynamic profile (index 5), pack sense and board temperature. MicroPython **pure-Python only**. |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
-| `src/pimd_gui.py` | **v4.17** — Mode 1 filtered-telemetry GUI. Pack SoC / board-temperature gauges; session logs to `data/sessions/gui_<ts>.csv`. |
-| `src/pimd_classviz.py` | **v1.73** — Mode 2 signature visualiser and the **corpus-capture workbench**. Four tabs (Heatmap / Stats / Analysis / Family Plane). Loads and runs saved profiles as RAM-only dynamic profiles — **`Load & Run` waits for `D OK`** before selecting or streaming, so a refused profile can never be mis-labelled in the session header (§8). **Marks ADC-railed cells**: a standing `⚠ RAIL: N cells` label in the top bar, a red *Latest* cell with tooltip, and a session mark on each new entry — the value is deliberately **not** filtered or substituted, because a rail is a profile defect to fix at the delay ladder. Auto-logs a self-describing session dump whenever the stream runs; registry-backed structured capture writing `src/data/corpora/`; pack/temperature telemetry written to the dump automatically. Profile *authoring* is not here — it is in delaycal. |
-| `src/pimd_delaycal.py` | **v1.48** — delay-calibration sweeper and the only profile author. Coarse+fine two-phase sweep per (freq, pulse) pair, threshold-crossing delays snapped to the 8 ns grid, thermal soak monitoring, auto-nudge, Compare Profiles tab, pack/temperature gauges and a conditions span recorded into every exported profile's notes.  |
-| `src/pimd_rawlog.py` | **v1.16** — deliberately dumb raw logger: loads a profile, streams it, writes every firmware line **verbatim** to `data/sessions/rawlog_<ts>.txt`. No tables, no derived values, so it cannot develop display-layer defects.  |
+| `src/pimd_gui.py` | **v4.18** — Mode 1 filtered-telemetry GUI. Pack SoC / board-temperature gauges; session logs to `data/sessions/gui_<ts>.csv`. |
+| `src/pimd_classviz.py` | **v1.75** — Mode 2 signature visualiser and the **corpus-capture workbench**. Four tabs (Heatmap / Stats / Analysis / Family Plane). Loads and runs saved profiles as RAM-only dynamic profiles — **`Load & Run` waits for `D OK`** before selecting or streaming, so a refused profile can never be mis-labelled in the session header (§8). **Marks ADC-railed cells**: a standing `⚠ RAIL: N cells` label in the top bar, a red *Latest* cell with tooltip, and a session mark on each new entry — the value is deliberately **not** filtered or substituted, because a rail is a profile defect to fix at the delay ladder. Auto-logs a self-describing session dump whenever the stream runs; registry-backed structured capture writing `src/data/corpora/`; pack/temperature telemetry written to the dump automatically. Profile *authoring* is not here — it is in delaycal. |
+| `src/pimd_delaycal.py` | **v1.49** — delay-calibration sweeper and the only profile author. Coarse+fine two-phase sweep per (freq, pulse) pair, threshold-crossing delays snapped to the 8 ns grid, thermal soak monitoring, auto-nudge, Compare Profiles tab, pack/temperature gauges and a conditions span recorded into every exported profile's notes.  |
+| `src/pimd_rawlog.py` | **v1.17** — deliberately dumb raw logger: loads a profile, streams it, writes every firmware line **verbatim** to `data/sessions/rawlog_<ts>.txt`. No tables, no derived values, so it cannot develop display-layer defects.  |
 | `src/pimd_shape.py` | **v1** — shared signature-geometry maths (pure NumPy, **no Qt**). `unit_shape` / `amp_l2` / `snr`, `band_means`, `band_range_mean`, `crossing_us`, `decay_persistence`, `family`. Geometry always passed explicitly; bands and thresholds resolved **by value**, never by stored index. `family` (sign) and `decay_persistence` (magnitude) are read together and neither overrules the other. |
+| `src/pimd_pack.py` | **v1** — shared pack fuel-gauge maths (pure stdlib, **no Qt**), imported by all four GUIs so they cannot disagree about the same pack. SoC is the fraction of usable pulsing runtime left, from a curve of *loaded* volts → minutes-to-trip, zeroed on `PACK_TRIP_MV` so moving the firmware floor re-zeros the gauge from one constant; only the curve's **shape** reaches the percentage. `PackTracker` fits the discharge rate live over a trailing window for an `H:MM` time-remaining figure, and drops history on a pack swap, a pack-absent/return or a disconnect. `--recal <session csv…>` rebuilds the curve from `# pack_v:` tracks. **The shipped curve is the retired pack's** — regenerate after one continuous run-down. |
 | `src/pimd_features.py` | **v14** — session-CSV → training-corpus builder (offline CLI). Registry join, **hard geometry guard: one `(profile_name, profile_sha8)` per corpus build**. Parses the dump's `# pack_v:` / `# soak:` / `# stall:` / `# capture:` / `# mark:` comment tracks; `pack_v_at()` interpolates a voltage per capture. |
 | `src/pimd_target_check.py` | **v4** — target-registry loader/validator (CLI + library). `DEFAULT_REGISTRY_PATH` here is the single source of truth for registry location. `-f` is required — there is no default path. |
 | `src/pimd_corpus_check.py` | **v1.9** — corpus-level acceptance checker. Shape distance-invariance, split-half SNR, repeat consistency, falloff fit. One flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. |
@@ -511,6 +541,8 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `src/data/scratch/` | Scratch captures of **unregistered** objects. Never written into `corpora/` — a corpus build hard-errors on an unregistered `target_id` and that guard stays. |
 | `References/images/` | Schematics, scope and GUI reference captures (§15 note below). |
 | `References/scope/` | Raw scope CSVs, tracked again as of `20260810_bias_mod/` — nine traces (air / brass / steel RHS × three bands, all at 0 cm) plus `plot_bias.py` and `plot_delay.py`. This is the primary evidence behind §2's fill fractions and §7's post-bias measurements, and the one place they can be re-derived. |
+| `README.md` | Repository front page — project summary and entry point for a first-time reader. |
+| `TODO.md` | Working task list. Not a spec: nothing here is authoritative over `DESIGN.md`. |
 | `USAGE.md` | Per-app usage guide — intent, operation and pipeline flow for the firmware and each PC tool. |
 | `CHANGELOG.md` | Running change log — **the source this file is consolidated from**, and where all history and rationale lives. |
 | `DESIGN.md` | **This file** — curated snapshot. Do not edit directly outside a consolidation pass (§18). |
@@ -570,7 +602,7 @@ PC tools connect to `/dev/ttyACMx` @ 115200.
 ```
 V                     → version / identify (11 fields, §9)
 L                     → list profiles
-B                     → diagnostic counters (reset-on-read, 6 fields since v4.35, §9)
+B                     → diagnostic counters (reset-on-read, 9 fields, §9)
 Q4  then  G           → Mode 2 streaming, static CLASSIFY_EP profile;  E to stop
 *5000,40000,8400,256  then S → Mode 1 streaming (~20/s);  E to stop
 A32                   → one raw boxcar average (R record), idle/Mode 1 only

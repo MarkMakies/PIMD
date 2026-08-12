@@ -87,7 +87,7 @@
 
 # History (full detail in CHANGELOG.md):
 #   v4.37 FIX read_raw_bytes_hold: unbounded IRQ-off BUSY spin went silent on rail loss; rail-absent state keeps telemetry alive
-#   v4.36 TEST BUILD: pack floor 21.0 -> 19.0 V, re-arm 21.5 -> 19.5 V. Revert before a keeper pack
+#   v4.36 pack floor 21.0 -> 19.0 V, re-arm 21.5 -> 19.5 V — KEPT, see PACK_VOLTAGE_TRIP_MV
 #   v4.35 FIX acquire_mode2: outlier gate was an absorbing state — cells latched permanently
 #   v4.34 FIX acquire_mode2: boundary settle measured from the config write, not the loop top
 #   v4.33 DS18B20 board temperature on GP6 (1-Wire); GP27 pot placeholder path retired
@@ -375,19 +375,20 @@ SENSOR_REPORT_MS = 60_000      # 'P' telemetry line emitted this often
 # term is per-module, and it is 0.73% (221 mV at full scale), not a rounding error.
 # 1 LSB = 7.35 mV at the pack; 25.2 V (6S full) sits at 83.8% of range.
 PACK_VOLTAGE_FULLSCALE_MV = 30_083     # 0-VREF ADC <-> 0-30.083V pack (fully calibrated)
-# (v4.36) TEST BUILD FLOOR — 19_000, NOT the DESIGN §12 working floor of 21_000.
-# Lowered deliberately on 2026-08-12 to characterise the detector below the §12
-# floor: at 21.02 V pack the +15V rail still measured 15.20 V on a DMM, i.e. the
-# L7815 has ~3.8 V of headroom left and the 21_000 trip is protecting the CELLS,
-# not the rail. Nothing electrical stops the board running to ~17.2 V in.
+# THE WORKING FLOOR. 19_000 is settled and stays — it is not a test build.
 #
-# WHAT THIS COSTS, measured on the pack fitted that day: four cells at 3.84 V at
-# rest, the remaining two at 2.83 V — a badly imbalanced string. Pack volts divided
-# by six does NOT describe it. At a 19_000 trip the weak pair is dragged to roughly
-# 2.0-2.1 V, below the ICR18650-26C 2.75 V cutoff and into the region where copper
-# current-collector dissolution starts. Cells taken there can develop internal
-# shorts ON THE NEXT CHARGE. This floor is for a scrap pack on a supervised bench,
-# and it must go back to 21_000 before any pack that is meant to survive.
+# Introduced as one on 2026-08-12 to characterise the detector below the then-§12
+# floor, and KEPT on that day's results. Nothing electrical or measurement-side
+# objects to it: at 21.02 V pack the +15V rail still measured 15.20 V on a DMM, so
+# the L7815 keeps ample headroom (D4 is a shunt clamp, no series drop, and the
+# regulator needs ~17.2 V in), and noise, SNR and railing are all unchanged down
+# there. The trip protects the CELLS, not the rail.
+#
+# Earlier revisions of this block carried an instruction to restore 21_000 before
+# using a pack that was meant to survive. That instruction is WITHDRAWN and must
+# not be acted on — it rested on an inferred per-cell figure that the day's direct
+# measurements did not bear out, and the pack it described has since been replaced.
+# Do not "restore" 21_000: it was never a rail limit, and the floor is deliberate.
 PACK_VOLTAGE_TRIP_MV = 19_000           # hard floor, mV — see the block above before raising/lowering
 PACK_VOLTAGE_TRIP_CONSECUTIVE = 3      # consecutive sub-floor SENSOR_SAMPLE_MS samples
                                         # required to latch (debounce against ADC noise)
@@ -421,16 +422,15 @@ PACK_REARM_MV = 19_500     # a returning pack must reach THIS to clear the latch
                            # re-arm, then sag straight back under load — the exact cycle
                            # the v4.28 hard latch exists to stop.
                            #
-                           # (v4.36) TRACKS THE TRIP, and must keep tracking it. It was
-                           # 21_500 against a 21_000 trip, chosen to double as the DESIGN
-                           # §12 clean-window lower edge; that coincidence is gone now the
-                           # trip is a test-build 19_000 and the 500 mV is the only thing
-                           # this level still means. Leaving it at 21_500 would have made
-                           # the hysteresis 2_500 mV: latch at 19.0 V, cycle the pack, and
-                           # it returns below 21.5 V so the latch does NOT clear — and
-                           # since the MCU is USB-powered, pulling the pack cannot reset
-                           # it either. Recovery would mean unplugging USB mid-test.
-                           # Restore BOTH to 21_500/21_000 together.
+                           # TRACKS THE TRIP, and must keep tracking it. This level
+                           # once doubled as a data-quality window edge; that meaning
+                           # is gone — 500 mV of hysteresis is the only thing it now
+                           # means, and nothing else depends on it. Move it only with
+                           # PACK_VOLTAGE_TRIP_MV, in the same edit. A wider gap breaks
+                           # recovery: latch at the floor, cycle the pack, and if it
+                           # returns below the re-arm level the latch does NOT clear —
+                           # and since the MCU is USB-powered, pulling the pack cannot
+                           # reset it either, so recovery would mean unplugging USB.
 
 # ---------------------------------------------------------------------------
 # DS18B20 timing + the hot-path budget that sets it (v4.33)
