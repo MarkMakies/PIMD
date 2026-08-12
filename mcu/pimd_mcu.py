@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.35, coil v4
+# Pulse Induction Metal Detector, v4.36, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -67,6 +67,7 @@
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.36 TEST BUILD: pack floor 21.0 -> 19.0 V, re-arm 21.5 -> 19.5 V. Revert before a keeper pack
 #   v4.35 FIX acquire_mode2: outlier gate was an absorbing state — cells latched permanently
 #   v4.34 FIX acquire_mode2: boundary settle measured from the config write, not the loop top
 #   v4.33 DS18B20 board temperature on GP6 (1-Wire); GP27 pot placeholder path retired
@@ -125,7 +126,7 @@ try:
 except ImportError:
     onewire = None
 
-FW_VERSION = '4.35'
+FW_VERSION = '4.36'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -306,7 +307,20 @@ SENSOR_REPORT_MS = 60_000      # 'P' telemetry line emitted this often
 # term is per-module, and it is 0.73% (221 mV at full scale), not a rounding error.
 # 1 LSB = 7.35 mV at the pack; 25.2 V (6S full) sits at 83.8% of range.
 PACK_VOLTAGE_FULLSCALE_MV = 30_083     # 0-VREF ADC <-> 0-30.083V pack (fully calibrated)
-PACK_VOLTAGE_TRIP_MV = 21_000           # hard floor, mV (DESIGN.md §12 working discharge floor)
+# (v4.36) TEST BUILD FLOOR — 19_000, NOT the DESIGN §12 working floor of 21_000.
+# Lowered deliberately on 2026-08-12 to characterise the detector below the §12
+# floor: at 21.02 V pack the +15V rail still measured 15.20 V on a DMM, i.e. the
+# L7815 has ~3.8 V of headroom left and the 21_000 trip is protecting the CELLS,
+# not the rail. Nothing electrical stops the board running to ~17.2 V in.
+#
+# WHAT THIS COSTS, measured on the pack fitted that day: four cells at 3.84 V at
+# rest, the remaining two at 2.83 V — a badly imbalanced string. Pack volts divided
+# by six does NOT describe it. At a 19_000 trip the weak pair is dragged to roughly
+# 2.0-2.1 V, below the ICR18650-26C 2.75 V cutoff and into the region where copper
+# current-collector dissolution starts. Cells taken there can develop internal
+# shorts ON THE NEXT CHARGE. This floor is for a scrap pack on a supervised bench,
+# and it must go back to 21_000 before any pack that is meant to survive.
+PACK_VOLTAGE_TRIP_MV = 19_000           # hard floor, mV — see the block above before raising/lowering
 PACK_VOLTAGE_TRIP_CONSECUTIVE = 3      # consecutive sub-floor SENSOR_SAMPLE_MS samples
                                         # required to latch (debounce against ADC noise)
 # (v4.30) The divider is an RC, and at boot it is still charging. Source impedance
@@ -332,14 +346,23 @@ PACK_ABSENT_MV = 6_000     # below this the rail is OFF and we are running on US
                            # at 1 V/cell, and the +15V rail dropped out ~12 V higher up,
                            # so nothing is being discharged and there is nothing for the
                            # failsafe to protect. Suspend rather than latch.
-PACK_REARM_MV = 21_500     # a returning pack must reach THIS to clear the latch, not
-                           # merely clear PACK_VOLTAGE_TRIP_MV. 500 mV of hysteresis, and
-                           # the DESIGN §12 clean-window lower edge, so it is a meaningful
-                           # level rather than an arbitrary one. Re-arming at the trip
-                           # itself would let a genuinely flat pack switched off and back
-                           # on return on its no-load recovery, re-arm, then sag straight
-                           # back under load — the exact cycle the v4.28 hard latch exists
-                           # to stop. Set to 21_000 for bare "above the floor", at that risk.
+PACK_REARM_MV = 19_500     # a returning pack must reach THIS to clear the latch, not
+                           # merely clear PACK_VOLTAGE_TRIP_MV. 500 mV of hysteresis.
+                           # Re-arming at the trip itself would let a genuinely flat pack
+                           # switched off and back on return on its no-load recovery,
+                           # re-arm, then sag straight back under load — the exact cycle
+                           # the v4.28 hard latch exists to stop.
+                           #
+                           # (v4.36) TRACKS THE TRIP, and must keep tracking it. It was
+                           # 21_500 against a 21_000 trip, chosen to double as the DESIGN
+                           # §12 clean-window lower edge; that coincidence is gone now the
+                           # trip is a test-build 19_000 and the 500 mV is the only thing
+                           # this level still means. Leaving it at 21_500 would have made
+                           # the hysteresis 2_500 mV: latch at 19.0 V, cycle the pack, and
+                           # it returns below 21.5 V so the latch does NOT clear — and
+                           # since the MCU is USB-powered, pulling the pack cannot reset
+                           # it either. Recovery would mean unplugging USB mid-test.
+                           # Restore BOTH to 21_500/21_000 together.
 
 # ---------------------------------------------------------------------------
 # DS18B20 timing + the hot-path budget that sets it (v4.33)

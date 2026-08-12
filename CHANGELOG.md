@@ -1,3 +1,39 @@
+### mcu/pimd_mcu.py — v4.36 — TEST BUILD: pack floor 21.0 → 19.0 V, re-arm 21.5 → 19.5 V
+
+`PACK_VOLTAGE_TRIP_MV` 21_000 → **19_000** and `PACK_REARM_MV` 21_500 → **19_500**, to let the
+detector be characterised below the DESIGN §12 working floor. **This is a deliberate, temporary
+divergence from §12 and must be reverted before any pack that is meant to survive.** Both constants
+moved together and must always move together: 500 mV of hysteresis is now the only thing the re-arm
+level means, the old 21_500 having doubled as the §12 clean-window edge. Left at 21_500 against a
+19_000 trip the hysteresis would have been 2_500 mV, and because the MCU is USB-powered and outlives
+the rail, a latch at 19.0 V could not then be cleared by cycling the pack at all — only by unplugging
+USB mid-test.
+
+**Why the floor was in the way.** On `session_20260812_100209` the pack tripped at 21.02 V with the
++15 V rail still measuring **15.20 V on a DMM** — flat to 10 mV across a 24.69 → 21.37 V pack swing.
+D4 is a shunt clamp with no series drop, so the L7815 sees the pack directly and needs ~17.2 V in.
+The 21_000 trip was never a rail limit; it is cell protection, and the rail has ~3.8 V of headroom
+left at the point the firmware stops.
+
+**What it costs, and why the comment in the source is as blunt as it is.** The ClassViz SoC gauge
+read 11 % at 21.02 V while an independent charger measured cells at 3.84 V (52–55 %). Both are
+correct: `pack_soc_pct()` is a *resting* OCV curve being handed a *loaded* terminal voltage —
+21.02/6 = 3.503 V/cell → 10.8 %, 3.84 V/cell → 56.2 %. Sag is real and large (the first 44 s of the
+session show **24.69 → 23.84 V, an 850 mV load step at full charge**). But only four of six cells
+were measured, and the arithmetic on the remainder — 21.02 − 4×3.84 = 5.66 V over two cells,
+**2.83 V/cell** — was then **confirmed on the bench**. The string is badly imbalanced, so pack volts
+÷ 6 does not describe it: at a 19_000 trip the weak pair reaches roughly **2.0–2.1 V**, under the
+ICR18650-26C 2.75 V cutoff and into copper-dissolution territory, where the hazard appears on the
+*next charge* rather than during the test. Corroborating evidence that the pack is not the 53 % the
+charger implies: the discharge rate roughly doubled over the run, ~22 mV/min at t=35 min to
+~55 mV/min over the last 15 — a knee, not a half-full pack.
+
+Deliberately **not** done: no serial re-arm for the latch. The v4.28 hard latch exists because of an
+actual over-discharge incident, and a below-floor test is precisely the run that wants it intact.
+Also unchanged: `PACK_ZONES` / `PACK_WINDOW_LO_MV` in the four PC tools still paint the lockout floor
+at 21.0 V, so the gauges will disagree with the firmware for the duration of the test build — left
+deliberately, as the mismatch is a standing reminder that this is not the §12 floor. (2026-08-12)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-12
