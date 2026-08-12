@@ -1,3 +1,10 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-12
+**The user undertook a full and independent review of document and rewrote/culled many sections.
+
+---
+
 ### hardware — a 38 mm fan on the regulator/FET cluster; **3.125 kHz is now a forced-air-only setting**
 
 **A 25 VDC 38 mm fan was fitted, blowing directly onto U1 from 50 mm**, with the same airstream
@@ -344,7 +351,7 @@ to history, since it renders a geometry that no longer exists. (2026-08-11)
 
 ---
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
 
 ## Archive — consolidated 2026-08-11
 
