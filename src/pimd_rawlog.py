@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Raw Logger v1.16
+# PIMD Raw Logger v1.17
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # Deliberately dumb: loads a profile, streams it (Mode 2 dynamic profile,
@@ -75,6 +75,8 @@
 # bottom-right cell is the longest pulse width read at the longest delay.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.17 pack row reads runtime-fraction SoC + live H:MM remaining from the
+#         shared pimd_pack.py; the data-quality zone captions are retired
 #   v1.16 FIX the last-frame grid could force the window wider than the screen
 #         (QLabel size hint); grid moved to a non-wrapping scroll pane.
 #         Settle window becomes Capture frames: an acquisition now takes a
@@ -121,7 +123,9 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QIODevice  # noqa: E402
 from PyQt6.QtGui import QFontDatabase  # noqa: E402
 
-APP_VERSION = '1.16'
+import pimd_pack  # noqa: E402 — pack SoC / time-remaining maths (no Qt in that module)
+
+APP_VERSION = '1.17'
 
 DYNAMIC_PROFILE_INDEX = 5   # matches pimd_mcu.py NUM_PROFILES / pimd_delaycal.py / pimd_classviz.py
 
@@ -155,61 +159,30 @@ GRID_MAX_ROWS = 12   # tallest the grid pane grows before it scrolls vertically.
                      # without letting a hand-edited profile eat the window.
 
 # --------------------------------------------------------------------------
-# Pack / board-temperature display constants (v1.15).
+# Pack / board-temperature display constants (v1.15, shared since v1.17).
 #
-# Duplicated from pimd_gui.py, not imported from it, for the same reason
-# _build_d_command() is duplicated from pimd_delaycal.py: every PC app in this
-# repo stands alone. The thresholds and captions must stay in step with
-# pimd_gui.py so the two apps never disagree about the same pack -- if you
-# retune one, retune both. Rationale for the numbers themselves lives in
-# pimd_gui.py / DESIGN §12 and is not restated here.
+# The pack maths was duplicated from pimd_gui.py under an "every PC app stands
+# alone" rule. That was reversed in v1.17: it now comes from the shared
+# pimd_pack.py, because four hand-synced copies of a calibration table is
+# exactly the thing that drifts, and the note above telling you to retune both
+# apps was the tell. The rule still stands for _build_d_command below, which is
+# wire formatting rather than a calibration.
 #
-# The COLOURS deliberately differ: pimd_gui.py's are gauge fills behind dark
-# text, so it uses pale mint/yellow. Here they colour the text itself, where
-# those pales are illegible, so the clean-window and transition entries are
-# darkened to their readable equivalents. Same zones, same captions.
+# This app still needs its own COLOURS: pimd_gui.py's are gauge fills behind
+# dark text and use the pale end of the range, where here they colour the label
+# text itself and the pales are illegible. That is why soc_colour() takes a
+# for_text flag rather than this file keeping a second palette -- the
+# breakpoints stay shared, only the shade differs.
+#
+# Gone with the shared move: the PACK_ZONES "data-quality window", whose
+# captions told the operator to log only inside a narrow band of pack voltage.
+# DESIGN 17.23, corrected 2026-08-12, measures that sensitivity at ~1 mV/V, so
+# the window was advice against an effect that is not there.
 # --------------------------------------------------------------------------
-N_CELLS = 6
-SOC_NOMINAL = [(4.20, 100), (4.15, 95), (4.11, 90), (4.06, 85), (4.02, 80),
-               (3.98, 75), (3.95, 70), (3.91, 65), (3.87, 60), (3.83, 55),
-               (3.80, 50), (3.77, 45), (3.75, 40), (3.72, 35), (3.70, 30),
-               (3.67, 25), (3.63, 20), (3.57, 15), (3.49, 10), (3.35, 5), (3.00, 0)]
-
-# (upper bound mV, text colour, short caption)
-PACK_ZONES = (
-    (21_000, '#f66151', 'LOCKOUT floor'),
-    (21_500, '#ff8c00', 'below window'),
-    (23_300, '#26a269', 'clean window'),
-    (24_000, '#c08800', 'transition'),
-    (99_999, '#ff8c00', 'above ceiling'),
-)
 
 TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
                                 # "no reading" sentinel (fw v4.33 sends -32768).
                                 # Threshold, not equality -- see pimd_gui.py.
-
-
-def pack_soc_pct(pack_mV):
-    """Loaded pack millivolts → SoC %, piecewise-linear on SOC_NOMINAL."""
-    if pack_mV is None:
-        return None
-    vcell = pack_mV / 1000.0 / N_CELLS
-    if vcell >= SOC_NOMINAL[0][0]:
-        return 100.0
-    if vcell <= SOC_NOMINAL[-1][0]:
-        return 0.0
-    for (v1, s1), (v2, s2) in zip(SOC_NOMINAL, SOC_NOMINAL[1:]):
-        if v2 <= vcell <= v1:
-            return s2 + (s1 - s2) * (vcell - v2) / (v1 - v2)
-    return 0.0
-
-
-def pack_zone(pack_mV):
-    """Pack millivolts → (text colour, short caption) per PACK_ZONES."""
-    for upper, colour, caption in PACK_ZONES:
-        if pack_mV <= upper:
-            return colour, caption
-    return PACK_ZONES[-1][1], PACK_ZONES[-1][2]
 
 
 def _build_d_command(profile):
@@ -304,6 +277,11 @@ class MainWindow(QMainWindow):
         self._pack_mV = None
         self._board_temp_dC = None      # None also means "sentinel seen", i.e. no reading
         self._pack_lockout = False
+        # Fits the live discharge rate behind the row's time-remaining figure.
+        # Fed note_pulse() from the W handler: sweeps arriving IS the coil
+        # running, which is what makes the fitted rate a LOADED one. It also
+        # watches for pack swaps, which happen between runs as packs charge.
+        self._pack_tracker = pimd_pack.PackTracker()
         self._fw_version = None
         self._board_id = None
 
@@ -327,10 +305,16 @@ class MainWindow(QMainWindow):
         sensor_row = QHBoxLayout()
         self.lbl_pack = QLabel('Pack: —')
         self.lbl_pack.setToolTip(
-            'Pack voltage, state of charge and zone, from the firmware\'s P/V\n'
-            'telemetry (22k/2k7 divider on GP26, fw v4.29+). SoC is a fuel-gauge\n'
-            'indicator read under load, not a calibrated runway number.\n'
-            'Refreshes every ~60 s while connected.')
+            'Pack state of charge, voltage and time remaining, from the\n'
+            "firmware's P/V telemetry (22k/2k7 divider on GP26, fw v4.29+).\n"
+            'SoC is the fraction of usable pulsing runtime left, zeroed on the\n'
+            '{0:.1f} V firmware floor. Time left uses the discharge rate fitted\n'
+            'over the last {1:.0f} minutes of pulsing; a leading ~ means no rate\n'
+            'has been fitted yet, so the figure is the stored curve ({2})\n'
+            'rather than this pack. Refreshes every ~60 s while connected.'.format(
+                pimd_pack.PACK_TRIP_MV / 1000.0,
+                pimd_pack.PackTracker.WINDOW_S / 60.0,
+                pimd_pack.PACK_CAL_EPOCH))
         sensor_row.addWidget(self.lbl_pack)
         sensor_row.addSpacing(16)
         self.lbl_temp = QLabel('Board: —')
@@ -788,6 +772,7 @@ class MainWindow(QMainWindow):
             self._line_count += 1
 
             if raw.startswith('W'):
+                self._pack_tracker.note_pulse()
                 parsed = _parse_w_line(raw)
                 if parsed is not None:
                     time_ms, channels = parsed
@@ -887,6 +872,8 @@ class MainWindow(QMainWindow):
         holds the firmware's own line, sentinel and all, which is what a later
         offline pass should be reading."""
         self._pack_mV = pack_mV
+        # Before the label refresh, so the caption is drawn from this reading's rate.
+        self._pack_tracker.add(pack_mV)
         valid_temp = board_temp_dC > TEMP_INVALID_MAX_DC
         self._board_temp_dC = board_temp_dC if valid_temp else None
         if lockout is not None:
@@ -898,12 +885,12 @@ class MainWindow(QMainWindow):
             self.lbl_pack.setText('Pack: —')
             self.lbl_pack.setStyleSheet('')
         else:
-            colour, caption = pack_zone(self._pack_mV)
-            soc = pack_soc_pct(self._pack_mV)
-            if self._pack_lockout:
-                colour, caption = '#f66151', 'LOCKED OUT'
-            self.lbl_pack.setText(
-                f'Pack: {self._pack_mV / 1000.0:.2f} V · {soc:.0f}% · {caption}')
+            soc = pimd_pack.pack_soc_pct(self._pack_mV)
+            colour = pimd_pack.soc_colour(0.0 if self._pack_lockout else soc,
+                                          for_text=True)
+            caption = pimd_pack.pack_caption(self._pack_mV, self._pack_lockout,
+                                             self._pack_tracker)
+            self.lbl_pack.setText(f'Pack: {soc:.0f}% · {caption}')
             self.lbl_pack.setStyleSheet(f'color: {colour}; font-weight: bold;')
 
         if self._board_temp_dC is None:
@@ -925,6 +912,9 @@ class MainWindow(QMainWindow):
         self._pack_mV = None
         self._board_temp_dC = None
         self._pack_lockout = False
+        # A rate fitted on the pack that was here cannot describe whatever is
+        # fitted next time -- packs get swapped between runs as they charge.
+        self._pack_tracker.reset('disconnected')
         self._fw_version = None
         self._board_id = None
         self._refresh_sensor_labels()

@@ -71,6 +71,14 @@ Also unchanged: `PACK_ZONES` / `PACK_WINDOW_LO_MV` in the four PC tools still pa
 at 21.0 V, so the gauges will disagree with the firmware for the duration of the test build — left
 deliberately, as the mismatch is a standing reminder that this is not the §12 floor. (2026-08-12)
 
+> **Superseded 2026-08-13.** The pack this entry describes has been replaced with new, balanced
+> cells, so the "must be reverted before any pack that is meant to survive" warning above no longer
+> applies and **must not be acted on**: 19.0 V is now the working floor, not a test-build
+> divergence. The imbalance arithmetic (a weak pair reaching 2.0–2.1 V at the trip) was true of the
+> retired pack only. The `PACK_ZONES` / `PACK_WINDOW_LO_MV` mismatch it signs off on was resolved
+> the same day — those constants no longer exist. See the pack-replacement entry at the top of this
+> file.
+
 ### mcu/pimd_mcu.py — v4.37 — FIX the unbounded IRQ-off BUSY spin that silenced the board on rail loss
 
 Switching the +20 V rail off while the MCU stayed alive on USB used to silence the board
@@ -364,6 +372,149 @@ and supply separate by band-magnitude ratio, not by sign), 17.11 qualified.
 The header's Firmware / PC-tool version line was **deliberately left stale** at v4.35 / classviz
 v1.73: v4.36 is the test build and v4.37 is not yet exercised on hardware, so bumping it now would
 enshrine a version about to be superseded. Bump it at the next full consolidation. (2026-08-12)
+
+### hardware/power — the 6S pack was replaced; the 19.0 V floor is now real, not a test build
+
+The imbalanced pack characterised on 2026-08-12 has been retired and replaced with new cells in the
+same 6S ICR18650-26C arrangement, balanced. Two things follow, and both matter more than the
+hardware swap itself.
+
+**The v4.36 warning is void.** That entry ends "this is a deliberate, temporary divergence from §12
+and must be reverted before any pack that is meant to survive", because at a 19_000 trip the old
+pack's weak pair reached roughly 2.0–2.1 V — under the 2.75 V cell cutoff and into
+copper-dissolution territory. That hazard was a property of the imbalance, not of the trip level. On
+a balanced string, pack volts ÷ 6 describes the cells again and 19.0 V is 3.17 V/cell, comfortably
+inside the part's rating. `PACK_VOLTAGE_TRIP_MV` 19_000 / `PACK_REARM_MV` 19_500 therefore stand as
+the working floor, and a supersede note has been added to the v4.36 entry so the old warning cannot
+be read as current. The two constants still move together; 500 mV is the hysteresis and nothing else
+depends on the re-arm level.
+
+**Every discharge figure measured on 2026-08-12 is now epoch-bound.** The §12 envelope — 3.10 h
+endurance, 83.5 min continuous, 850 mV → 2.43 V sag, −32.8 rising to −72.7 mV/min, the +2.04 V rest
+recovery — was measured on a pack that no longer exists, and a tired imbalanced pack sags harder and
+knees earlier than a new one. Those numbers should be re-measured on one continuous run-down before
+anything is planned against them. The **shape** of the discharge is expected to carry across (same
+cells, same chemistry, same load); the absolute minutes are not. `pimd_pack.py` is built around
+exactly that distinction — see its entry below.
+
+Also worth recording: packs are swapped in and out of the rig as they charge, so more than one pack
+is in rotation at any time. That is now a design input rather than an incidental habit — it is why
+the new fuel gauge fits its rate live and watches for the voltage discontinuity a swap produces,
+rather than trusting any single stored calibration. (2026-08-13)
+
+### src/pimd_pack.py — v1 — NEW: shared pack fuel gauge, runtime-fraction SoC and live time remaining
+
+New module, pure stdlib and no Qt, on the same footing as `pimd_shape.py`. It replaces the pack
+maths that `pimd_gui.py`, `pimd_classviz.py`, `pimd_delaycal.py` and `pimd_rawlog.py` each carried
+their own copy of.
+
+**What was wrong with the old calculation.** `pack_soc_pct()` divided pack millivolts by six and
+read a *resting* Samsung ICR18650-26C open-circuit curve. That is wrong twice: it is a resting curve
+handed a *loaded* terminal voltage, and pack ÷ 6 assumes a balanced string. On the retired pack it
+read 11 % where a charger implied 53 % (v4.36). Note that the charger was not right either — the
+same entry shows the discharge rate roughly doubling over the run, which is a knee, not a half-full
+pack — so this is not a case of one number to correct toward.
+
+**Why not simply sag-correct the OCV curve.** Tried and rejected. Interpolating sag between the two
+measured anchors reproduces the charger's ~53 %, i.e. it reproduces the answer the discharge data
+contradicts. Worse, it is unstable where it matters: because pack ÷ 6 lands on the steep part of the
+Li-ion curve, a 400 mV change in the assumed sag moves the reading at 22.0 V from 23 % to 36 %. It
+would need a sag constant measured per pack, on a rig where packs are swapped.
+
+**What it does instead.** State of charge is the fraction of usable *pulsing runtime* remaining,
+read off a curve of loaded terminal volts → minutes-to-trip measured on a real discharge. No
+per-cell claim, and no sag constant is needed because a curve of loaded volts has sag baked into it.
+Zero percent is pinned to `PACK_TRIP_MV`, so moving the firmware floor re-zeros the gauge from one
+constant instead of needing a new table — passing `trip_mV=21_000` puts 0 % back at 21.0 V and
+rescales everything above it, which was checked.
+
+`SOC_CURVE_MV` is used for its **shape** only: `pack_soc_pct()` normalises it, so the absolute
+minutes of any one pack's calibration never reach the percentage. Absolute time comes from
+`PackTracker`, which least-squares-fits the discharge rate over a 15-minute trailing window of the
+pack telemetry and projects to the floor, formatted `H:MM`. At ~33 mV/min against a 7.35 mV LSB a
+window carries ~68 LSB of travel, so the fit has ample resolution, and it tightens by itself through
+the knee as the rate rises. Until a rate is available the caption falls back to the stored curve and
+marks it with a leading `~`, so a figure that has not yet earned trust says so.
+
+`PackTracker` is fed `note_pulse()` from each app's measurement-record handler rather than from any
+per-app streaming flag: records flowing *is* the coil running, in all four apps, and it needs no app
+to expose its state machine. Readings taken while idle are not fitted, because the drive-off drain
+is roughly half the loaded rate and would flatter the estimate; a pause keeps the last good rate
+rather than discarding it, since pausing does not change the pack. History is dropped on a rise of
+more than 500 mV between consecutive readings (a charged pack fitted, or the load coming off), on
+the pack going absent and returning, and on disconnect — all three are pack-swap cases, which this
+rig sees routinely.
+
+The shipped table is the 2026-08-12 discharge (118.1 min full-to-trip), generated by the module's
+own `--recal` path so that regenerating it cannot shift the gauge for methodology reasons, only
+because the pack changed. `--recal` works on discharge **rate** rather than elapsed time, which is
+what lets it take several sessions without stitching them: each consecutive pair of readings gives
+one rate sample at one voltage, rates are binned by voltage and median-filtered, and minutes-to-trip
+is the integral of 1/rate. A rest between sessions then contributes no sample rather than appearing
+as capacity from nowhere, and one bad reading loses to the median instead of moving the curve. Two
+things are cut rather than fitted: samples after a `LOCKOUT` mark, because the drive is off past
+that point and the pack drains at roughly half the loaded rate, and rates above 200 mV/min, which
+are the load step at session open rather than discharge. An earlier time-stitching implementation
+was written and discarded — it merged rest-recovered segments and produced a 73-minute
+discontinuity at 21.0 V. (2026-08-13)
+
+### src/pimd_gui.py — v4.18 — pack gauge on the shared fuel gauge; the data-quality zones are retired
+
+The `SOC_NOMINAL` / `PACK_ZONES` / `PACK_WINDOW_LO_MV` block and the two functions over it are
+replaced by an import of `pimd_pack.py`. The gauge fill and percentage are now runtime-fraction
+state of charge, the caption is measured volts then `H:MM left`, and the fill colour comes from the
+state of charge itself rather than from a zone.
+
+**The zones were deleted because the measurement retired them, not for tidiness.** They named a
+narrow "clean window" of pack voltage and their captions told the operator to stop capturing outside
+it. DESIGN 17.23, corrected 2026-08-12, measures that sensitivity at ~1 mV/V — the operating point
+moves −0.8 % across a 2.1 V pack swing, and thermal drift dominates it by ~10×. A caption reading
+"below window" was therefore advice against an effect that is not there. Gone with them: the dashed
+window-edge marker painted across the battery icon, whose whole job was to show where that advice
+started applying.
+
+`PackTracker` is fed from the `*` record branch and reset on disconnect. The header comment
+explaining what left, and why, is kept in place of the block — the reasoning is the part a future
+reader needs, and it is the one thing a deletion cannot leave behind. Checked that nothing
+downstream parsed the zone captions: `pimd_features.py` reads only the `# pack_v:` track. (2026-08-13)
+
+### src/pimd_classviz.py — v1.75 — pack gauge on the shared fuel gauge; the data-quality zones are retired
+
+Same change as `pimd_gui.py` v4.18: the duplicated pack block and both functions give way to
+`pimd_pack.py`, the zone captions and window marker go, and the caption becomes volts plus `H:MM`
+left. `PackTracker` is fed `note_pulse()` from the `W` handler, immediately after the parse guards
+so only accepted sweeps count, and reset on disconnect.
+
+This file carried the note saying the pack constants were duplicated deliberately because "every PC
+app in this repo stands alone", with an instruction to retune all four apps together if any one of
+them changed. That instruction was the argument against itself — four hand-synced copies of a
+calibration table is exactly the thing that drifts — and the rule is reversed here for the pack
+maths only. It still stands for `_build_d_command`, which is a few lines of wire formatting rather
+than a calibration. The gauge tooltip keeps its sentence about every reading landing in the session
+dump as a `# pack_v:` line, since that track is what `--recal` reads. (2026-08-13)
+
+### src/pimd_delaycal.py — v1.49 — pack gauge on the shared fuel gauge; conditions line reports time left
+
+Same change as `pimd_gui.py` v4.18, plus one thing unique to this tool: `_sensor_summary()`, the
+one-line form written into both the Activity Log and every exported profile's CSV header, used to
+end with the zone caption. It now ends with time remaining — `pack 21.90 V, 53 % SoC, 1:37 left` —
+because a sweep that outlasts the pack is the failure that line exists to let you see coming, and
+the zone name it replaced described a window that no longer means anything. A recorded `~` prefix
+marks a figure taken from the stored curve rather than the fitted rate, so an archived conditions
+line stays honest about which it was. `PackTracker` is fed from the `R` handler and reset on
+disconnect. (2026-08-13)
+
+### src/pimd_rawlog.py — v1.17 — pack row on the shared fuel gauge; the data-quality zones are retired
+
+Same change as the other three. This app renders its pack state as coloured label text rather than a
+painted gauge, so it needed the darker end of the palette where the GUI apps need the pale end; that
+is now `soc_colour(for_text=True)` rather than a second copy of the table, so the breakpoints stay
+shared and only the shade differs. The row reads `Pack: 53% · 21.90 V · 1:37 left`.
+
+Worth noting against this file's "deliberately dumb, so it cannot develop display-layer defects"
+property: the import does weaken standalone-ness slightly, but the pack row is not on the raw
+logging path, and the verbatim-line guarantee is untouched. `PackTracker` is fed `note_pulse()` from
+the `W` branch and reset on disconnect. (2026-08-13)
 
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 

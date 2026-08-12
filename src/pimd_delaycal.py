@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 # ###############################################################################
-# PIMD Delay Calibration v1.48
+# PIMD Delay Calibration v1.49
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
 # For each configured (freq, pulse) pair, sweeps the sample delay from a start
@@ -35,6 +35,8 @@
 # exported profile's notes and in the exported CSV's header block.
 #
 # History (full detail in CHANGELOG.md):
+#   v1.49 pack gauge reads runtime-fraction SoC + live H:MM remaining from the
+#         shared pimd_pack.py; the data-quality zone captions are retired
 #   v1.48 Manual Nudge cells are type-in editable, not just −/+ steppable
 #   v1.47 pack-voltage and board-temperature gauges (P/V telemetry); sweep conditions
 #         recorded in the profile notes and the exported CSV header
@@ -110,7 +112,9 @@ from PyQt6.QtSerialPort import QSerialPort  # noqa: E402
 from PyQt6.QtCore import QEvent, QIODevice, QPointF, QRectF, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QPainter, QPen  # noqa: E402
 
-APP_VERSION = '1.48'
+import pimd_pack  # noqa: E402 — pack SoC / time-remaining maths (no Qt in that module)
+
+APP_VERSION = '1.49'
 
 # The PWM period quantum. Every delay the firmware can actually produce is a
 # multiple of this, so a sweep step that is not is a step the hardware rounds
@@ -223,29 +227,19 @@ _COL_AUTO_DRIFTED = QColor(186, 156, 214)   # lavender:   locked-good channel no
 # --------------------------------------------------------------------------
 # Pack / board-temperature telemetry (v1.47)
 #
-# Constants, maths and both gauge widgets are duplicated from pimd_gui.py, not
-# imported from it, for the same reason _build_d_command() is duplicated in
-# pimd_rawlog.py: every PC app in this repo stands alone. The thresholds and
-# captions must stay in step with pimd_gui.py so no two apps disagree about the
-# same pack -- if you retune one, retune all three (pimd_gui.py, pimd_rawlog.py,
-# here). Rationale for the numbers themselves lives in pimd_gui.py / DESIGN §12
-# and is not restated.
+# The pack maths was duplicated from pimd_gui.py under an "every PC app stands
+# alone" rule. That was reversed in v1.49: it now comes from the shared
+# pimd_pack.py, because four hand-synced copies of a calibration table is
+# exactly the thing that drifts, and the note above telling you to retune all
+# three (by then four) apps was the tell. The rule still stands for
+# _build_d_command, which is wire formatting rather than a calibration.
+#
+# Gone with it: the PACK_ZONES "data-quality window", whose captions told the
+# operator to sweep only inside a narrow band of pack voltage. DESIGN 17.23,
+# corrected 2026-08-12, measures that sensitivity at ~1 mV/V -- the operating
+# point moves -0.8 % across a 2.1 V pack swing and thermal drift dominates it
+# by ~10x -- so the window was advice against an effect that is not there.
 # --------------------------------------------------------------------------
-N_CELLS = 6
-SOC_NOMINAL = [(4.20, 100), (4.15, 95), (4.11, 90), (4.06, 85), (4.02, 80),
-               (3.98, 75), (3.95, 70), (3.91, 65), (3.87, 60), (3.83, 55),
-               (3.80, 50), (3.77, 45), (3.75, 40), (3.72, 35), (3.70, 30),
-               (3.67, 25), (3.63, 20), (3.57, 15), (3.49, 10), (3.35, 5), (3.00, 0)]
-
-# (upper bound mV, fill colour, short caption)
-PACK_ZONES = (
-    (21_000, '#f66151', 'LOCKOUT floor'),
-    (21_500, '#ff8c00', 'below window'),
-    (23_300, '#8ff0a4', 'clean window'),
-    (24_000, '#f9f06b', 'transition'),
-    (99_999, '#ff8c00', 'above ceiling'),
-)
-PACK_WINDOW_LO_MV = 21_500      # lower edge of the clean window — marked on the gauge
 
 TEMP_GAUGE_MAX_C = 80.0         # board-temp gauge full scale
 TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
@@ -255,29 +249,6 @@ TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware
 # Telemetry older than this has stopped arriving: the firmware's own cadence is
 # ~60 s, so three missed reports mean the board went quiet, not that it is slow.
 SENSOR_STALE_S = 180.0
-
-
-def pack_soc_pct(pack_mV):
-    """Loaded pack millivolts → SoC %, piecewise-linear on SOC_NOMINAL."""
-    if pack_mV is None:
-        return None
-    vcell = pack_mV / 1000.0 / N_CELLS
-    if vcell >= SOC_NOMINAL[0][0]:
-        return 100.0
-    if vcell <= SOC_NOMINAL[-1][0]:
-        return 0.0
-    for (v1, s1), (v2, s2) in zip(SOC_NOMINAL, SOC_NOMINAL[1:]):
-        if v2 <= vcell <= v1:
-            return s2 + (s1 - s2) * (vcell - v2) / (v1 - v2)
-    return 0.0
-
-
-def pack_zone(pack_mV):
-    """Pack millivolts → (fill colour, short caption) per PACK_ZONES."""
-    for upper, colour, caption in PACK_ZONES:
-        if pack_mV <= upper:
-            return colour, caption
-    return PACK_ZONES[-1][1], PACK_ZONES[-1][2]
 
 
 class NudgeCellEdit(QLineEdit):
@@ -334,7 +305,7 @@ class NudgeCellEdit(QLineEdit):
 
 class BatteryGauge(QWidget):
     """Battery-icon pack gauge — fill and text are state of charge, the caption
-    is the measured pack voltage and which DESIGN §12 zone it sits in."""
+    is the measured pack voltage and the time left at the present rate."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -342,18 +313,23 @@ class BatteryGauge(QWidget):
         self.setMaximumHeight(52)
         self._pack_mV = None
         self._lockout = False
+        self._tracker = None
         self.setToolTip(
             'Pack voltage from the firmware (P/V telemetry, fw v4.28+).\n'
-            'Fill and % are state of charge on the nominal ICR18650 curve,\n'
-            'read off the loaded voltage, so it sits a few % low while pulsing.\n'
-            'Colour is the DESIGN §12 data-quality window:\n'
-            '  ≥ 24.0 V above the ceiling · 23.3–24.0 transition\n'
-            '  21.5–23.3 clean window · below 21.5 out of window\n'
-            '  ≤ 21.0 V firmware lockout floor (marked on the gauge).')
+            'Fill and % are state of charge as the fraction of usable pulsing\n'
+            'runtime left, zeroed on the {0:.1f} V firmware floor.\n'
+            'The caption is measured volts, then time left at the discharge\n'
+            'rate fitted over the last {1:.0f} minutes of pulsing.\n'
+            'A leading ~ means no rate has been fitted yet, so the figure is\n'
+            'the stored curve ({2}) rather than this pack.'.format(
+                pimd_pack.PACK_TRIP_MV / 1000.0,
+                pimd_pack.PackTracker.WINDOW_S / 60.0,
+                pimd_pack.PACK_CAL_EPOCH))
 
-    def set_reading(self, pack_mV, lockout=False):
+    def set_reading(self, pack_mV, lockout=False, tracker=None):
         self._pack_mV = pack_mV
         self._lockout = lockout
+        self._tracker = tracker
         self.update()
 
     def paintEvent(self, event):
@@ -374,27 +350,18 @@ class BatteryGauge(QWidget):
         p.drawRoundedRect(nub, 1.5, 1.5)
 
         inner = body.adjusted(3.0, 3.0, -3.0, -3.0)
-        soc = pack_soc_pct(self._pack_mV)
+        soc = pimd_pack.pack_soc_pct(self._pack_mV)
         if soc is not None:
-            colour, caption = pack_zone(self._pack_mV)
-            if self._lockout:
-                colour = PACK_ZONES[0][1]
+            colour = (pimd_pack.soc_colour(0.0) if self._lockout
+                      else pimd_pack.soc_colour(soc))
             p.setBrush(QColor(colour))
             p.drawRect(QRectF(inner.left(), inner.top(),
                               inner.width() * max(0.0, min(100.0, soc)) / 100.0,
                               inner.height()))
             text = '{0:.0f} %'.format(soc)
-            sub = '{0:.2f} V  ·  {1}'.format(self._pack_mV / 1000.0,
-                                             'LOCKED OUT' if self._lockout else caption)
+            sub = pimd_pack.pack_caption(self._pack_mV, self._lockout, self._tracker)
         else:
             text, sub = '—', 'no pack reading'
-
-        # Lower edge of the clean window, so "stop capturing here" is visible
-        # without doing the voltage-to-SoC conversion in your head.
-        edge = pack_soc_pct(PACK_WINDOW_LO_MV)
-        x = inner.left() + inner.width() * edge / 100.0
-        p.setPen(QPen(QColor('#77767b'), 1.0, Qt.PenStyle.DashLine))
-        p.drawLine(QPointF(x, inner.top()), QPointF(x, inner.bottom()))
 
         font = QFont()
         font.setPointSize(11)
@@ -505,6 +472,11 @@ class MainWindow(QMainWindow):
         self._board_temp_dC  = None   # None also means "sentinel seen", i.e. no reading
         self._pack_lockout   = False
         self._sensor_last_wall = None  # wall time of the last accepted P/V reading
+        # Fits the live discharge rate behind the gauge's time-remaining figure.
+        # Fed note_pulse() from the R handler: boxcar averages arriving IS the
+        # coil running, which is what makes the fitted rate a LOADED one. It
+        # also watches for pack swaps, which happen between sweeps as packs charge.
+        self._pack_tracker   = pimd_pack.PackTracker()
         self._fw_version     = None
         # Conditions span, reset at Run and on connect. A calibration is only
         # comparable with another if the conditions match (§14.1), so what the
@@ -1267,6 +1239,8 @@ class MainWindow(QMainWindow):
             self._pack_lockout = lockout
         self._sensor_last_wall = time.time()
         self._cond_record(pack_mV, self._board_temp_dC)
+        # Before the gauges, so the caption is drawn from this reading's rate.
+        self._pack_tracker.add(pack_mV)
         self._refresh_sensor_gauges()
         self._refresh_sensor_age()
         self._log('Sensor: {0}'.format(self._sensor_summary()))
@@ -1276,16 +1250,24 @@ class MainWindow(QMainWindow):
         if self._pack_mV is None:
             pack = 'pack —'
         else:
-            _colour, caption = pack_zone(self._pack_mV)
+            # The zone caption this used to carry named a data-quality window
+            # that DESIGN 17.23 retired; time-to-floor is the fact worth
+            # recording in its place, since a sweep that outlasts the pack is
+            # the failure this line exists to let you see coming.
+            minutes, live = self._pack_tracker.minutes_remaining(self._pack_mV)
+            tail = ('LOCKED OUT' if self._pack_lockout
+                    else '{0}{1} left'.format('' if live else '~',
+                                              pimd_pack.fmt_hm(minutes)))
             pack = 'pack {0:.2f} V, {1:.0f} % SoC, {2}'.format(
-                self._pack_mV / 1000.0, pack_soc_pct(self._pack_mV),
-                'LOCKED OUT' if self._pack_lockout else caption)
+                self._pack_mV / 1000.0,
+                pimd_pack.pack_soc_pct(self._pack_mV), tail)
         temp = ('board —' if self._board_temp_dC is None
                 else 'board {0:.1f} °C'.format(self._board_temp_dC / 10.0))
         return '{0}; {1}'.format(pack, temp)
 
     def _refresh_sensor_gauges(self):
-        self.gauge_pack.set_reading(self._pack_mV, self._pack_lockout)
+        self.gauge_pack.set_reading(self._pack_mV, self._pack_lockout,
+                                    self._pack_tracker)
         # Sub-zero readings are legal (the part goes to -55 °C) and BarGauge
         # clamps the bar fraction, so they show as an empty bar with the correct
         # negative number printed.
@@ -1312,6 +1294,9 @@ class MainWindow(QMainWindow):
         self._pack_lockout = False
         self._sensor_last_wall = None
         self._fw_version = None
+        # A rate fitted on the pack that was here cannot describe whatever is
+        # fitted next time -- packs get swapped between runs as they charge.
+        self._pack_tracker.reset('disconnected')
         self._refresh_sensor_gauges()
         self._refresh_sensor_age()
 
@@ -2286,6 +2271,7 @@ class MainWindow(QMainWindow):
                 continue
 
             if raw.startswith('R'):
+                self._pack_tracker.note_pulse()
                 self._on_r_record(raw)
             elif 'ERROR' in raw:
                 self.status_label.setText(f'Firmware: {raw}')
