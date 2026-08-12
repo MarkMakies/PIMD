@@ -2842,8 +2842,8 @@ class MainWindow(QMainWindow):
             name = profile.get('name', os.path.basename(path))
 
             # Carry the source profile's notes forward so the next export can
-            # attribute what it was derived from (USAGE §4 makes Import Profile
-            # the standard start of a recalibration, so this is the normal path).
+            # attribute what it was derived from. Import Profile is the standard
+            # start of a recalibration, so this is the normal path, not a corner.
             self._carried_notes  = (profile.get('notes') or '').strip()
             self._carried_from   = name
             self._last_save_name = os.path.splitext(os.path.basename(path))[0]

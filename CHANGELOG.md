@@ -1,6 +1,78 @@
+### README.md — the profile description caught up with the rig
+
+`README.md`'s technical description had drifted two profile epochs, in the same way and for the
+same reason as the `USAGE.md` retired alongside it. Corrected against `DESIGN.md` §10/§13:
+
+* **The Mode 2 bullet** claimed "the current locked profile (`cal_63_air_v1`) spans 7 pulse widths
+  × 9 sample delays = a 63-cell matrix". Now: the 63-cell grid is named as what the **July 2026
+  corpus** was captured on, and the current `cal_2x11_v5` is described as it is — 2 pulse widths
+  (10 and 100 µs) × 11 delays = **22 cells at 16.1 Hz** *(measured)*, **not locked, no corpus**,
+  with the 100 µs band's 3.125 kHz fan requirement stated.
+* **The delay-anchoring bullet** claimed an amplitude ladder of **4.9 → 0.5 V**; §10's anchor table
+  runs **2.4 V → 125 mV**. It also described delays as "deliberately avoiding the LC-ringing dead
+  zones and the measured ~4.45–4.65 V noise keep-out zone" — that keep-out **no longer exists
+  anywhere in `DESIGN.md`**, and §13 states the opposite outright: the profile spans the whole
+  decay with no gaps and "there is nothing it has to avoid", sampling the null minimum deliberately.
+  A retired *constraint*, not merely a stale number, so the clause is gone rather than renumbered.
+  Rewritten around §13's two-scheme framing — amplitude anchors early where polarity separates the
+  families, time anchors late where only decay rate does.
+* **Three consequential mentions** that would have contradicted the above: the Highlights bullet
+  ("63-cell" → "multi-band"), the Phase 3 roadmap line, and the *Faster response* roadmap bullet,
+  which still read "nothing is cut yet" when 63 → 22 is exactly that cut — it now records the cut
+  as made and names the open work as re-validating the narrowed grid against a fresh corpus.
+
+**Flagged, not fixed.** (a) `DESIGN.md` disagrees with itself on the tail pedestal — §10's cell 9
+says "~110 mV air pedestal", §13's span statement says "~70 mV pedestal". README follows §13 as the
+whole-profile claim; the two should be reconciled at a consolidation pass. (b) The hero image's alt
+text still says "8×9 decay-space matrix" — left alone deliberately, as it captions one specific
+historical frame rather than making a present-tense claim. (2026-08-13)
+
+---
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13
+
+### USAGE.md — retired at v1.31 — the per-app file headers are the usage doc now
+
+**Deleted `USAGE.md`**; its one irreplaceable section — the pipeline diagram and the typical
+workflow ordering — is lifted into `README.md` as a new **Toolchain & workflow** section, and the
+three `USAGE.md` references in `README.md` (repo layout, Documentation, the CC BY-SA licence list)
+are gone with it. Recover the last version with `git show 798faef:USAGE.md` (v1.31, 2026-08-09).
+
+**Why.** It had become a fourth history stream — file header lineage → `CHANGELOG.md` → `DESIGN.md`
+→ `USAGE.md` — and it lost the sync race, in the way a doc that nobody's edit path passes through
+always does. Measured at deletion, against source:
+
+* **Wrong about the rig.** §1 named `cal_63_air_v2` (7 × 9 = 63 cells) as the operating profile.
+  Reality is `cal_2x11_v5` (2 × 11 = 22 cells) — two profile epochs later, and the only JSON in
+  `src/data/profiles/`. §6 meanwhile referenced the `cal_3x10_v1` turnover that §1 had not heard
+  about, so the document contradicted the rig *and* itself.
+* **Behind on every version it tracked:** mcu v4.27 → actual **v4.37**; gui v4.14 → **v4.18**;
+  delaycal v1.47 → **v1.49**; classviz v1.72 → **v1.75**; features v10 → **v14**.
+* **Internally inconsistent:** the §1 pipeline diagram said classviz v1.61 / features v7 /
+  delaycal v1.29 while its own section headings said v1.72 / v10 / v1.47 — the tell that recent
+  updates only patched whichever section was in front of the editor.
+* **Silent on two shipped apps:** `pimd_rawlog.py` (v1.17) and `pimd_pack.py` (v1) had no section
+  at all, and rawlog is now a primary capture tool.
+* **~130 of its 691 lines were an inline changelog** duplicating this file. The 2026-07-30 pass
+  above already flagged the consequence — USAGE.md v1.24/v1.25/v1.26 exist *only* in that inline
+  block, putting three versions of history outside the single source of detailed history.
+
+**What replaces it.** The per-app headers overtook it: mcu 129 lines, classviz 110, rawlog 106,
+delaycal 94, gui 64 — carrying intent, the wire commands each app uses, the records it parses,
+sentinel semantics, log formats, rationale, and the terse version lineage. They stay current
+because they are colocated: the header is edited by the same change that alters the behaviour,
+which is exactly the property `USAGE.md` could not have. The new README section is deliberately
+**version-free and profile-name-free** — naming neither was what rotted `USAGE.md`, and
+`DESIGN.md`'s header line already owns the version roster and says to bump it on every edit. It
+now changes only when the *shape* of the pipeline changes.
+
+**Consolidated the same day, Doc-rev 2.3:** §15's `USAGE.md` file-table row is dropped, and the
+`README.md` row amended to record that it inherited the pipeline section while per-app detail went
+to the file headers — so the table still says where the content went. (2026-08-13)
+
+---
 
 ### src/pimd_classviz.py — v1.74 — FIX Load & Run never armed the soak/stall run state
 

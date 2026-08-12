@@ -37,13 +37,13 @@ and then a decaying eddy-current response. A nearby target perturbs that decay. 
 signal is sampled at precise, calibrated delays.
 
 - **Mode 1** — a single filtered (32-bit) sample at one held delay: the low-noise telemetry path, used for baselines and field tests.
-- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The current locked profile (`cal_63_air_v1`) spans **7 pulse widths × 9 sample delays = a 63-cell matrix**. Pulse widths are spaced geometrically (9 → 100 µs, ×1.5 per step) so each band interrogates a distinct slice of target time-constant space; repetition rates are chosen to hold duty near 30%. (An eighth 6 µs band was dropped: it carried no target information not already present in the other bands and was notoriously noisy.)
-- Sample delays are **amplitude-calibrated** — anchored to a top-dense ladder of voltages (4.9 → 0.5 V) on the region of the decay where this coil carries the most discrimination information — and snapped to the 8 ns PWM grid, deliberately avoiding the LC-ringing dead zones and the measured ~4.45–4.65 V noise keep-out zone.
+- **Mode 2** — an interleaved sweep across a profile of *(frequency, pulse-width, sample-delay)* points, reported as one frame per sweep. The grid is not fixed by the hardware, and it has deliberately *narrowed* as the corpus taught which cells earn their place. The July 2026 signature corpus was captured on a **63-cell** grid (7 pulse widths × 9 delays, spaced geometrically 9 → 100 µs at ×1.5 per step). The **current profile, `cal_2x11_v5`, runs 2 pulse widths (10 and 100 µs) × 11 sample delays = a 22-cell matrix**, sweeping at **16.1 Hz** *(measured)* — ~30% faster frames for the loss of the redundant middle bands. It is **not yet locked and has no corpus behind it**. Repetition rates are chosen to hold duty near 30%; the 100 µs band runs at 3.125 kHz and **requires the cooling fan** (see Hardware).
+- Sample delays use **two anchoring schemes in one profile**, where a PI profile conventionally picks one. Early cells are **amplitude-anchored** to a ladder of voltages (**2.4 V → 125 mV**) high on the flyback decay rather than the usual bottom ~700 mV — that region carries the most discrimination information, and it is where target *polarity* separates the families. Late cells are **time-anchored** on a geometric ladder out along the tail, because past the front end's lobe both families read positive and only *decay rate* separates them. Every delay is snapped to the 8 ns PWM grid (off-grid requests are silently rounded by the hardware). The profile spans the decay from 2.4 V down to the ~70 mV pedestal with no gaps — the null minimum is sampled deliberately, not avoided.
 - **Polarity convention:** ferrous targets read **positive** (stored magnetic energy reinforces the decay); non-ferrous read **negative** (opposing eddy currents weaken it). A third class turns out to be common in practice: **crossover targets** (cast iron, some stainless, real jewelry with steel fittings) read negative at short pulses and positive at long ones — the pulse-width axis resolves what a single operating point would misclassify.
 
 ## Highlights
 
-- 63-cell decay-space matrix recovering **multi-time-constant discrimination from a PI platform** — something most commercial PI detectors don't attempt.
+- A multi-band decay-space matrix recovering **multi-time-constant discrimination from a PI platform** — something most commercial PI detectors don't attempt.
 - **Validated on a 17-target labelled corpus** (July 2026): signature *shape* is invariant with target distance (5–15 cm, 30× amplitude range) and repeats across sessions and recalibrations to within a few percent — the property the classification layer is built on.
 - Targets fall into **three shape families** — ferrous, non-ferrous, and crossover — and overlapping targets combine **linearly** (a spanner + copper pipe frame decomposes back into its parts at 0.99 correlation), so unmixing is on the table, not just classification.
 - Phase-locked TX/sample timing on one RP2040 PWM slice — **~5 ns sample-trigger jitter (measured)**.
@@ -60,8 +60,6 @@ DESIGN.md                  Full engineering reference (hardware, firmware, proto
 CHANGELOG.md               Project change log
 CLAUDE.md                  Contributor / agent conventions (version bumps, changelog discipline)
 
-USAGE.md                   Per-app usage guide — intent, operation and pipeline flow
-
 mcu/                       MicroPython firmware for the RP2040-Zero
   pimd_mcu.py  main.py
 
@@ -70,6 +68,11 @@ src/                       PC-side tools (PyQt6)
   pimd_classviz.py         Mode 2 decay-space heatmap + ML logger
   pimd_delaycal.py         Delay-calibration sweep tool
   pimd_rawlog.py           Raw Mode 2 session logger
+  pimd_pack.py             Shared 6S pack fuel-gauge maths (imported by the four GUI apps)
+  pimd_shape.py            Shared feature maths (family / crossing / decay persistence)
+  pimd_features.py         Training-corpus builder
+  pimd_target_check.py     Target-registry validator
+  pimd_corpus_check.py     Corpus-level acceptance checker
   requirements.txt
   data/                    Settings, captured CSVs and calibrated profiles (runtime-generated)
 
@@ -77,6 +80,47 @@ Electronics/PIMD604/       KiCad project — schematic rev 6.04 (as-built)
 
 References/                Schematic export, scope captures, sample heatmaps
 ```
+
+## Toolchain & workflow
+
+The firmware is the measurement primitive; every PC tool is a client of the same USB-serial
+protocol (`DESIGN.md` §9). Together they form one pipeline:
+
+```
+mcu/pimd_mcu.py (RP2040)            — the measurement primitive
+      │  USB-serial, ASCII records (DESIGN §9)
+      ├─► src/pimd_delaycal.py      — calibrates sample delays,
+      │        exports cal_*.json profiles ──► src/data/profiles/
+      ├─► src/pimd_gui.py           — Mode 1 live telemetry / bench monitor
+      ├─► src/pimd_rawlog.py        — verbatim Mode 2 session logger (ground truth)
+      └─► src/pimd_classviz.py      — Mode 2 heatmap; loads & runs saved profiles;
+               │    captures signatures ──► src/data/corpora/ + src/data/sessions/
+               └─ uses src/pimd_shape.py — shared feature maths
+                            │
+                            ▼
+          src/pimd_features.py + src/pimd_target_check.py
+               — registry-validated training-corpus builder ──► ML corpus
+```
+
+`pimd_pack.py` is shared by all four GUI apps, so they can never disagree about the same battery.
+
+**Typical workflow**
+
+1. Flash the firmware once (`DESIGN.md` §16).
+2. Run **delaycal** after a full thermal soak to produce a calibrated profile; lock the profile JSON.
+3. Run **classviz**, *Load & Run* the locked profile, and capture target signatures against the
+   target registry in `src/data/targets/`.
+4. Build the corpus with **features**; gate a capture day with **corpus_check**.
+
+**gui** is the independent Mode 1 bench monitor used for noise-floor and drift investigation at a
+single operating point. **rawlog** is the deliberately dumb recorder: it writes every line the
+firmware sends, verbatim, so there is always a raw record no display logic can corrupt. Never run
+Mode 1 and Mode 2 at once — always send `E` between mode switches.
+
+> Each tool carries its own detailed operating notes — intent, wire commands used, record formats
+> and per-version lineage — in its **file header**, which is updated in the same edit that changes
+> the behaviour. Current firmware and tool versions, and the operating profile in use, are on the
+> header line at the top of **`DESIGN.md`**; they are deliberately not duplicated here.
 
 ## Quick start
 
@@ -129,8 +173,8 @@ A32                            one 32-sample boxcar average (R record)
 
 This release is **Phase 2 — publish the work to date.** Active and planned work:
 
-- **Phase 3 — machine learning.** Use the 63-cell decay-space matrix for filtering, classification and (the stretch goal) ground discrimination. First milestone reached (July 2026): a locked, delay-calibrated operating profile and a 17-target labelled signature corpus recorded at three distances, with distance-invariance, cross-session repeatability and mixture linearity all verified in air.
-- **Faster response.** Investigate reducing cell count and per-cell averaging for quicker frames — the corpus so far says different targets go redundant in *different* cells, so nothing is cut yet.
+- **Phase 3 — machine learning.** Use the decay-space matrix for filtering, classification and (the stretch goal) ground discrimination. First milestone reached (July 2026): a locked, delay-calibrated operating profile and a 17-target labelled signature corpus recorded at three distances, with distance-invariance, cross-session repeatability and mixture linearity all verified in air.
+- **Faster response.** First cut made (August 2026): 63 cells → 22, for ~30% faster sweeps. Because the corpus says different targets go redundant in *different* cells, the narrowed grid has to earn its keep against a fresh corpus before it can be locked — that re-validation is the open work, along with per-cell averaging.
 - **Front-end revision** (TX switch + gate driver, as above), plus a scope measurement of TX coil current vs pulse width to settle whether the longest band is past the coil-current plateau.
 
 See **DESIGN.md §14** for the full open-problems list.
@@ -138,7 +182,7 @@ See **DESIGN.md §14** for the full open-problems list.
 ## Documentation
 
 - **[DESIGN.md](DESIGN.md)** — the complete engineering reference: measured operating envelope, coils, drive and receive chains, timing, serial protocol, power, invariants and curated test log. Self-contained; a new reader (human or agent) can pick up the project cold from it.
-- **[USAGE.md](USAGE.md)** — per-app usage guide: intent, operation and pipeline flow for the firmware and each PC tool.
+- **Per-app notes** — each tool's intent, operation, wire commands and version lineage live in its own **file header** (`mcu/pimd_mcu.py`, `src/pimd_*.py`); the pipeline that connects them is under *Toolchain & workflow* above.
 - **Build diary** — the full chronological story, with photos and dead-ends: <https://makies.com.au/pulse-induction-metal-detector/>
 - **Video** — <https://www.youtube.com/@markmakies>
 
@@ -147,7 +191,7 @@ See **DESIGN.md §14** for the full open-problems list.
 This project uses two licences, matched to the kind of work:
 
 - **Code** (`src/`, `mcu/`) — **GNU GPL v3.0-or-later**. See [`LICENSE`](LICENSE).
-- **Hardware and documentation** (`Electronics/`, `USAGE.md`, `DESIGN.md`, schematics, images) — **Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)**. See [`LICENSE-docs`](LICENSE-docs).
+- **Hardware and documentation** (`Electronics/`, `DESIGN.md`, schematics, images) — **Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)**. See [`LICENSE-docs`](LICENSE-docs).
 
 Pulse Induction Metal Detector © 2022–2026 Mark Makies.
 
