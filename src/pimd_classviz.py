@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.73
+# PIMD Signature Visualiser (ClassViz) v1.74
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -22,6 +22,8 @@
 #           temperature v4.33+; board_temp_dC = -32768 means NO READING)
 #
 # History (full detail in CHANGELOG.md):
+#   v1.74 FIX Load & Run never armed the soak/stall run state -- every soak line
+#         it produced read streamed_s=0 and no periodic lines were written at all
 #   v1.73 ADC-rail marking on clipped cells; Load & Run holds Q/G until the
 #         firmware acknowledges the D
 #   v1.72 pack voltage and board temperature come from firmware telemetry, on
@@ -147,7 +149,7 @@ import pimd_features       # noqa: E402 — Analysis tab signature capture/save
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.73'
+APP_VERSION = '1.74'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -1712,6 +1714,10 @@ class MainWindow(QMainWindow):
         none of it may happen against a D that was refused."""
         self.send_command('Q{0}'.format(DYNAMIC_PROFILE_INDEX))
         self.send_command('G')
+        # v1.74: the stream starts HERE, so the soak/stall run state is armed here
+        # -- ahead of _apply_profile, which can reopen the dump. Before v1.74 this
+        # path never armed it at all and every soak line it produced was wrong.
+        self._begin_stream_run()
         self._apply_profile(profile, DYNAMIC_PROFILE_INDEX, profile_raw_bytes)
         self.pb_start.setText('Running')
         self.pb_start.setStyleSheet(self.MY_GREEN)
@@ -1722,6 +1728,9 @@ class MainWindow(QMainWindow):
         # above already reopened a dump, _maybe_autostart_session no-ops.
         self._session_autolog_suppressed = False
         self._maybe_autostart_session('profile load + run')
+        # v1.74: matches start_stop()'s start branch, so a run begun by Load & Run
+        # is bracketed by stream-start/stream-stop like any other.
+        self._append_soak('stream-start')
         self.statusBar().showMessage('Loaded and running profile: {0}'.format(
             profile.get('name', name)))
 
@@ -7462,17 +7471,10 @@ class MainWindow(QMainWindow):
             # scoped to one streaming run, so "stop logging this run" doesn't
             # quietly become "stop logging all day".
             self._session_autolog_suppressed = False
-            # v1.64: the stall latch is scoped to one streaming run, like the
-            # suppression flag above -- a stall from an earlier run must not sit
-            # on the Rate readout accusing this one.
-            self._last_fw_time_ms = None
-            self._stall_count     = 0
-            self._stall_worst_s   = 0.0
-            self._stall_total_s   = 0.0
-            self._stall_last_wall = None
             # v1.66: mark the run start BEFORE the dump opens, so the header's
-            # soak line already carries this run's idle_before_s.
-            self._stream_run_start_wall = time.time()
+            # soak line already carries this run's idle_before_s. v1.74: the body
+            # of this moved into _begin_stream_run(), shared with Load & Run.
+            self._begin_stream_run()
             self._maybe_autostart_session('stream start')
             self._append_soak('stream-start')
 
@@ -8293,6 +8295,35 @@ class MainWindow(QMainWindow):
         return 'streamed_s={0:.0f}, stalled_s={1:.0f}, idle_before_s={2}'.format(
             self._streamed_s(), self._stall_total_s,
             'unknown' if idle is None else '{0:.0f}'.format(idle))
+
+    def _begin_stream_run(self):
+        """Arm the per-run soak and stall state for a streaming run that is
+        starting NOW (v1.74).
+
+        Every path that puts the board into Mode 2 streaming must call this, and
+        must call it BEFORE any path that can open a session dump -- the dump's
+        header soak line reads _stream_run_start_wall to compute idle_before_s,
+        so a dump opened first records 'unknown' permanently.
+
+        It exists because there are two such paths, not one. start_stop() had
+        this inline since v1.64/v1.66; _finish_load_run_profile() -- Load & Run,
+        which is ALSO the launch autostart, i.e. how most sessions actually begin
+        -- sends its own Q/G and never ran it. The cost was silent and total:
+        with _stream_run_start_wall left None the periodic emit is guarded off,
+        _streamed_s() reports 0, _idle_before_s() reports unknown, and the
+        stream-stop banking is skipped, so a 38-minute run logged
+        'streamed_s=0, stalled_s=113' -- a negative effective soak, which is the
+        tell. Factored into one place so a third entry point cannot drift again."""
+        # v1.64: the stall latch is scoped to one streaming run -- a stall from an
+        # earlier run must not sit on the Rate readout accusing this one. Load &
+        # Run did not reset these either, so back-to-back Load & Runs in one app
+        # session had the second inherit the first's stall total.
+        self._last_fw_time_ms = None
+        self._stall_count     = 0
+        self._stall_worst_s   = 0.0
+        self._stall_total_s   = 0.0
+        self._stall_last_wall = None
+        self._stream_run_start_wall = time.time()
 
     def _append_soak(self, event):
         """One '# soak:' line into the open dump. Same write+flush pattern and

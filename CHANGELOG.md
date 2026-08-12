@@ -1,3 +1,40 @@
+### src/pimd_classviz.py — v1.74 — FIX Load & Run never armed the soak/stall run state
+
+`_finish_load_run_profile()` — the Load & Run path, which is **also** the v1.53 launch autostart and
+therefore how most sessions actually begin — sends its own `Q`/`G` instead of going through
+`start_stop()`, and never set `_stream_run_start_wall`. Everything in the v1.66 soak track keys off
+that one attribute, so the failure was silent and total: the periodic emit is guarded on it
+(`_update_pack_v_age` tick) and never fired, `_streamed_s()` returned only the banked total,
+`_idle_before_s()` returned None, and the stream-stop banking was skipped so `_streamed_total_s`
+stayed 0 for the life of the app. The same path also skipped the v1.64 per-run stall reset, so
+back-to-back Load & Runs in one app session had the second inherit the first's stall total.
+
+**Caught on `session_20260812_121058`**, a 38-minute run whose only soak lines were the header's
+`session-open` and a closing `stream-stop` reading `streamed_s=0, stalled_s=113`. Effective soak is
+defined as `streamed_s - stalled_s`, so that pair computes to **−113 s** — a negative soak, which is
+the tell that the field is broken rather than merely surprising. (`stalled_s=113` was itself
+correct: 59.768 s at 12:16:01 plus 53.281 s at 12:25:03. Its coincidence with the 113.259 s outage
+in the morning's `session_20260812_100209` is exactly that, a coincidence — no counter leaks across
+sessions.)
+
+Fixed by factoring the run-arming out of `start_stop()` into **`_begin_stream_run()`** and calling it
+from both entry points. In Load & Run it goes immediately after the `G`, *ahead* of `_apply_profile`,
+because that can reopen the dump and the header's soak line reads `_stream_run_start_wall` to compute
+`idle_before_s` — arming afterwards would record `unknown` permanently. A matching
+`_append_soak('stream-start')` now brackets the run the way `start_stop()` already did. One helper
+rather than two inline copies, so a third streaming entry point cannot drift the same way; the
+docstring records what the drift cost so the next reader does not have to re-derive it from a
+negative soak figure. No change to the wire format, the dump schema, or the acquisition path.
+
+**Verified on the bench the same afternoon, and the failing case was caught too.**
+`session_20260812_150333` (v1.74, Load & Run) opens with `session-open` *and* `stream-start`, then
+emits `periodic` on the minute with `streamed_s=61`, `121`, … and a real `idle_before_s=747` — all
+four symptoms cleared on the path that had never worked. The session immediately before it,
+`session_20260812_145123` (v1.73), is the counter-leak predicted from the code and not previously
+observed: it opens with **`stalled_s=113` already on the clock**, inherited from the 12:10 run in the
+same app process, because Load & Run never ran the v1.64 per-run reset. Both halves of the bug are
+therefore evidenced, one by its fix and one by a last example of itself. (2026-08-12)
+
 ### mcu/pimd_mcu.py — v4.36 — TEST BUILD: pack floor 21.0 → 19.0 V, re-arm 21.5 → 19.5 V
 
 `PACK_VOLTAGE_TRIP_MV` 21_000 → **19_000** and `PACK_REARM_MV` 21_500 → **19_500**, to let the
