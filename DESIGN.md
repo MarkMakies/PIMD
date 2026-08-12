@@ -3,7 +3,7 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **38 mm forced-air fan on the U1/FET cluster — mandatory, fitted 2026-08-11, used in all cases** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.75 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
 **Last bench update:** 2026-08-12 (thermal/battery sweep, 186 min of pulsing; fw v4.37 bench-verified; new pack fitted 2026-08-13)
-**Doc rev:** 2.3 (2026-08-13) `USAGE.md` retired — §15 row dropped; its pipeline section now in `README.md`, per-app detail in the file headers
+**Doc rev:** 2.4 (2026-08-13) §13's pedestal corrected to the measured ~110 mV, resolving the §10/§13 conflict; `USAGE.md` retired (2.3)
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -479,7 +479,7 @@ and was withdrawn on 2026-08-13.
   region carries the most discrimination information and sits well above the noise floor. This is
   the oldest unconventional choice in the project and it still holds.
 - **The profile spans the whole decay with no gaps.** It runs from **2.4 V down to the
-  ~70 mV pedestal** in 11 cells, and there is nothing it has to avoid.
+  ~110 mV pedestal** in 11 cells, and there is nothing it has to avoid.
 - **Two anchoring schemes in one profile — amplitude early, time late.** Conventionally a PI profile
   picks one. Here the early cells are anchored to *voltages* on the decay, because that is where
   target **polarity** separates families; the late cells are anchored to *delays* out on the tail,

@@ -1,3 +1,29 @@
+### DESIGN.md — Doc-rev 2.4 — §13's pedestal corrected to the measured ~110 mV
+
+`DESIGN.md` contradicted itself on the tail pedestal: §10's cell 9 read "~110 mV air pedestal"
+while §13's span statement read "2.4 V down to the **~70 mV** pedestal". Resolved in favour of
+§10 — human-directed, hence the Doc-rev bump.
+
+**§10 is the measured one, three ways.** The pedestal was measured directly at **113.0 / 111.9 mV**
+(band 0 / band 1) on a healthy frame after the +97 mV bias mod; §17.7 records the mod meeting its
+design number at **predicted +111.7 mV, measured +112.8 mV**; and the profile-design work landed
+the late cells "on the ~110 mV air pedestal" by cell 7–8. §13's ~70 mV matches **no recorded
+pedestal measurement anywhere in this file or `DESIGN.md`**.
+
+**Where the 70 came from — worth recording, because both candidates are real numbers that are not
+the pedestal.** §17.7's own sentence continues "air's worst case moved from clipped to **67.2 mV**
+above the 2.441 mV floor" — headroom above the noise floor, not a pedestal level. And the **null
+minimum** measured 59 / 64 / 69 mV on the predecessor profile — genuinely the lowest voltage the
+profile samples, but a different cell from the pedestal cells (§10 lists cell 7 as the null minimum
+and cells 9–11 as out on the tail). Either way the span sentence had collapsed two quantities into
+one phrase; §13 now names the pedestal only.
+
+`README.md`'s delay-anchoring bullet had inherited the ~70 mV from §13 the day it was rewritten,
+and is corrected with it. No measured value is dropped: 67.2 mV and the null-minimum depths keep
+their own homes in §17.7 and §10. (2026-08-13)
+
+---
+
 ### README.md — the profile description caught up with the rig
 
 `README.md`'s technical description had drifted two profile epochs, in the same way and for the
@@ -23,7 +49,9 @@ same reason as the `USAGE.md` retired alongside it. Corrected against `DESIGN.md
 
 **Flagged, not fixed.** (a) `DESIGN.md` disagrees with itself on the tail pedestal — §10's cell 9
 says "~110 mV air pedestal", §13's span statement says "~70 mV pedestal". README follows §13 as the
-whole-profile claim; the two should be reconciled at a consolidation pass. (b) The hero image's alt
+whole-profile claim; the two should be reconciled at a consolidation pass. **[Resolved the same day
+in favour of §10's ~110 mV — see the entry above; README's ~70 mV came from here and went with
+it.]** (b) The hero image's alt
 text still says "8×9 decay-space matrix" — left alone deliberately, as it captions one specific
 historical frame rather than making a present-tense claim. (2026-08-13)
 
