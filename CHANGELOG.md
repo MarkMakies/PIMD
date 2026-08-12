@@ -71,6 +71,242 @@ Also unchanged: `PACK_ZONES` / `PACK_WINDOW_LO_MV` in the four PC tools still pa
 at 21.0 V, so the gauges will disagree with the firmware for the duration of the test build — left
 deliberately, as the mismatch is a standing reminder that this is not the §12 floor. (2026-08-12)
 
+### mcu/pimd_mcu.py — v4.37 — FIX the unbounded IRQ-off BUSY spin that silenced the board on rail loss
+
+Switching the +20 V rail off while the MCU stayed alive on USB used to silence the board
+**completely** — no Mode 2 `W` records, no 60 s `P` telemetry, and not even the `PACK: rail absent`
+line the failsafe exists to print — resuming as if nothing had happened when the rail returned. Long
+treated as a convenient property for flashing and debugging with the high-power side off. On
+2026-08-12 it cost a diagnosis: `session_20260812_121058` stopped dead at 12:48:55, **19 minutes
+before anyone cut the power**, and left no pack voltage or board temperature across the event.
+
+**Mechanism, and it is worse than "interrupts stop firing".** `read_raw_bytes_hold()` calls
+`disable_irq()` and then spins on two unbounded, non-yielding loops (`while not busy_pin.value():
+pass` / `while busy_pin.value(): pass`); `enable_irq()` is only reached ~160 lines later after the
+PWM writes. With the ADC unpowered, BUSY parks and the MCU spins there forever **with interrupts
+globally masked** — which masks USB CDC too, so even already-queued stdout cannot drain. That is why
+the silence was total rather than merely missing sweep records. Compounding it, `service_sensors()`
+is the only path to the pack ADC, the DS18B20, the `P` line and `_pack_voltage_trip_check` (whose
+`pack_mV < PACK_ABSENT_MV` test is the sole rail-absence detector), and both its call sites are
+downstream of a *completed* `read_raw_bytes_hold()`. **The missing `PACK:` message was therefore a
+symptom of the bug, not evidence against it** — the detector was unreachable by construction.
+
+**The fix.** Both spins are bounded by a new `BUSY_SPIN_LIMIT`; on expiry the function re-enables
+IRQs *itself* and returns `None`. `acquire_mode2` treats `None` as "abandon the sample", sets
+`state = 'rail_absent'` and breaks — before the boundary `freq()` writes, so the PWM is never
+reconfigured for a discarded sample. This reuses the existing `if pack_voltage_lockout: break` idiom:
+the `while` condition is already false, so one `break` leaves both loops. New `service_rail_absent()`
+rests there with drive safe and resumes Mode 2 after `RAIL_RESUME_CONSECUTIVE` (3) checks at
+`RAIL_RECHECK_MS` (1000) with the pack at or above `PACK_REARM_MV`. The main loop needed no
+restructuring: it already calls `check_for_commands()` and `service_sensors()` every pass regardless
+of state, so telemetry resumes the moment the state leaves `mode2_running`.
+
+**The constant is the risk, and it is deliberately generous.** A *healthy* spin here is **1–2 ms, not
+microseconds**: DESIGN §7 records the poll catching only ~1-in-6 BUSY-high windows, and v4.34
+measured per-cell interpreter cost at ~2.3 ms "dominated by the BUSY sync" (`cal_63` cross-checks it
+at 63 cells / 6.88 Hz = 2.31 ms/cell). The wait is also stochastic and scales with the PWM period, so
+its tail is not knowable from source. **The regression to fear is a false abort mid-sweep, not a slow
+one.** A decrementing local int was chosen over a `ticks_ms` deadline because a call per iteration
+would roughly double the poll period, and poll period is exactly what sets how late the BUSY falling
+edge is caught — late detection is the §7 mid-conversion-read mechanism that produces bit-truncated
+outliers at 1/2 and 1/4 of true value, which the whole v4.16→v4.21 lineage exists to close.
+
+**Bench-timed on this board before the constant was set** (RP2040-Zero, GP15, 50 000-iteration REPL
+runs, spread < 0.03 % over 5 repeats):
+
+| variant | µs/iteration |
+|---|---|
+| `b.value()` alone | 5.816 |
+| pre-v4.37 spin (poll + `pass` body) | ≈ 5.816 |
+| **bounded spin as shipped** (`n -= 1; if not n:`) | **9.024** |
+| bound folded into the `while` condition instead | 9.008 — no cheaper, so the clearer form was kept |
+| `for _ in range(N)` | 9.848 — **slower** as well as allocating |
+
+`for/range` was rejected on the file's allocation-free doctrine (the v4.14 heap-churn lesson) and the
+measurement independently confirms it as the worst option. `BUSY_SPIN_LIMIT = 2200` × 9.024 µs =
+**19.9 ms**, the ~20 ms budget.
+
+**The cost is bigger than the design estimate and is recorded rather than buried: the poll period
+rises 5.816 → 9.024 µs, +55 %, against a planning estimate of +20–30 %.** Whether 3.2 µs of extra
+latency in noticing BUSY fall matters cannot be settled from source — it needs the LTC2508 data-hold
+window (no datasheet in the tree) or a scope. Note §7's ~1-in-6 catch rate predicts the visible effect
+may be a **lower sweep rate rather than worse noise**, since a longer poll period should miss
+proportionally more BUSY-high windows. The pre-change baseline to compare against is
+**16.13 Hz on `cal_2x11_v5`** (measured from `session_20260812_100209`, 62.0 ms median). A before/after
+run comparing sweep rate, per-channel σ and `gate_reject_count` is the acceptance test for this
+change and had not been run when this entry was written.
+
+**Also fixed, a pre-existing latent bug:** an exception raised anywhere inside the per-cell IRQ-off
+section unwound to the Mode 2 handler with interrupts still masked, and that handler's first act is
+`print()` — so the board would brick itself silent while reporting its own error. Interrupts are now
+restored before the report.
+
+**Behaviour changes on the wire.** `B` grows from 6 to 9 fields (additive; nothing in `src/` parses
+it): `busy_timeout_count` answers "did this happen", `busy_spin_min_left` records how close a healthy
+spin came to the cap — the field that turns the constant from a guess into a measured margin, and it
+resets to the limit rather than 0 — and `rail_absent_ms_max` is the longest outage dwell.
+`busy_high_count`, incremented but unchecked since v4.11, becomes meaningful: near-zero beside a
+non-zero `busy_timeout_count` means the outage spanned the whole read window. Two new `PACK:` lines
+and one new `ADC:` line; `PACK:` is already classified by all three PC consumers so no PC-side change
+is needed, and neither new line contains the substring `lockout cleared`, which ClassViz keys its
+latch-clear on. **`S` and `A<n>` are now refused while the rail is absent** — a real behaviour change,
+made because their read paths still carry the unbounded wait.
+
+**Deferred, with the residual stated plainly.** `read_raw_sample()` (needs a different abort contract:
+it returns an int, so `None` would poison `acquire_raw_average`'s arithmetic) and Mode 1's
+`acquire_filtered_data()` (a different mechanism — it waits on the DRL ISR with IRQs *enabled*, so a
+`ticks_ms` deadline is the right tool there, the opposite conclusion to the hot path). The command
+refusals make both unreachable in the case that actually gets hit, but **a rail cut *during* an
+already-running Mode 1 stream or an in-flight `A<n>` still stalls telemetry.**
+
+Validated offline: parses; no undeclared global writes anywhere in the file; the abort's `break`
+verified by AST to sit inside the `for` nested in the `while` whose condition tests `state`; and
+`service_rail_absent()` was executed against stubbed hardware across seven scenarios — normal
+off/return cycle, the sub-second cadence gate, BUSY-dead-with-healthy-pack (stops, never
+auto-resumes, so no thrash loop is possible), failsafe latching during entry (its `stop` wins),
+lockout set (resume impossible), wire discipline (**one line across a simulated 10-minute outage**),
+and a brownout return that correctly refuses to resume below `PACK_REARM_MV`. Flashed to the board
+and verified by sha256 (`55e2c45f1140b84b`); **the acquisition path itself has not yet been exercised
+on hardware — no sweep has been run on v4.37.**
+
+**Which spin traps is now known from the schematic, not inferred.** GP15 carries a **1k pull-down**,
+with **110R in series** from the ADC's BUSY output — chosen to damp digital noise. An unpowered ADC
+stops driving BUSY, the pull-down takes GP15 firmly **low**, and `while not busy_pin.value()` — spin
+1 — therefore spins. Deterministic, not a floating pin, so the abort path is exercised by every rail
+loss rather than by some. This supersedes an earlier inference in this entry's drafting that GP15
+"parks high": that came from a single read taken at the REPL with the PWM peripheral still
+free-running after a soft reset, so BUSY was still toggling and the read was a coin flip, not a park.
+Spin 2 stays bounded for a different reason — an ADC that is powered but stuck mid-conversion, which
+no rail check can catch — and it costs little, since at ~15 µs of BUSY-high it runs only a couple of
+polls against spin 1's many.
+
+**Logic levels at GP15 are comfortable — a marginal-threshold theory was raised and killed.** The
+ADC's **OVDD is tied to 3.3 V** (not to the 2.5 V analogue rail U7 supplies), so BUSY's high arrives
+at GP15 as 3.3 × 1000/1110 = **2.973 V** against an RP2040 V_IH of **2.145 V**: **828 mV, 39 % over
+threshold**. Recorded because the alternative was briefly worth chasing — had OVDD been on the 2.5 V
+rail the level would have been 2.25 V with only ~107 mV of margin, and a marginal high produces a
+*fractional* detection rate, which is the shape of §7's unexplained ~1-in-6. It is not the mechanism.
+
+**So §7's ~1-in-6 catch rate remains unexplained, and today's timing makes it more puzzling, not
+less.** At a measured 5.816 µs poll against a stated ~15 µs BUSY-high window, roughly 2.6 polls land
+inside every window — simple sampling says catch nearly all of them, not one in six. Either the
+15 µs figure is not the BUSY-high width, or the ~1-in-6 describes *throughput* (conversions serviced
+per conversions occurring, which the ~2.3 ms per-cell cost would dominate) rather than windows
+missed. Worth settling with a scope, because the two readings imply very different ceilings on the
+sweep rate.
+
+**This also revises the sweep-rate prediction downward in severity.** The concern was that a +55 %
+poll period would miss proportionally more BUSY-high windows. But 9.024 µs still fits inside a 15 µs
+window **1.66×** over, so every window should still be caught and the catch behaviour should not
+change at all. The earlier expectation of a drop from 16.13 Hz was based on a proportional model that
+the window arithmetic does not support. Test A still decides it.
+
+This build also still carries the v4.36 test floor (19.0/19.5 V), which must be reverted before any
+pack that is meant to survive. DESIGN §8's firmware version and §9's "`B` — 6 fields" go stale until
+the next §18 consolidation pass. (2026-08-12)
+
+### findings — 2026-08-12 — thermal / battery sweep, `cal_2x11_v5` on the 6S pack
+
+Four sessions, **186 min of pulsing**, full charge 24.69 V to the 19.0 V trip; fw v4.35 then the
+v4.36 test build; classviz v1.73/v1.74; coil in air, no targets. Per-session narrative is in
+`thermal-test.md` — only the load-bearing results are here.
+
+**How thermal and supply were separated**, because it is what makes these numbers re-takeable: both
+levers already exist in an ordinary run and neither needed a special test. *Thermal* — a cold start
+at near-constant pack (session 3, 21.8 → 44.3 °C while the pack moved 0.29 V, so supply contributes
+~1 % of the swing). *Supply* — session 4 after 15:15 held 43.8 ± 0.2 °C while the pack fell
+21.20 → 19.07 V, a 2.1 V sweep at flat temperature; session 1 gives a second such window
+(23.05 → 21.00 V at 39.1 °C) at the other end of the discharge, and the two agree. Reuse this shape
+rather than sweeping a bench supply.
+
+**Noise floor 65 µV** — median 32-sweep σ over 1 257 windows. Flat across every null/pedestal cell
+and independent of delay, 37× below the 2.441 mV amplifier floor, null-cell SNR ~1000:1. **It does
+not degrade as the pack falls**: median σ 76.6 µV at 21.1 V against 71.4 µV at 19.1 V. Open — band 0's
+largest cell is ~3× noisier than band 1's at the same amplitude (93 vs 38 ppm), a signal-proportional
+term band 1 does not have; wants a scope on the 3.125 kHz drive.
+
+**Warm-up is ~10 min, not 4.** Band-0 mean fits one exponential, τ = 2.15 min, **+12.2 % high at
+switch-on**: 1 % at 5.4 min, 0.5 % at 6.9 min, 0.2 % at 8.8 min. The DS18B20 reaches its final reading
+at 4.9 min, **well before the signal settles — it is not a readiness indicator**. The old 4 min figure
+came from the retired 20 V bench supply and lands at only ~2 %.
+
+**The DS18B20 does not predict the operating point, and the fan is why.** At the same indicated
+44.1 °C, band-0 mean read 543.8 and 533.9 mV five minutes apart — 1.8 % at identical sensor
+temperature. Nudging the fan off the U1/FET cluster (15:10–15:13) took the sensor 41.0 → 46.0 °C and
+band 0 **+3.7 %**, where bulk warm-up across the same span moves it *down*. It is thermal, not a metal
+step: a smooth ~2.5 min exponential that fully reversed when the fan was restored, where a moved
+ferrous object would step inside one 62 ms sweep. **This is the unexplained band-mean rise logged at
+15:12.** Consequences — the fan mount is a measurement-critical mechanical variable (a slight nudge
+outweighs the entire discharge range), and *which* component dominates is **not determinable from the
+logs**; it needs a thermocouple on U1/Q1. This also corrected §17.14: bulk warm-up moves both bands
+the **same** way (band 0 −7.6 %, band 1 −0.46 %, a ~16× ratio) where a supply shift moves them within
+~1.5× — so the ratio separates them, not the sign, and the old opposite-directions test (r = +0.99)
+identifies a *cooling change* specifically.
+
+**Supply sensitivity is ~1 mV/V grid mean, ~40× below the standing 43–51 mV/V — flagged, not
+settled.** Both windows agree (0.85 mV/V at 23→21 V, 1.12 mV/V at 21.2→19.1 V), one sign, and the full
+2.1 V sweep moves the operating point only **−0.69 %** grid mean. Consistent with the +15 V rail
+measuring 15.20–15.21 V on a DMM across the whole discharge. The likeliest reading is that the old
+figure was taken through the U1 that later failed — i.e. it measured the regulator, not the detector —
+**but that is an inference, and one deliberate re-measurement closes it.** Until then treat 43–51 mV/V
+as pre-U1-replacement. If it holds, thermal drift dominates supply drift by ~10× and **warm-up, not
+state of charge, is the thing to control**.
+
+**Battery.** Endurance 3.10 h of pulsing full-charge-to-trip, but a single continuous run is much
+shorter — session 1 alone went 24.69 → 21.00 V in 83.5 min, and a 44 min rest then gave back +2.04 V,
+so rest recovery is a large part of the apparent endurance. Loaded discharge −32.8 mV/min at 23 V
+rising to −72.7 mV/min over the last 13 min: a knee, not a half-full pack. Sag grows 850 mV at full
+charge → 2.43 V at the trip. **A latched lockout still draws −30.2 mV/min with the drive off**, ~58 %
+of the loaded rate — the pack must be switched off physically after a trip; leaving it latched from
+15:58 to 16:55 cost 1.5 V, after the failsafe had already fired to protect it. Pack telemetry agreed
+with the DMM to < 80 mV, typically < 20 mV.
+
+**The 19.0 V floor stands, as a pack-quality limit.** The test build did its job and the question is
+closed: nothing electrical or measurement-side objects to 19.0 V — the L7815 keeps ≥ 1.9 V of headroom
+(D4 is a shunt clamp, no series drop) and noise, SNR and railing are unchanged down there. Cells at
+rest after the run measured **3.62 / 3.63 / 3.65 / 3.42 / 3.24 / 3.66 V** — 420 mV spread, weakest
+297 mV below the mean. **This supersedes the v4.36 source comment's estimate that the weak pair
+reaches 2.0–2.1 V at a 19 000 mV trip**, which came from measuring four cells and doing arithmetic on
+the remainder; the direct six-cell reading is far less severe. With that, and with new packs replacing
+the recovered laptop cells, the floor is **kept** at 19_000 / 19_500. **Therefore the "must go back to
+21_000" instruction in the `PACK_VOLTAGE_TRIP_MV` comment block, and the same instruction in the v4.37
+entry above, are superseded** and should be reworded when that file is next touched — otherwise the
+next reader reverts a floor that was deliberately kept.
+
+Two loose ends. **Unexplained 1.13 V** between the cell sum (21.22 V) and telemetry (20.09 V) at
+16:52 at near-zero load, where telemetry tracked the pack terminals to < 80 mV at three other points
+— too large for fuse/wiring IR drop at idle, possible high-resistance joint inside the pack; bench
+check. And **cold-start behaviour below 19 °C is untested**: the coldest capture of the day was
+3633 mV at 19.5 °C, still 1367 mV (27 %) below full scale, and nothing railed in 3.1 h.
+
+Data hygiene: **zero flagged rows in 63 813 sweeps** across the two uninterrupted sessions; the 200
+flagged rows in sessions 1–2 all fall inside deliberate pack interruptions. (2026-08-12)
+
+### findings — `src/pimd_classviz.py` v1.74 — `streamed_s` does not notice a lockout
+
+After the firmware latched `LOCKOUT` at 15:58:04 on `session_20260812_150333` and stopped emitting
+sweeps, the session went on writing `streamed_s=7314, 7374, 7434, 7495 … stalled_s=0` until 17:08 —
+**70 minutes of zero data counted as streamed**, with the stall detector never firing. `streamed_s`
+tracks wall-clock since the run armed rather than the arrival of records, so a source that goes silent
+without closing the port is invisible to it. Distinct from the v1.74 fix in the entry above, which
+corrected *arming*; this is a defect in what the armed counter measures. It matters precisely for the
+long unattended run that soak accounting exists to watch. Not fixed. (2026-08-12)
+
+### DESIGN.md — Doc-rev 2.1 — 2026-08-12 sweep results consolidated
+
+Human-directed mini consolidation pass under §18, scoped to the day's bench results. **§3** gained the
+noise floor, the measured warm-up (superseding the 4 min bench-supply figure), the DS18B20
+non-predictor result, the fan-mount warning, supply sensitivity and full-scale headroom. **§4/§12**:
+working floor restated as **19.0 V**, plus the measured power envelope — endurance, discharge rates,
+sag, the +15 V rail flat to 50 mV, telemetry-vs-DMM agreement. **§10**: `cal_2x11_v5` sweep rate
+**16.13 Hz** measured, +29.6 % over `cal_3x10_v5`, and the profile is no longer "not bench-verified".
+**§17**: 17.23 corrected (pack voltage does not materially scale the decay), 17.14 corrected (thermal
+and supply separate by band-magnitude ratio, not by sign), 17.11 qualified.
+
+The header's Firmware / PC-tool version line was **deliberately left stale** at v4.35 / classviz
+v1.73: v4.36 is the test build and v4.37 is not yet exercised on hardware, so bumping it now would
+enshrine a version about to be superseded. Bump it at the next full consolidation. (2026-08-12)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-12
