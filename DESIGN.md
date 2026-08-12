@@ -513,7 +513,7 @@ python pimd_target_check.py -f data/targets/targets_v3.csv
 
 # Offline: feature-maths acceptance check. NOTE: expectations are hard-coded from
 # the 2026-07-23 63-cell analysis, so this FAILs against any other epoch.
-python pimd_shape.py --selftest data/corpora/gui_signatures_targets_v1_20260723.csv
+python pimd_shape.py --selftest <gui_signatures_targets_*.csv>
 
 # Offline: corpus acceptance checks (exit 1 on any FAIL, so it can gate a capture day).
 # NOTE: the v3-corpus FAILs were never diagnosed. Read the table, not the exit code.
