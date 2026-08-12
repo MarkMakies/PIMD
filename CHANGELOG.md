@@ -165,9 +165,67 @@ verified by AST to sit inside the `for` nested in the `while` whose condition te
 off/return cycle, the sub-second cadence gate, BUSY-dead-with-healthy-pack (stops, never
 auto-resumes, so no thrash loop is possible), failsafe latching during entry (its `stop` wins),
 lockout set (resume impossible), wire discipline (**one line across a simulated 10-minute outage**),
-and a brownout return that correctly refuses to resume below `PACK_REARM_MV`. Flashed to the board
-and verified by sha256 (`55e2c45f1140b84b`); **the acquisition path itself has not yet been exercised
-on hardware — no sweep has been run on v4.37.**
+and a brownout return that correctly refuses to resume below `PACK_REARM_MV`.
+
+**Bench-verified on hardware, and the spin cap had to move as a direct result.**
+
+*Test A* — 5 min, `cal_2x11_v5`, 5377 frames: sweep rate **18.18 Hz against the 16.13 Hz v4.35
+baseline**, i.e. no throughput cost at all from the +55 % poll period, which settles the concern the
+window arithmetic predicted would be benign. Successive-difference noise **17–20 µV on the low
+channels and 48/27 µV on ch0/ch11**, against 24–26 and 59/32 µV that morning — same or better, so the
+extra 3.2 µs of latency in noticing BUSY fall is not causing mid-conversion reads. One gate rejection
+in ~118 k cell reads, no emit blocks, `busy_timeout_count` 0. (The +12.7 % rate is **not** claimed as
+caused by v4.37: the baseline came from a ClassViz session and this from a thin capture script, at
+different pack and thermal state. The claim is only that there is no regression.)
+
+*Test A also failed the constant, which is what `busy_spin_min_left` was added to catch.* It returned
+**887 of 2200** — the worst *legitimate* spin used 1313 iterations = **11.85 ms, 60 % of the budget**,
+a margin of 1.68× rather than the ~10× the constant was sized for. Since spin 1's wait scales with
+the PWM period, the DESIGN §8 floor of 2 kHz projected to ~18.5 ms, or **93 % of a 2200 cap**. The
+constant was raised to **6000** (54.1 ms) before proceeding.
+
+*Test E* — 10 min at the lowest frequency the hardware allows, two bands at 2000/2500 Hz with 100 µs
+pulses (22.5 % mean duty, *below* `cal_2x11_v5`'s 28.1 %, so passive-cooling safe), two bands rather
+than one so band-boundary `freq()` resyncs are included. 3821 frames at 6.37 Hz.
+**`busy_timeout_count` = 0 — no false aborts**, plus `gate_reject` 0, `gate_reprime` 0, `emit_block`
+0. `busy_spin_min_left` **4079 of 6000**: worst legitimate spin **1921 iterations = 17.34 ms**,
+margin **3.12×**, 68 % of budget left.
+
+Two things worth keeping from that. The period-scaling model **predicted 2052 iterations and the
+board delivered 1921 — accurate to 6 %**, so spin 1's tail can be projected to a new profile rather
+than rediscovered. And at the original 2200 the same worst case would have consumed **87 % of the
+cap**, so 2200 was not merely thin, it was a false abort waiting for an ordinary run-to-run
+excursion. The counter did the job it exists for on its first outing.
+
+*Test C — the acceptance test: a real pack switch-off on `cal_2x11_v5`, and it passes on every
+criterion.* The 1 Hz failsafe saw the rail go first (`PACK: rail absent (5239 mV)`), then the spin hit
+its cap and the sweep aborted **within the same sweep** — `SAFE: Drive OFF / Sampling OFF / Interrupts
+OFF` followed by `PACK: rail lost mid-sweep at 4962 mV`. Pre-v4.37 that gap was unbounded and the
+board simply never spoke again.
+
+**The property this change exists to create, demonstrated:** with the rail off, **three `P` telemetry
+lines arrived 60 s apart** (t = 61 s, 121 s, 181 s), and their `board_temp_dC` field went
+**26.1 → 35.2 → 30.1 °C** under a finger on the DS18B20 and after it was removed. Live conversions,
+not a stale value being reprinted — which is precisely the distinction the 2026-08-12 12:48 outage was
+hidden behind. `V` answered immediately with the rail down. `S` and `A32` were both refused with the
+new messages naming the reason.
+
+On restore: `PACK: present again at 23698 mV — failsafe armed`, then **2.1 s later** (the 3 × 1 s
+debounce) `PACK: rail back at 23728 mV for 168 s — resuming Mode 2, profile 5`, then sweeps at
+15.9 Hz. `B` afterwards read `busy_timeout_count` **1** — exactly one abort — and `rail_absent_ms_max`
+**168057 ms**, matching the announced 168 s outage to the millisecond.
+
+One striking incidental: `busy_spin_min_left` returned **4687 of 6000**, i.e. a worst legitimate spin
+of **1313 iterations — bit-for-bit the same figure Test A measured** on the same profile against a
+different cap. The tail is not random jitter; it is a reproducible structural event, almost certainly
+the band-boundary `freq()` resync. That makes it projectable, and it is why the two-band Test E
+profile was chosen over a single band. (`emit_block` 11 / `gate_reject` 28 / `gate_reprime` 9 in this
+run are artefacts of the test harness — the probe and sleep phases stop draining USB CDC, and the
+collapsing signal at the cut is exactly what the outlier gate is for. Both read zero in Tests A and E.)
+
+Flashed and verified by sha256 at each step (`ecb9eb2addd2c06b` at cap 6000). Harness note for anyone
+repeating this: the capture script sends CRLF, so the firmware sees an empty second line and answers
+`Command Input ERROR: unknown command` after every command. Cosmetic, not a firmware fault.
 
 **Which spin traps is now known from the schematic, not inferred.** GP15 carries a **1k pull-down**,
 with **110R in series** from the ADC's BUSY output — chosen to damp digital noise. An unpowered ADC

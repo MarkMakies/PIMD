@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# Pulse Induction Metal Detector, v4.36, coil v4
+# Pulse Induction Metal Detector, v4.37, coil v4
 # Runs on RP2040 dev board (Waveshare RP2040-Zero, MicroPython)
 #
 # Interfaces to LTC2508-32 ADC:
@@ -35,15 +35,23 @@
 #         (v4.28 appends the three trailing sensor/lockout fields. Additive: no parser
 #         in src/ splits V by field count, so this breaks no consumer.)
 #   L     list profiles -> one L<idx>,<freq_hz>,<n_pulses>,<n_delays>,<averages>,<name> line each
-#   B/b   diagnostic counters, reset on read
+#   B/b   diagnostic counters, reset on read (9 fields since v4.37)
 #         -> B<busy_high_count>,<overrun_count>,<emit_block_count>,<emit_block_ms_max>,
-#            <gate_reject_count>,<gate_reprime_count>
+#            <gate_reject_count>,<gate_reprime_count>,
+#            <busy_timeout_count>,<busy_spin_min_left>,<rail_absent_ms_max>
 #         emit_block_* (v4.27) count Mode 2 emits whose print() blocked longer than
 #         EMIT_BLOCK_WARN_MS — i.e. the host stopped draining USB CDC. Non-zero means
 #         the sweep was paused and the rig's thermal load changed with it.
 #         gate_* (v4.35) count outlier-gate rejections and the re-primes that bound
 #         them. Rejections without re-primes = the gate catching glitches; re-primes
 #         tracking the signal = the gate fighting real signal (see OUTLIER_GATE_FRAC).
+#         busy_timeout_count (v4.37) counts abandoned samples — did a rail loss
+#         happen at all. busy_spin_min_left is how close a HEALTHY spin came to
+#         BUSY_SPIN_LIMIT (resets to the limit, not 0): small means the cap is too
+#         tight and a false abort is coming. rail_absent_ms_max is the longest
+#         outage dwell. busy_high_count freezes when BUSY stops, so near-zero
+#         alongside a non-zero busy_timeout_count means the outage spanned the
+#         whole read window.
 #   (unsolicited, both modes) pack-voltage / board-temp telemetry, every SENSOR_REPORT_MS:
 #         -> P<time_ms>,<pack_mV>,<board_temp_dC>
 #         Both fields are REAL calibrated readings: pack_mV since v4.29 (22k/2k7
@@ -64,9 +72,21 @@
 #         board be USB-powered for programming with the pack switched on later.
 #         Still not a serial re-arm: it requires the pack to physically go and a
 #         healthy one to come back.
+#   (v4.37) RAIL-LOSS ABORT: the Mode 2 BUSY poll is bounded by BUSY_SPIN_LIMIT. If
+#         the ADC stops converting — typically the +20V rail switched off while the MCU
+#         stays alive on USB — the sweep aborts instead of spinning with IRQs masked,
+#         which used to take USB CDC down with it and silence the board completely,
+#         including the 'PACK: rail absent' the failsafe was supposed to print.
+#         Firmware then rests in state 'rail_absent': drive safe, pack/temp telemetry
+#         unaffected, Mode 2 resuming by itself once the pack returns at >=
+#         PACK_REARM_MV for RAIL_RESUME_CONSECUTIVE checks. A BUSY timeout with the
+#         pack reading HEALTHY is a different fault and stops instead ('ADC:' line).
+#         S and A<n> are refused while the rail is absent — their read paths still
+#         have the unbounded wait (chunks 2 and 3).
 #
 
 # History (full detail in CHANGELOG.md):
+#   v4.37 FIX read_raw_bytes_hold: unbounded IRQ-off BUSY spin went silent on rail loss; rail-absent state keeps telemetry alive
 #   v4.36 TEST BUILD: pack floor 21.0 -> 19.0 V, re-arm 21.5 -> 19.5 V. Revert before a keeper pack
 #   v4.35 FIX acquire_mode2: outlier gate was an absorbing state — cells latched permanently
 #   v4.34 FIX acquire_mode2: boundary settle measured from the config write, not the loop top
@@ -126,7 +146,7 @@ try:
 except ImportError:
     onewire = None
 
-FW_VERSION = '4.36'
+FW_VERSION = '4.37'
 print('Pulse Induction Metal Detector v' + FW_VERSION)
 board_id = unique_id()
 board_id_hex = ubinascii.hexlify(board_id).upper().decode()
@@ -213,6 +233,54 @@ SAMPLE_PULSE_CORRECTION = 0.904       # µs: measured offset between PWM edge an
 RAW_DIFF_SHIFT = 18
 RAW_DIFF_MASK = 0x3FFF
 RAW_FULL_SCALE_UV = 10_000_000  # ±5 V differential span in µV
+# (v4.37) Max polls of GP15 in EITHER spin of read_raw_bytes_hold() before the ADC
+# is declared not-converting. This is NOT sized to a conversion time.
+#
+# A HEALTHY spin here is 1-2 ms, not microseconds: DESIGN §7 records the poll
+# catching only ~1-in-6 BUSY-high windows, and v4.34 measured per-cell interpreter
+# cost at ~2.3 ms "dominated by the BUSY sync" (see the note above the settle
+# block). cal_63 cross-checks it — 63 cells at 6.88 Hz is 2.31 ms/cell. The wait is
+# also STOCHASTIC and scales with the PWM period, so its tail is not knowable from
+# source. That is the whole argument for a generous cap.
+#
+# THE REGRESSION TO FEAR IS A FALSE ABORT MID-SWEEP, not a slow one. The abort is a
+# once-per-outage event costing at most 2x this in IRQ-off time; a cap set too tight
+# silently truncates good sweeps. Read busy_spin_min_left from 'B' after a long run
+# before ever lowering this — that field exists precisely so this number stays
+# auditable instead of being a guess.
+#
+# MEASURED on this board 2026-08-12 (RP2040-Zero, GP15, 50k-iteration REPL runs,
+# spread < 0.03 % across 5 repeats):
+#     b.value() alone .................. 5.816 µs
+#     bounded spin, as written below .... 9.024 µs/iteration
+#     same bound folded into the while
+#       condition instead ............... 9.008 µs — no cheaper, so the clearer
+#                                         body-test form is kept
+#     for/range instead of a counter .... 9.848 µs — SLOWER as well as allocating
+# 6000 x 9.024 µs = 54.1 ms. Re-measure and reset this if the RP2040-Zero module or
+# the MicroPython build is ever changed; the recipe is in the v4.37 CHANGELOG entry.
+#
+# WHY 6000 AND NOT THE 2200 THIS SHIPPED WITH FIRST. 2200 (19.9 ms) was sized at
+# ~10x the ~2.3 ms typical per-cell BUSY sync. Test A then measured what a healthy
+# spin ACTUALLY costs at its tail: busy_spin_min_left came back 887 of 2200 over
+# 118k cell reads on cal_2x11_v5, i.e. the worst legitimate spin used 1313
+# iterations = 11.85 ms — 60 % of the budget, a margin of 1.68x rather than 10x.
+# Spin 1's wait scales with the PWM period, so at the DESIGN §8 floor of 2 kHz
+# (500 µs vs 320 µs) the same tail projects to ~18.5 ms, or 93 % of a 2200 cap:
+# false aborts mid-sweep, which is the regression this whole change most needs to
+# avoid. 6000 restores ~2.9x margin against that projection.
+# The price is paid only on a real abort — 2 x 54 ms of IRQ-off time, once per
+# outage — against a false abort that would silently truncate good sweeps forever.
+BUSY_SPIN_LIMIT = 6000
+# THE COST, stated plainly because it is the one number this change puts at risk:
+# the poll period rises 5.816 -> 9.024 µs, i.e. +55 %. The pre-v4.37 loop body was a
+# bare `pass`. Against DESIGN §7's ~15 µs BUSY-high window that still leaves 1.66
+# polls per window (was 2.6), so every window should still be caught and the catch
+# behaviour should not change — but whether 3.2 µs of extra latency in noticing BUSY
+# FALL matters cannot be settled from source: it needs the LTC2508 data-hold window
+# (no datasheet in the tree) or a scope. The empirical answer is a before/after run
+# comparing sweep rate, per-channel σ and gate_reject_count against the pre-change
+# baseline of 16.13 Hz on cal_2x11_v5.
 
 # ---------------------------------------------------------------------------
 # Mode 2 output rate cap and band-boundary settling
@@ -471,6 +539,9 @@ DYNAMIC_PROFILE_INDEX = NUM_PROFILES  # Q<this> selects the RAM-only profile fro
 # Operational state
 # ---------------------------------------------------------------------------
 state = 'ready'               # 'ready' | 'mode1_running' | 'mode2_running' | 'stop'
+                              # | 'rail_absent' (v4.37: Mode 2 aborted on a BUSY
+                              #   timeout — drive safe, telemetry still running,
+                              #   resumes itself when the pack returns)
 active_profile_index = 0
 mode2_profile_changed = False
 dynamic_profile = None        # set by the D command; RAM only, lost on reset
@@ -486,6 +557,21 @@ pack_absent = False           # v4.31: rail below PACK_ABSENT_MV — USB-only, f
 last_pack_mV = 0
 last_sensor_sample_ms = ticks_ms()
 last_sensor_report_ms = ticks_ms()
+
+# Rail-absent supervisory state (v4.37) — RAM only, lost on reset. See
+# service_rail_absent(). rail_absent_announced doubles as "have we already done the
+# one-time entry work", which is what keeps the wire quiet during a long outage.
+rail_absent_announced = False
+rail_absent_entered_ms = 0
+rail_last_check_ms = 0
+rail_resume_ok_streak = 0
+RAIL_RECHECK_MS = 1000        # cadence of the resume re-check. A ticks_diff gate, the
+                              # house idiom — without it the streak below would count
+                              # thousands of times a second against a pack_absent flag
+                              # that only updates at 1 Hz.
+RAIL_RESUME_CONSECUTIVE = 3   # consecutive healthy re-checks before pulsing restarts.
+                              # Mirrors PACK_VOLTAGE_TRIP_CONSECUTIVE at the same
+                              # cadence, i.e. ~3 s of a steady rail either way.
 
 # DS18B20 board-temperature state (v4.33). Starts INVALID rather than 0: until the
 # first conversion completes there is genuinely no reading, and 0 dC is a plausible
@@ -630,6 +716,32 @@ gate_reprime_count = 0  # DIAGNOSTIC (v4.35): times a cell hit OUTLIER_GATE_MAX_
                         # gate is catching glitches, which is its job; reprimes climbing
                         # with the signal means the gate is fighting real signal and
                         # OUTLIER_GATE_FRAC is too tight for the profile in use.
+busy_timeout_count = 0  # DIAGNOSTIC (v4.37): times a read_raw_bytes_hold() spin hit
+                        # BUSY_SPIN_LIMIT and abandoned the sample. Answers the
+                        # question the 2026-08-12 outage could not be asked — "did
+                        # this happen" — instead of leaving it to be reconstructed
+                        # from a truncated session log. Read out via 'B'.
+                        # NOTE busy_high_count above becomes genuinely useful now:
+                        # it freezes the instant BUSY stops moving, so a near-zero
+                        # busy_high_count next to a non-zero busy_timeout_count is
+                        # the signature of an outage spanning the whole read window.
+busy_spin_min_left = BUSY_SPIN_LIMIT
+                        # DIAGNOSTIC (v4.37): smallest residual ever seen on spin 1,
+                        # i.e. HOW CLOSE A HEALTHY SPIN HAS COME TO THE CAP. This is
+                        # the field that de-risks BUSY_SPIN_LIMIT — it turns the
+                        # constant from a guess into a measured margin. If it ever
+                        # reads small on a healthy run, the cap is too tight and a
+                        # false abort is coming. Resets to BUSY_SPIN_LIMIT, not 0.
+rail_absent_ms_max = 0  # DIAGNOSTIC (v4.37): longest single rail-absent dwell, ms.
+                        # Companion to a count in the same shape as
+                        # emit_block_ms_max — that field type is already established
+                        # in this record. Read out and reset via 'B'.
+_busy_spin_left = BUSY_SPIN_LIMIT
+                        # Scratch: spin 1's residual for the cell just read. Module
+                        # global rather than a return value to keep the hot path
+                        # allocation-free, same reasoning as _held_irq below. Folded
+                        # into busy_spin_min_left by acquire_mode2 OUTSIDE the
+                        # IRQ-off section.
 
 
 def raw14_from_bytes(data_bytes):
@@ -666,14 +778,49 @@ def read_raw_bytes_hold():
     time-critical PWM writes, then MUST call enable_irq(_held_irq) on every
     path, and decodes via raw14_from_bytes(). Added in v4.26 so the post-emit
     USB IRQ burst cannot land between the SDOB read and the next cell's CC
-    write (see header note)."""
-    global busy_high_count, _held_irq
+    write (see header note).
+
+    (v4.37) BOTH spins are bounded by BUSY_SPIN_LIMIT polls. On expiry this
+    function RE-ENABLES IRQS ITSELF and returns None. A None return means the ADC
+    is not converting — typically the +20V rail switched off while the MCU stays
+    alive on USB. THE CALLER MUST ABANDON THE SAMPLE AND MUST NOT CALL
+    enable_irq(_held_irq) AGAIN. Before v4.37 both loops were unbounded, so a
+    dead ADC spun here forever with interrupts globally masked, which took USB
+    CDC down with it and silenced the board completely — including the
+    'PACK: rail absent' message the failsafe exists to print.
+
+    The two spins are not symmetric. Spin 1 waits for the next MCLK trigger: up
+    to a full PWM period, times the ~6 windows the poll misses (DESIGN §7), so it
+    is the long variable one, it is where nearly all iterations are spent, and it
+    is the only one whose margin is worth tracking. Spin 2's wait is
+    hardware-bounded by the conversion itself (~15 µs at 10 kHz, i.e. a couple of
+    polls); it is bounded too, but for a different reason — an ADC that is powered
+    and stuck mid-conversion, which the rail check cannot catch.
+
+    SPIN 1 IS THE ONE THAT TRAPS ON RAIL LOSS, and that is now known from the
+    schematic rather than inferred: GP15 carries a 1k pull-down, with 110R in
+    series from the ADC's BUSY output (chosen to damp digital noise). An
+    unpowered ADC stops driving BUSY, the pull-down takes GP15 firmly LOW, and
+    `while not busy_pin.value()` therefore spins. Deterministic, not a floating
+    pin — so the abort path is exercised by every rail loss, not just some."""
+    global busy_high_count, _held_irq, _busy_spin_left, busy_timeout_count
     _held_irq = disable_irq()
+    n = BUSY_SPIN_LIMIT
     while not busy_pin.value():   # wait for MCLK to fire (BUSY high)
-        pass
+        n -= 1
+        if not n:
+            busy_timeout_count += 1
+            enable_irq(_held_irq)
+            return None
+    _busy_spin_left = n
     busy_high_count += 1
+    n = BUSY_SPIN_LIMIT
     while busy_pin.value():        # wait for conversion complete (BUSY low)
-        pass
+        n -= 1
+        if not n:
+            busy_timeout_count += 1
+            enable_irq(_held_irq)
+            return None
     return adc_raw_spi.read(4)
 
 
@@ -735,6 +882,7 @@ def acquire_mode2(profile):
     global mode2_profile_changed, overrun_count
     global emit_block_count, emit_block_ms_max
     global gate_reject_count, gate_reprime_count
+    global state, busy_spin_min_left   # v4.37: rail-loss abort + spin margin
 
     avg_depth = profile['averages']
 
@@ -822,6 +970,23 @@ def acquire_mode2(profile):
             # compare point (see header note; symptom was channel 1's inflated
             # σ / biased mean).
             data_bytes = read_raw_bytes_hold()
+            if data_bytes is None:
+                # v4.37: BUSY never moved within BUSY_SPIN_LIMIT polls, so the ADC
+                # is not converting. With the +20V rail switched off while the MCU
+                # stays alive on USB that is the NORMAL case, not an error — and
+                # before v4.37 control never got here at all: it spun in
+                # read_raw_bytes_hold() forever with IRQs masked, taking USB CDC
+                # down with it. The board went completely silent, including the
+                # 'PACK: rail absent' line the failsafe exists to print, which is
+                # why the 2026-08-12 12:48 outage left no telemetry to diagnose.
+                #
+                # IRQs were ALREADY RESTORED inside read_raw_bytes_hold() — do not
+                # call enable_irq() here. Bail before the boundary freq() writes
+                # below: the PWM must not be reconfigured for a sample we discard.
+                # Leave the sweep and let the main loop's supervisory state sort
+                # out what happened (service_rail_absent).
+                state = 'rail_absent'
+                break
             if at_boundary:
                 drive_coil_pwm.freq(freq_i)
                 sample_coil_pwm.freq(freq_i)
@@ -834,6 +999,10 @@ def acquire_mode2(profile):
                 sample_coil_pwm.duty_u16(sd)
                 last_dd, last_sd = dd, sd
             enable_irq(_held_irq)
+            # v4.37: fold spin 1's residual into the running minimum. Outside the
+            # IRQ-off section on purpose — this is bookkeeping, not hot path.
+            if _busy_spin_left < busy_spin_min_left:
+                busy_spin_min_left = _busy_spin_left
             # v4.34: cell[i]'s freq/CC are LIVE from here, and only from here.
             # Everything before this instant — above all read_raw_bytes_hold()'s
             # BUSY sync — was spent at cell[i-1]'s configuration and cannot count
@@ -1226,6 +1395,84 @@ def _pack_voltage_trip_check(pack_mV):
                   pack_mV, PACK_VOLTAGE_TRIP_MV))
 
 
+def service_rail_absent():
+    """(v4.37) Supervisory resting state, entered when acquire_mode2 abandoned a
+    sweep on a BUSY timeout.
+
+    It does almost nothing on purpose. The main loop calls check_for_commands()
+    and service_sensors() every pass REGARDLESS of state, so pack voltage, board
+    temperature, the 60 s 'P' report and the whole v4.28/v4.31 failsafe keep
+    running here without this function touching any of them. All it adds is (a)
+    one announcement on entry, (b) a cadence-gated re-check that puts the sweep
+    back when a healthy pack returns.
+
+    NOT a scan scheduler (DESIGN §11). It selects no profile, sequences no cells,
+    times no acquisition and takes no scheduling input from the PC. It restores
+    the single thing the operator already commanded with 'G', after an
+    involuntary interruption. A scheduler decides WHAT runs next; this decides
+    only WHETHER the thing already running may continue — the same authority the
+    v4.28 lockout and the v4.31 suspend/re-arm already exercise."""
+    global state, rail_absent_announced, rail_absent_entered_ms
+    global rail_last_check_ms, rail_resume_ok_streak, rail_absent_ms_max
+    global last_pack_mV
+
+    if not rail_absent_announced:
+        set_safe_state()
+        rail_absent_announced = True
+        rail_absent_entered_ms = ticks_ms()
+        rail_last_check_ms = rail_absent_entered_ms
+        rail_resume_ok_streak = 0
+        # A FRESH reading, not last_pack_mV: that can be a second stale, and this
+        # one decision — rail loss versus a live ADC that stopped answering —
+        # hangs entirely on it.
+        mv = read_pack_voltage_mv()
+        last_pack_mV = mv
+        _pack_voltage_trip_check(mv)      # prints 'PACK: rail absent …' if < 6 V
+        if state != 'rail_absent':
+            # The failsafe latched (a FLAT pack, not an absent one) and has
+            # already set state='stop'. Its decision wins; stand down.
+            rail_absent_announced = False
+            return
+        if mv >= PACK_ABSENT_MV:
+            # BUSY died with the pack reading healthy. That is NOT a rail loss and
+            # must not auto-resume — resuming would just abort again. Stop and make
+            # the operator look. This is also what makes a thrash loop impossible:
+            # the one shape that could oscillate is caught here, at entry.
+            print('ADC: BUSY silent for {0:d} polls with the pack at {1:d} mV — '
+                  'NOT a rail loss; Mode 2 stopped, check the analogue supply '
+                  'and GP15'.format(BUSY_SPIN_LIMIT, mv))
+            state = 'stop'
+            rail_absent_announced = False
+            return
+        print('PACK: rail lost mid-sweep at {0:d} mV — Mode 2 aborted, drive '
+              'safe, pack/temp telemetry continues; resumes at >= {1:d} mV'.format(
+                  mv, PACK_REARM_MV))
+        return
+
+    now = ticks_ms()
+    if ticks_diff(now, rail_last_check_ms) < RAIL_RECHECK_MS:
+        return
+    rail_last_check_ms = now
+    # PACK_REARM_MV, not PACK_ABSENT_MV: resuming into a 10 V rail would fire the
+    # coil into a browning-out supply. Reusing the existing "healthy pack"
+    # definition also means this threshold tracks the trip floor automatically if
+    # PACK_VOLTAGE_TRIP_MV is ever moved. A latched failsafe can never be walked
+    # around from here.
+    if pack_absent or pack_voltage_lockout or last_pack_mV < PACK_REARM_MV:
+        rail_resume_ok_streak = 0
+        return
+    rail_resume_ok_streak += 1
+    if rail_resume_ok_streak < RAIL_RESUME_CONSECUTIVE:
+        return
+    down_ms = ticks_diff(now, rail_absent_entered_ms)
+    if down_ms > rail_absent_ms_max:
+        rail_absent_ms_max = down_ms
+    print('PACK: rail back at {0:d} mV for {1:d} s — resuming Mode 2, profile '
+          '{2:d}'.format(last_pack_mV, down_ms // 1000, active_profile_index))
+    rail_absent_announced = False
+    state = 'mode2_running'
+
+
 def pack_voltage_boot_check():
     """Run before 'Ready' / before any command can be accepted, so a rig
     powered on already at or below the floor never fires a single pulse."""
@@ -1296,6 +1543,7 @@ def check_for_commands(timeout_ms=1):
     global active_profile_index, mode2_profile_changed, dynamic_profile
     global busy_high_count, overrun_count, emit_block_count, emit_block_ms_max
     global gate_reject_count, gate_reprime_count
+    global busy_timeout_count, busy_spin_min_left, rail_absent_ms_max   # v4.37
 
     try:
         if not serial_poll.poll(timeout_ms):
@@ -1313,6 +1561,18 @@ def check_for_commands(timeout_ms=1):
                 return
             if state == 'mode2_running':
                 print('Command Input ERROR: S rejected while Mode 2 running (send E first)')
+                return
+            if pack_absent:
+                # v4.37: Mode 1 waits on DRL from the ADC (acquire_filtered_data),
+                # and with the rail off that flag never arrives, so
+                # measurement_cycle() never returns and the main loop stops
+                # servicing sensors and commands — the same telemetry blackout the
+                # Mode 2 spin used to cause, by a different route. Bounding that
+                # wait is deferred (chunk 3); refusing the command makes the bug
+                # unreachable in the case that actually gets hit.
+                print('Command Input ERROR: S rejected — pack rail absent '
+                      '(last {0:d} mV); Mode 1 waits on DRL from an unpowered ADC '
+                      'and would stall telemetry'.format(last_pack_mV))
                 return
             state = 'mode1_running'
             update_pulse_configuration()
@@ -1438,6 +1698,16 @@ def check_for_commands(timeout_ms=1):
             if state == 'mode2_running':
                 print('Command Input ERROR: A rejected while Mode 2 running (send E first)')
                 return
+            if pack_absent:
+                # v4.37: read_raw_sample() has the same unbounded IRQ-off BUSY spin
+                # read_raw_bytes_hold() had. Bounding it needs a different abort
+                # contract (it returns an int, so None would poison
+                # acquire_raw_average's arithmetic) and is deferred to chunk 2;
+                # refusing the command keeps it out of reach meanwhile.
+                print('Command Input ERROR: A rejected — pack rail absent '
+                      '(last {0:d} mV); the raw read waits on BUSY from an '
+                      'unpowered ADC'.format(last_pack_mV))
+                return
             try:
                 n_samples = int(line[1:])
             except ValueError:
@@ -1490,15 +1760,20 @@ def check_for_commands(timeout_ms=1):
             # human over the §16 serial terminal), so the two new trailing fields
             # break no consumer. Reset-on-read, matching the two before them.
             # v4.35 appends the two outlier-gate counters on the same terms.
-            print('B{0:d},{1:d},{2:d},{3:d},{4:d},{5:d}'.format(
+            # v4.37 appends the three rail-loss counters, again on the same terms.
+            print('B{0:d},{1:d},{2:d},{3:d},{4:d},{5:d},{6:d},{7:d},{8:d}'.format(
                 busy_high_count, overrun_count, emit_block_count, emit_block_ms_max,
-                gate_reject_count, gate_reprime_count))
+                gate_reject_count, gate_reprime_count,
+                busy_timeout_count, busy_spin_min_left, rail_absent_ms_max))
             busy_high_count = 0
             overrun_count = 0
             emit_block_count = 0
             emit_block_ms_max = 0
             gate_reject_count = 0
             gate_reprime_count = 0
+            busy_timeout_count = 0
+            busy_spin_min_left = BUSY_SPIN_LIMIT   # v4.37: NOT 0 — it is a minimum
+            rail_absent_ms_max = 0
 
         else:
             print('Command Input ERROR: unknown command')
@@ -1531,10 +1806,27 @@ try:
                 # board outright (e.g. at averages=256 before the v4.14
                 # circular-buffer fix). Report and return to a safe state
                 # instead of silently dying.
+                #
+                # v4.37: RESTORE INTERRUPTS FIRST, REPORT SECOND. acquire_mode2
+                # runs an IRQ-off critical section per cell (read_raw_bytes_hold
+                # through to the freq/CC writes). An exception raised inside it
+                # unwinds to here with IRQs still masked — and print() needs USB
+                # CDC IRQs to reach the wire, so the board would brick itself
+                # silent while reporting its own error. Idempotent: enable_irq()
+                # restores a saved state, so calling it on a path that already
+                # re-enabled is a no-op. The None guard matters — _held_irq is
+                # None before the first hold and enable_irq(None) raises.
+                if _held_irq is not None:
+                    enable_irq(_held_irq)
                 print('Mode 2 ERROR:', e)
                 state = 'stop'
+        elif state == 'rail_absent':
+            service_rail_absent()
         elif state == 'stop':
             set_safe_state()
+            # v4.37: an 'E' during an outage lands here, so clear the rail-absent
+            # entry latch or the next abort would skip its announcement.
+            rail_absent_announced = False
             state = 'ready'
 except KeyboardInterrupt:
     print('\nTerminating')
