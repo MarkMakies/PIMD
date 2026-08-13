@@ -1,3 +1,7 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-13 (Doc-rev 2.5)
+
 ### findings — 2026-08-13 — the 40 mm extractor validated on the bench: noise −26 %, warm-up 10 → 6 min, U1 safe at 3.125 kHz
 
 **Four sessions, one code path, `cal_2x11_v5` (`43617fed`) throughout.** Three cold-start runs on
@@ -206,9 +210,8 @@ historical frame rather than making a present-tense claim. (2026-08-13)
 
 ---
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
-## Archive — consolidated 2026-08-13
+## Archive — consolidated 2026-08-13 (Doc-rev 2.4)
 
 ### USAGE.md — retired at v1.31 — the per-app file headers are the usage doc now
 

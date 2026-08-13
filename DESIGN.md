@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD) 
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **38 mm forced-air fan on the U1/FET cluster — mandatory, fitted 2026-08-11, used in all cases** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.75 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
-**Last bench update:** 2026-08-12 (thermal/battery sweep, 186 min of pulsing; fw v4.37 bench-verified; new pack fitted 2026-08-13)
-**Doc rev:** 2.4 (2026-08-13) §13's pedestal corrected to the measured ~110 mV, resolving the §10/§13 conflict; `USAGE.md` retired (2.3)
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.75 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
+**Last bench update:** 2026-08-13 (40 mm extractor validated — 97.6 min of pulsing over four sessions, 104 618 sweeps, zero flagged rows)
+**Doc rev:** 2.5 (2026-08-13) permanent 40 mm extractor validated and toroids removed; §3's noise floor, warm-up and fan-mount entries restated from measurement; §13's pedestal corrected to ~110 mV (2.4)
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -61,7 +61,7 @@ that air and non-ferrous do not have.
 
 ---
 
-## 3. Measured operating envelope (updated 2026-08-12)
+## 3. Measured operating envelope (updated 2026-08-13)
 
 - **Flyback** *(measured, 10 kHz / 40 µs)*: TX coil **−18 V to +265 V**, RX coil
   **−15 V to +135 V**. Gate turn-off **11.47 V → 0.44 V in 733 ns**.
@@ -72,16 +72,22 @@ that air and non-ferrous do not have.
   against the amplifier's 2.441 mV output floor, all three bands, now has ≥ 65 mV of headroom underneath it.
 - **Sample-timing precision** ≈ **5 ns** *(measured)*.
 - **Thermal drift** ≈ **−50 µV/s** at 10 kHz / 20 µs *(measured)*. 
-- **Noise floor ≈ 65 µV** *(measured 2026-08-12, `cal_2x11_v5`, 32 × 256 averaging, 32-sweep σ)* —
-  flat across every null/pedestal cell and **independent of delay**, i.e. **37× below** the 2.441 mV
-  amplifier output floor. **Null-cell SNR ≈ 1000 : 1.** Band 0's largest cell is ~3× noisier than
-  band 1's at the same amplitude (93 vs 38 ppm) — unexplained. Noise does **not** rise as the pack
-  falls.
-- **Warm-up from cold: allow 10 min** *(measured 2026-08-12, 6S pack)*. Band-0 mean is **+12.2 %
-  high at switch-on** and settles with **τ = 2.15 min** — 2 % at 3.9 min, **1 % at 5.4 min, 0.5 % at
-  6.9 min**, 0.2 % at 8.8 min. Total excursion: band 0 **−7.6 %**, band 1 **−0.46 %**. The DS18B20
-  reaches its final reading at **4.9 min, well before the signal settles**. *(Supersedes the 4 min
-  figure, which was taken on the retired 20 V bench supply and lands at only ~2 %.)*
+- **Noise floor ≈ 38 µV** *(measured 2026-08-13, `cal_2x11_v5`, 32 × 256 averaging, detrended
+  32-sweep σ, 40 mm extractor)* — flat across every null/pedestal cell and **independent of delay**,
+  i.e. **~64× below** the 2.441 mV amplifier output floor. Band 0's largest cell remains ~2× noisier
+  than band 1's at the same amplitude (70 vs 36 ppm raw) — still unexplained, but improved from
+  93 vs 38. Noise does **not** rise as the pack falls. *(Supersedes ≈ 65 µV / 93 vs 38 ppm, which
+  was the same statistic on the 38 mm blow-on fan — that figure is epoch-bound to ≤ 2026-08-12.)*
+- **Run-to-run repeatability** *(measured 2026-08-13)*: the settled band-0 operating point reproduces
+  to **0.06 %** across independent cold starts, and bucket-to-bucket noise scatter is **2.2 µV**
+  against 6.4 µV on the 38 mm rig.
+- **Warm-up from cold: allow 6 min** *(measured 2026-08-13, 40 mm extractor, two independent cold
+  starts)*. Band-0 mean settles as a **clean single exponential**, τ = **1.15 / 0.90 min**
+  (r² = 0.982 / 0.988), within **0.2 % at 5.6 / 3.8 min**. The DS18B20 still reaches its final
+  reading well before the signal settles and **is not a readiness indicator**. *(Supersedes the
+  10 min / τ = 2.15 min figure, epoch-bound to the 38 mm fan, where warm-up was **two-stage** — a
+  fast drop then a slow case-soak still drifting at 20–25 min. Continuous bulk air exchange
+  suppresses the slow stage; that shape change is the mechanism.)*
 - **Standard Operating Conditions:** Mode 1 · 10.0 kHz / 20.0 µs pulse / 10.0 µs delay /
   DS 256 · coil in air, no targets. Reference capture:
   `References/images/GUI-steady-state-256-1024.jpg`.
@@ -92,8 +98,15 @@ that air and non-ferrous do not have.
   took the sensor 41.0 → 46.0 °C and band 0 **+3.7 %**, where warm-up over that span moves it down.
   A single µV/°C referred to this sensor is therefore **not well defined**. Which component dominates
   is **not determinable from the logs** — it needs a thermocouple on U1/Q1.
-- **The fan mount is measurement-critical.** A slight nudge is worth **3.7 % on band 0** — more than
-  the entire discharge range (below) and more than many target effects. It needs a fixed mount.
+- **The fan mount was measurement-critical — resolved 2026-08-13 by the permanent case mount.** On
+  the loose 38 mm fan a slight nudge was worth **3.7 % on band 0**, more than the entire discharge
+  range. The 3.7 % still stands as the measure of how hard cooling moves the operating point (and
+  is what 17.14's sign test detects), but fan geometry is now a fixed property of the build and no
+  longer a variable to control.
+- **The DS18B20 reads ~8 °C hotter on the extractor** — plateau **47.8 °C** against **39.8 °C** on
+  the 38 mm blow-on, from comparable cold starts, because the sensor sits on the load resistor and
+  has lost the old fan's direct impingement. **Board temperatures either side of 2026-08-13 are
+  different quantities and must not be compared.** It remains blind to the regulator die.
 - **State of charge barely reaches the operating point** *(measured 2026-08-12, at flat board
   temperature, two windows spanning 23.05 → 19.07 V)*: **~1 mV/V grid mean** (0.17–0.23 %/V), one
   sign. Total movement across a full 2.1 V discharge window is **−0.69 %** grid mean / −0.81 % band 0
@@ -381,12 +394,16 @@ Derived on paper, 2026-08-11. 2 bands × 11 cells (22 cells total). **Not swept*
 3.1 h on 2026-08-12 with zero flagged rows in 63 813 uninterrupted sweeps.
 The sole profile in use — no other geometry is current.
 
-**Sweep rate: 16.13 Hz** (62.0 ms/sweep) *(measured 2026-08-12)*, against 12.45 Hz for the retired
-`cal_3x10_v5` — **+29.6 %**, confirming the rate rise the two-band plan was designed for.
+**Sweep rate: 17.85 Hz** (56.0 ms/sweep) *(measured 2026-08-13, fw v4.37, four sessions at
+17.83–17.88 Hz)*, against 12.45 Hz for the retired `cal_3x10_v5` — **+43 %**. *(Supersedes 16.13 Hz,
+measured 2026-08-12 on fw v4.35; the rise is firmware, not the profile or the fan.)*
 
 **Runs at 3.125 kHz on the 100 µs band, and requires the cooling fan running.** Without the fan,
-this band trips the +15 V regulator (U1) on a ~42 s cycle. The fan is a mandatory part of the
-build (hardware-rev line) and runs in all cases — there is no fan-off operating mode.
+this band trips the +15 V regulator (U1) on a ~42 s cycle. The fan is powered from the rig's own
+switch, so the requirement is **structural, not an operator step** — there is no state in which the
+board pulses and the fan does not. **Validated 2026-08-13**: 104 618 sweeps over 97.6 min with zero
+flagged rows, including a cold start at 24.48 V (worst U1 corner); the one run that ended did so on
+the 19.0 V pack floor, not on heat.
 
 | Cell | Zone | Delay range (μs, 100 μs band → 10 μs band) | Anchor type |
 |---|---|---|---|
@@ -455,6 +472,11 @@ figures are not a spec for one, and want re-measuring on a single continuous run
 | +15 V rail | **15.20–15.21 V, flat to 50 mV** across the whole discharge *(DMM, 4 spot checks)* |
 | Pack telemetry vs DMM | agrees to **< 80 mV, typically < 20 mV** (1 LSB = 7.35 mV) |
 
+**Two confirmations on the current pack** *(2026-08-13)*: rest recovery measured **+2.17 V** after a
+trip at 19.05 V, consistent with the +2.04 V above; and the **extractor fan is a continuous ~1–2 W
+pack load for the whole of any powered session**, since it shares the rig's switch — any re-measure
+of the figures above is therefore a fan-on figure and should say so.
+
 **Working floor: 19.0 V — settled, and not a test build.** `PACK_VOLTAGE_TRIP_MV` 19_000 /
 `PACK_REARM_MV` 19_500. Introduced as a test floor on 2026-08-12 and **kept** on that day's results:
 nothing electrical or measurement-side objects to it. D4 is a shunt clamp with no series drop, so
@@ -507,7 +529,22 @@ and was withdrawn on 2026-08-13.
    *(b)* **R1 is two resistors in parallel — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective — the schematic
    still shows a single 1.3 kΩ.**
 
-5. **`streamed_s` counts a silent source as streamed** *(classviz, unfixed)*. It tracks wall-clock
+5. **The enclosure is now vented by construction.** The permanent case-mounted extractor makes the
+   vents permanent, and the case is no longer sealed. What that costs the shielding is a
+   mechanical/EMI question that is **not determinable from the logs** and has not been measured.
+   The noise floor did not regress (§3), which bounds the practical cost but does not answer it.
+
+6. **Whether either toroid mattered is undecided.** Both toroids were removed and the power cable
+   shortened 27 cm on 2026-08-13. The measured noise floor did not worsen, and **every toroid-out
+   measurement is at or below every toroid-in measurement** — so nothing indicates either was doing
+   useful work. But each hardware condition happened to be captured in a **disjoint pack-voltage
+   band** (19.6–20.9 / 21.3–21.7 / 22.0–23.0 V), so the change is collinear with pack state and the
+   two cannot be separated; within-session σ-vs-pack trends contradict each other across sessions
+   and cannot break the tie. **To settle it**, run each condition from full charge to the 19.0 V
+   floor and compare at matched voltage — and note the last condition changed *two* things
+   (power toroid *and* cable length), which would still need splitting.
+
+7. **`streamed_s` counts a silent source as streamed** *(classviz, unfixed)*. It tracks wall-clock
    since the run armed rather than the arrival of records, so a firmware source that goes quiet
    without closing the port is invisible to it — after the 2026-08-12 lockout it logged **70 minutes
    of zero data as streamed**, with the stall detector never firing. Distinct from the v1.74 arming
@@ -534,7 +571,7 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `src/pimd_features.py` | **v14** — session-CSV → training-corpus builder (offline CLI). Registry join, **hard geometry guard: one `(profile_name, profile_sha8)` per corpus build**. Parses the dump's `# pack_v:` / `# soak:` / `# stall:` / `# capture:` / `# mark:` comment tracks; `pack_v_at()` interpolates a voltage per capture. |
 | `src/pimd_target_check.py` | **v4** — target-registry loader/validator (CLI + library). `DEFAULT_REGISTRY_PATH` here is the single source of truth for registry location. `-f` is required — there is no default path. |
 | `src/pimd_corpus_check.py` | **v1.9** — corpus-level acceptance checker. Shape distance-invariance, split-half SNR, repeat consistency, falloff fit. One flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. |
-| `src/data/profiles/` | **v5** `cal_2x11_v5.json` is the operating profile — the only one in use. Runs at 3.125 kHz; **requires the cooling fan running** (§10, hardware-rev line). |
+| `src/data/profiles/` | **v5** `cal_2x11_v5.json` is the operating profile — the only one in use. Runs at 3.125 kHz; **requires the cooling fan**, which is on the rig's own switch (§10, hardware-rev line). |
 | `src/data/targets/targets_v3.csv` | Human-authored target registry, **current**, 27 objects — `pimd_target_check`'s `DEFAULT_REGISTRY_PATH` and what `pimd_classviz` / `pimd_features` use. Human-owned: tooling reads and validates only, never writes. `targets_v1.csv` is retained for reading the 2026-07-23 corpus. ⚠ `targets_v4.csv` is also tracked and is what **`pimd_rawlog` alone** reads (23 rows, different field set); despite the name it is **not** a successor to v3. |
 | `src/data/corpora/` | Signature corpora (`gui_signatures_*.csv`).  |
 | `src/data/sessions/` | Raw Mode 2 session dumps — self-describing CSV with embedded profile JSON, per-column map, marks and comment tracks; plus rawlog's verbatim `.txt`. Written automatically whenever the stream runs, ~220 KB/min. Untracked and **not reconstructable after the fact.** |
@@ -628,6 +665,7 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 | 17.21 | **Family is an orientation coordinate, not a material one.** The early-band sign splits by *placement*: 90.9 % accurate transverse, 53.8 % axial. The **late**-band sign — iron-bearing vs non-ferrous — is the robust axis at **97.2 % ungated**. | prev-epoch |
 | 17.22 | **The signature is rank 2 in orientation** and the Pasion–Oldenburg two-basis mixing law is confirmed on oblique captures, so orientation becomes a fitted parameter rather than a confound. | prev-epoch |
 | 17.23 | **Pack voltage does NOT materially scale the decay** *(corrected 2026-08-12)*. With U1 healthy and the fan fitted, supply sensitivity is **~1 mV/V grid mean** and the operating point moves **−0.8 % over a 2.1 V pack swing** (§3, §12). | current |
+| 17.24 | **Forced-air cooling sets the noise floor and the warm-up, and a fixed mount sets repeatability** *(measured 2026-08-13)*. Moving from a loose 38 mm blow-on fan to a permanent 40 mm case extractor took detrended 32-sweep σ from **50.9 → 37.7 µV** at *overlapping* pack voltage, cut run-to-run scatter **6.4 → 2.2 µV**, and changed warm-up from a two-stage soak to a clean single exponential (**10 → ~6 min**). Cooling is a first-order measurement variable, not a thermal-protection detail. | current |
 
 ---
 
