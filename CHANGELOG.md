@@ -169,6 +169,35 @@ strictly increasing and `threshold_v` strictly descending; the 10 µs band's las
 96 ns (157 counts) of margin. As before, reload the profile in the tool before recording so the
 corpus is stamped against **6339c35e**. (2026-08-13)
 
+### findings — 2026-08-13 — delaycal and classviz are not at the same thermal state; classviz is the reference
+
+**Bench observation.** Coming straight out of a `pimd_delaycal` calibration into `pimd_classviz`,
+the band mean is still falling — the board is still warming. The two tools are not at the same
+thermal state at handover, and delaycal is the cooler of the two. Recorded as an observation, not
+a defect: nothing misbehaves, and no change is proposed.
+
+**Corroborated from the v5d handover.** delaycal saved `cal_2x11_v5d` at 19:34:44 reporting board
+**47.3 → 47.2 °C**. classviz opened its session 19 s later at 19:35:03 reporting **48.0 °C** — already
+0.8 °C higher at handover — and the board then climbed to **49.6 °C** by 19:46, i.e. **+1.5 °C after
+the handover and +2.4 °C above delaycal's last reading**, before flattening. Over the same span the
+100 µs band mean fell **816.9 → 806.8 mV (−1.24 %)** and was still declining at t = 600 s.
+
+**The drift is band-asymmetric.** The 10 µs band mean was essentially flat across the same window
+(812.6 → 813.9 mV, +0.16 %) while the 100 µs band carried all of the decline. That is consistent
+with the 100 µs band carrying the dissipation — 31.25 % duty against the 10 µs band's 25 % (§12,
+and the U1 thermal work in the entries below).
+
+**Confound, stated for honesty.** Pack fell 20.78 → 20.58 V across the same window, and pack droop
+and warming push the band mean the same way (43–51 mV/V, §12). This session cannot separate the two
+contributions; the handover temperature step is direct evidence, the band-mean decline is
+consistent with it but not attributable to thermal alone.
+
+**Consequence for the workflow.** A profile's anchors are *cut* in delaycal at a cooler board than
+the state it will be *operated* in, so **classviz is the authority for a profile's measured
+voltages**. That is how `cal_2x11_v5d`'s measured table was produced — from a classviz air window at
+board 49.0 °C, not from delaycal's own readout — and it is the likely reason classviz figures and
+delaycal figures for the same cells do not match exactly. (2026-08-13)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.6)
