@@ -1,3 +1,38 @@
+### DESIGN.md — Doc-rev 2.8 — §14 pruned to the three problems that are still open
+
+**What changed.** Human-directed edit to §14, made by the builder: seven open problems become
+three. **Q1 duty headroom, C18's 25 V rating and the schematic/build mismatch at the RX front end
+survive unchanged**, renumbered 1–3. Four are closed and their text removed. The §14 cross-refs
+elsewhere in the document were re-pointed to match — §6's Q1 bullet `§14.2 → §14.1`, and the two
+RX front-end callouts in §7's diagram plus §15's schematic image line `§14.4 → §14.3`. §14 was the
+only section touched; no firmware, tool or profile version changed.
+
+**Why each of the four went.** *Thermal drift* is characterised, not open — §3 measures the
+warm-up, §17.11/§17.14 give its magnitude against supply, and classviz v1.77 now carries `temp_c`
+and soak into every corpus row, so it is a standing operating fact the tooling accounts for.
+*The vented enclosure* and *the undecided toroids* are closed on the builder's judgement as not
+worth outstanding-issue status; both entries already recorded that the noise floor did not regress
+(§3), which is the practical bound, and the toroid question additionally needed a full-charge-to-
+floor run per condition that is not planned.
+
+**`streamed_s` is the one to explain, because a code reading alone will re-raise it.** The defect
+is real and still present at classviz v1.79 — `_streamed_s()` counts wall-clock from when the run
+armed, and `_stall_total_s` is only ever added to inside `_note_frame_gap()`, which runs on frame
+*arrival*, so a source that goes silent forever is never booked as stalled. What retired it is the
+exposure, not the code. There is no auto-capture in classviz, so a corpus row can only be written
+by an operator click, and at that moment the screen carries `Rate: 0 Hz` (exact last-second count,
+not smoothed), the latched red lockout gauge and the telemetry-stale warning. A silence that
+*ends* is booked correctly and retroactively, since the gap is measured on the firmware clock. And
+a session dump over a silent stretch still carries its `# mark: firmware: LOCKOUT` line with no `W`
+rows against it — which is how the 2026-08-12 case was diagnosed. The trigger also got rarer: that
+lockout came off the imbalanced 6S pack, since retired. **One hole is acknowledged and accepted:**
+a silence that ends with the firmware clock stepping backwards returns early at
+`_note_frame_gap`'s `fw_time_ms < prev` guard and loses the whole gap. That needs an MCU reset,
+which should drop the USB port and end the run instead (§16 notes a reset does not re-enumerate
+reliably) — not proven from the code, and accepted as low-probability. If it is ever worth
+closing, the fix is a wall-clock frame-arrival watchdog that accrues stall time while no frame has
+arrived, rather than waiting for the next frame to declare the gap. (2026-08-14)
+
 ### src/data/profiles/cal_2x11_v5d.json — v5d — the 43–51 mV/V pack figure withdrawn; sha8 fc7519cd
 
 **What changed.** Notes text only — delays and `threshold_v` untouched. `profile_sha8`

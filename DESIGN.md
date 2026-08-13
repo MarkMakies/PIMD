@@ -3,7 +3,7 @@
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
 **Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.79 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v15 · shape v1 · target_check v4 · corpus_check v1.10 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5d` (2026-08-13, 2 × 11 = 22 cells, `profile_sha8` **fc7519cd**, **locked and fully measured — no corpus yet**). Bump this line on every edit.
 **Last bench update:** 2026-08-13 (40 mm extractor validated — 97.6 min of pulsing over four sessions, 104 618 sweeps, zero flagged rows)
-**Doc rev:** 2.7 (2026-08-13) operating profile re-pointed to `cal_2x11_v5d` — §10's table replaced with the locked, fully measured 22-cell ladder and its five bench-read anchors; 17.23 qualified with per-cell supply sensitivity on the steep anchors, and the unsupported 43–51 mV/V pack figure withdrawn from both 17.23 and the profile's notes. No firmware or tool version changed (2.6)
+**Doc rev:** 2.8 (2026-08-14) §14 pruned by the builder from seven open problems to three — thermal drift, the vented enclosure, the undecided toroids and classviz's `streamed_s` are all closed as not outstanding (see `CHANGELOG.md` for why each went, and do not re-raise them from the old text). The three that remain — Q1 duty headroom, C18, the schematic/build mismatch — are unchanged and renumbered 1–3, with the §14.2/§14.4 cross-refs in §6, §7 and §15 re-pointed to §14.1/§14.3. No firmware or tool version changed (2.7)
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -169,7 +169,7 @@ scope, not by formula.
 
 - **Q1:** IRF610 N-channel MOSFET, low-side switch, source to GND. Schematic limits < 10 A /
   < 300 µs / < 2 % duty; the 200 V rating is marginal against measured flyback and is managed by
-  duty limits + damping (§14.2).
+  duty limits + damping (§14.1).
 - **Gate driver:** U4C → U4D (TL074 sections) level-shift the 3.3 V `COIL-DRIVE` logic to a ~10 V
   gate swing. Design intent: fast, non-linear FET switching with parasitic-capacitance management.
 - **Gate / damping network:** R12/R13 are now **0 Ω** (originally 4.7 Ω 5 W to slow the gate edge
@@ -184,13 +184,13 @@ scope, not by formula.
 
 ```
 RX coil ─┬─ R1 ─ GND                   (shunt = damping; AS BUILT 1.5k ‖ 10k = 1304Ω,
-         │                              schematic v6.04 still draws a single 1.3k — §14.4)
+         │                              schematic v6.04 still draws a single 1.3k — §14.3)
          └─ R9 4.7k ──┬─ D2 1N4732 (4.7V zener) ─┐  (positive clamp)
                       │  D3 1N5819 (Schottky) ───┘  (negative clamp)
                       └─ 47R ─┬─► U3A LT6203 +input, pin 3 (single +12V supply)
                               │
     U5 pin 7 (5V-REF) ─[240k 1% metal film]─┘   +97 mV bias — fitted 2026-08-10, NOT on the
-                                                schematic (§14.4)
+                                                schematic (§14.3)
 ```
 
 - **R1 (shunt) is the RX damping resistor**, which also cleans up TX via mutual coupling.
@@ -533,44 +533,19 @@ and was withdrawn on 2026-08-13.
 
 ## 14. Open problems
 
-1. **Thermal drift.** Wider pulses heat the TX damping/gate
-   resistors; the drive circuit drifts and the RX side drifts with it. 
-
-2. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET duty
+1. **Q1 duty headroom.** Present operating points run well above the schematic's < 2 % FET duty
    note; Q1 (IRF610) is being pushed past its noted SOA. A higher-rated replacement is probably
    warranted.
 
-3. **C18 under-rated.** 4700 µF **25 V** on a rail that reaches 25.2 V on a fresh pack. 35 V
+2. **C18 under-rated.** 4700 µF **25 V** on a rail that reaches 25.2 V on a fresh pack. 35 V
    replacement identified, not fitted. **It sits on the `+20V` rail feeding the regulator that
    failed on 2026-08-10** (§12), so it is a candidate contributor to that failure rather than an
    independent tidy-up — untested either way, since no post-mortem was done.
 
-4. **The schematic no longer matches the build in two places, both at the RX front end.**
+3. **The schematic no longer matches the build in two places, both at the RX front end.**
    *(a)* **The 240 k bias resistor from 5V-REF to U3A pin 3 is not drawn at all.**  
    *(b)* **R1 is two resistors in parallel — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective — the schematic
    still shows a single 1.3 kΩ.**
-
-5. **The enclosure is now vented by construction.** The permanent case-mounted extractor makes the
-   vents permanent, and the case is no longer sealed. What that costs the shielding is a
-   mechanical/EMI question that is **not determinable from the logs** and has not been measured.
-   The noise floor did not regress (§3), which bounds the practical cost but does not answer it.
-
-6. **Whether either toroid mattered is undecided.** Both toroids were removed and the power cable
-   shortened 27 cm on 2026-08-13. The measured noise floor did not worsen, and **every toroid-out
-   measurement is at or below every toroid-in measurement** — so nothing indicates either was doing
-   useful work. But each hardware condition happened to be captured in a **disjoint pack-voltage
-   band** (19.6–20.9 / 21.3–21.7 / 22.0–23.0 V), so the change is collinear with pack state and the
-   two cannot be separated; within-session σ-vs-pack trends contradict each other across sessions
-   and cannot break the tie. **To settle it**, run each condition from full charge to the 19.0 V
-   floor and compare at matched voltage — and note the last condition changed *two* things
-   (power toroid *and* cable length), which would still need splitting.
-
-7. **`streamed_s` counts a silent source as streamed** *(classviz, unfixed)*. It tracks wall-clock
-   since the run armed rather than the arrival of records, so a firmware source that goes quiet
-   without closing the port is invisible to it — after the 2026-08-12 lockout it logged **70 minutes
-   of zero data as streamed**, with the stall detector never firing. Distinct from the v1.74 arming
-   fix: this is a defect in what the armed counter *measures*, and it matters precisely for the long
-   unattended run that soak accounting exists to watch.
 
 ---
 
@@ -606,7 +581,7 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `CLAUDE.md` | AI-agent working brief — how to behave in this repo. Not project facts. |
 
 **Key reference images** (all in `References/images/`): `schematic-v604.jpg` and
-`schematic-v604-sheet2.jpg` (rev 6.04 — **does not show the bias resistor**, §14.4) ·
+`schematic-v604-sheet2.jpg` (rev 6.04 — **does not show the bias resistor**, §14.3) ·
 **`bias_mod_delay_plot_20260810.png`** (the current front end: three bands, air / brass / steel with
 the §7 fits overlaid) · `6S-pack-discharge-curve.jpg` (§12) · `GUI-steady-state-256-1024.jpg` (the
 SoC reference capture) · `warmup-with-8ns-steps.jpg` (why delays snap to the 8 ns grid).
