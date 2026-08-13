@@ -137,6 +137,38 @@ so **the profile must be reloaded in the tool before recording** or the corpus r
 sha8 that no longer matches the file and the `(profile_name, profile_sha8)` guard in
 `pimd_features` will separate them (§10). (2026-08-13)
 
+### src/data/profiles/cal_2x11_v5d.json — v5d re-cut — cell 4 cross-band mismatch closed; sha8 6339c35e
+
+**What changed.** Cell 4 only, on both bands: 100 µs **13.272 → 13.248 µs** (−24 ns), 10 µs
+**10.160 → 10.176 µs** (+16 ns). Nothing else in the file moved — the other 20 cells, `threshold_v`,
+`averages` and the geometry are as locked in the previous entry. `profile_sha8` moves
+**48de8676 → 6339c35e**. Nothing was ever recorded against 48de8676, so the name `cal_2x11_v5d`
+stays unambiguous in practice despite having carried two hashes; the profile's `notes` records both.
+
+**Why.** As hand-placed, cell 4 read 491.4 mV on the 100 µs band against 507.2 mV on the 10 µs — a
+**3.16 % cross-band mismatch**, against 0.26 % on v5b. Cells 1–5 are the amplitude anchors, matched
+across bands precisely so that cell index *n* means the same point on the decay in either band, and
+cell 4 was the one bending that. The previous entry recorded it as a known wart left in place; it is
+cheaper to close now than to bake into every corpus row, so it was closed before recording starts.
+
+**How the step sizes were derived.** Both bands were trimmed onto the 500 mV cross-band consensus
+using the measured local log-slopes either side of cell 4 — **0.73837 nepers/µs** (cells 3–4) and
+**0.78010** (cells 4–5), from the same air window the previous entry's table came from. Both
+resulting delays land exactly on the 8 ns PWM grid with no rounding compromise. Gaps become
+1.936 / 0.744 / 1.112 / 1.840 µs on the 100 µs band and 1.880 / 0.712 / 1.088 / 1.784 µs on the
+10 µs — the knee stays tight, which was the point of v5d.
+
+**Predicted result: 500.1 / 500.9 mV, a 0.15 % mismatch** — down from 3.16 %. **These two numbers
+are calculated, not measured**, and are flagged as such in the profile's `notes`; every other value
+in that table is measured. They want confirming against a fresh air window before the corpus is
+recorded, and the `notes` block corrected if the bench disagrees.
+
+**Details.** Re-validated against the firmware's own `compute_pulse_duties` / `pulse_duties_valid`:
+all 22 cells on the 8 ns grid, both duties inside 16 bits with sample strictly after drive, delays
+strictly increasing and `threshold_v` strictly descending; the 10 µs band's last cell keeps its
+96 ns (157 counts) of margin. As before, reload the profile in the tool before recording so the
+corpus is stamped against **6339c35e**. (2026-08-13)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.6)
