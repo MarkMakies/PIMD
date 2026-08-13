@@ -1,3 +1,142 @@
+### src/data/profiles/cal_2x11_v5b.json — v5b — top amplitude anchor raised to 4.7 V, ladder re-cut and bench-locked
+
+**What changed.** A new profile derived from `cal_2x11_v5a`, same geometry (2 bands × 11 cells,
+`averages` 32, same band frequencies and pulse widths). The top amplitude anchor moves
+**2.4 V → 4.7 V** and cells 2–4 are re-cut as a constant-ratio ladder down to the held 125 mV of
+cell 5: targets **4.700 / 1.900 / 0.765 / 0.310 / 0.125 V**, step ratio 2.4763×. Delays after
+hand-nudging: **9.456 / 11.392 / 12.704 / 13.872** µs on the 100 µs band and **6.496 / 8.384 /
+9.648 / 10.776** µs on the 10 µs band. Cell 5 and **cells 6–11 are carried from v5a unchanged on
+both bands**. `threshold_v` now carries the real targets for cells 1–5 — v5a's whole column was a
+placeholder — while cells 6–11 stay ordering keys only, now 100 / 90 / 80 / 70 / 60 / 50 mV instead
+of the old 5.0 → 0.5 V countdown. `profile_sha8` is **89d18e52**. `cal_2x11_v5a.json` is retained
+and untouched.
+
+**Why.** v5a's 2.4 V top anchor was chosen when the early samples were far noisier. They are no
+longer: at 4.7 V the delaycal std dev reads 0.04–0.05 mV (N=8, 3-draw smoothing), the same as
+everywhere else on the profile. So the anchored region can start higher up the decay, putting five
+anchored cells across a 37.6:1 amplitude span instead of v5a's 19.2:1. Cell 5 is held at 125 mV
+because it is the tested handoff into the null region and cells 6–8 are time-anchored and
+band-dependent — moving it would only shift the gap into mid-descent.
+
+**Measured, in air, 4 871 sweeps over 275 s at pack 21.59 V / board 47.1 °C** (session
+`session_20260813_185559.csv`, fw v4.37, classviz v1.79):
+
+| cell | target | 100 µs band | 10 µs band | cross-band |
+|---|---|---|---|---|
+| 1 | 4.700 V | 4698.1 mV −0.04 % | 4703.2 mV +0.07 % | 0.11 % |
+| 2 | 1.900 V | 1893.0 mV −0.37 % | 1898.1 mV −0.10 % | 0.27 % |
+| 3 | 0.765 V | 762.0 mV −0.39 % | 762.2 mV −0.37 % | 0.02 % |
+| 4 | 0.310 V | 311.3 mV +0.42 % | 310.5 mV +0.16 % | 0.26 % |
+| 5 | 0.125 V | 127.1 mV +1.68 % | 125.6 mV +0.52 % | 1.15 % |
+
+Every anchored cell is within 1.7 % of target on both bands against v5a's +0.8 / +2.6 / +3.3 /
++4.4 / +7.9 %, and cross-band matching is 0.02–1.15 % against v5a's 0.4–5.3 %. Band-dependent cells
+6–11 measure (100 µs / 10 µs) 80.3/78.7, **63.3/70.3** (null minimum), 92.6/92.2, 112.6/108.3,
+112.8/110.3, 112.4/111.3 mV — the null keeps v5a's depth ordering (deepest on 100 µs) at v5a's
+59/69 mV within 4 mV. **Sweep rate 17.75 Hz**, confirming the geometry is unchanged from v5a's
+17.85 Hz.
+
+**New finding — the decay is not log-linear above ~2 V.** The measured log-slope across cells 1–5
+steepens monotonically with delay: **0.470 / 0.694 / 0.767 / 0.752 nepers/µs** on the 100 µs band
+and **0.481 / 0.722 / 0.796 / 0.764** on the 10 µs. The top segment is only ~61 % as steep as the
+bottom three, which are flat to within 5 % of each other. Two consequences. First, a constant
+voltage-ratio ladder is *not* a constant time-step ladder up here — the cell 1–2 gap is 1.936 /
+1.888 µs against ~1.17 µs at the bottom of the ladder. Second, cells 1–4 were first placed on paper
+(as `cal_2x11_v5b_test`) by extrapolating v5a's own local rates, which assumed log-linearity, and
+**cell 1 came out 544 ns late on both bands** and had to be nudged earlier by exactly that amount,
+while cells 2–4 landed within 24 ns (3 grid steps). The 544 ns error being identical on both bands
+says it is the model, not the band. This also contradicts the paper profile's stated expectation
+that a miss would read high and want nudging later — it read low and wanted nudging earlier.
+
+**Two standing cautions.** 4.700 V is 94 % of the 5.000 V ADC full scale and this cut was taken at
+21.59 V / 47 % SoC; amplitude moves 43–51 mV/V with pack state (§12), so a fresh 24.5 V pack could
+add 120–145 mV and put cell 1 near 4.85 V. Not clipping, but cell 1 wants watching on a full pack —
+if it does clip, drop the top anchor to 4.5 V and re-run the ladder. Separately, cell 1 now sits at
+6.496 / 9.456 µs, earlier than anything used in v5a (8.016 / 11.016 µs) and earlier than the
+~9–12 µs window the scope captures cover, so the front-end transient is not independently
+characterised there; it measures clean, and the 0.11 % cross-band agreement says both bands are
+reading the same point on the same decay.
+
+**Details.** All 22 cells validated against the firmware's own `compute_pulse_duties` /
+`pulse_duties_valid`: every delay an exact multiple of the 8 ns PWM grid, both duties inside 16 bits
+with sample strictly after drive, delays strictly increasing and `threshold_v` strictly descending.
+The 10 µs band's last cell keeps its 96 ns (157 counts) of margin. Duty is unchanged at 31.25 % /
+25 %, so the fan requirement is unchanged and still structural. The changed `threshold_v` column and
+five moved delays give a different `profile_sha8` from v5a, so frames from the two must never be
+mixed in one dataset (§10) — the `(profile_name, profile_sha8)` guard in `pimd_features` enforces
+it. The validation session logged 39 flagged rows (0.80 %), all in one contiguous 5 s burst at
+18:57:55–18:58:00 and none before or after — a single external disturbance during the run, not a
+profile property. **Known wart:** as with v5a, the exported `notes` field carries the superseding
+profile's preamble forward verbatim — here `cal_2x11_v5b_test`'s "UNTESTED, UNSWEPT … DELAYS ARE
+EXTRAPOLATED … will read HIGH and want nudging LATER", none of which describes this file. Not
+corrected in place, because `profile_sha8` hashes the literal profile-file bytes including `notes`,
+so editing the prose would move the sha8 off the 89d18e52 already stamped into the air sessions
+above. (2026-08-13)
+
+### src/data/profiles/cal_2x11_v5d.json — v5d — knee cells re-placed by hand; FINAL, locked, corpus next
+
+**What changed.** `cal_2x11_v5d` is the new operating profile, locked at `profile_sha8`
+**48de8676**. Against `cal_2x11_v5b`, only cells 3 and 4 moved, both earlier on both bands:
+100 µs band cell 3 **12.704 → 12.136** (−568 ns), cell 4 **13.872 → 13.272** (−600 ns), cell 5
+15.064 → 15.088 (+24 ns); 10 µs band cell 2 8.384 → 8.376 (−8 ns), cell 3 **9.648 → 9.088**
+(−560 ns), cell 4 **10.776 → 10.160** (−616 ns). Cells 1, 2 and 6–11 are unchanged from v5b, which
+carried 6–11 unchanged from v5a. Geometry, band frequencies, pulse widths and `averages` are
+unchanged. `threshold_v` cells 1–5 are updated to the voltages the cells were **measured** to
+sample — **4.700 / 1.900 / 1.150 / 0.500 / 0.125 V** — replacing v5b's 0.765 / 0.310 entries, which
+the move had made stale. Cells 6–11 remain ordering keys at 100 / 90 / 80 / 70 / 60 / 50 mV.
+The exported `notes` field, which by v5d had accumulated a four-deep nested "Carried forward
+from…" chain still ending in `cal_2x11_v5b_test`'s "UNTESTED, UNSWEPT" preamble, was replaced with
+a description of this profile — the wart called out in the v5a and v5b entries, fixed here.
+
+**Why.** The cells were placed **by hand against live target charts**, not solved to a voltage
+target. On v5b the steepest part of the measured target response fell in the cell 2 → cell 3 gap
+and cell 3 sat past the knee, so the response read as a kink rather than a shape. Moving cells 3
+and 4 earlier puts them on that limb. The resulting gaps are **1.936 / 0.744 / 1.136 / 1.816 µs**
+(100 µs band) and 1.880 / 0.712 / 1.072 / 1.800 µs (10 µs) — deliberately uneven, tight through the
+knee and wide either side. That is the reverse of v5b's even-in-log-amplitude ladder and is the
+point of the change: v5b's spacing rationale had already been falsified by the measurement that the
+decay is not log-linear above ~2 V (see the v5b entry), so even log spacing had no remaining claim
+on the design.
+
+**Measured in air — 3 932 sweeps over 220 s, zero flagged rows, pack 20.70 V, board 49.0 °C**
+(`session_20260813_193503`, fw v4.37, classviz v1.79):
+
+| cell | 100 µs delay / mean | 10 µs delay / mean | cross-band |
+|---|---|---|---|
+| 1 | 9.456 µs · 4685.8 mV | 6.496 µs · 4698.4 mV | 0.27 % |
+| 2 | 11.392 µs · 1880.0 mV | 8.376 µs · 1901.7 mV | 1.15 % |
+| 3 | 12.136 µs · 1136.8 mV | 9.088 µs · 1153.4 mV | 1.45 % |
+| 4 | 13.272 µs · 491.4 mV | 10.160 µs · 507.2 mV | **3.16 %** |
+| 5 | 15.088 µs · 123.2 mV | 11.960 µs · 124.5 mV | 1.13 % |
+| 6–11 | 78.8 / 62.2 / 91.6 / 111.9 / 112.3 / 112.1 mV | 78.1 / 70.0 / 92.0 / 108.0 / 110.0 / 111.1 mV | band-dependent |
+
+Air std dev is 0.07–1.03 mV per cell on the 100 µs band and 0.07–0.25 mV on the 10 µs. **Sweep rate
+17.86 Hz**, unchanged from v5a/v5b as expected since the geometry did not change.
+
+**Known wart, left in deliberately.** Cell 4's cross-band matching is **3.16 %**, against 0.26 % on
+v5b — the hand placement moved the two bands by slightly different amounts (−600 vs −616 ns) on a
+steep part of the decay. Cells 1–5 are meant to be amplitude-matched across bands so that cell
+index *n* is the same point on the decay in either band, and cell 4 now bends that. It is left as
+cut because the profile is locked; ~20 ns on either band would close it if it is ever revisited.
+
+**Standing caution — cut at a low pack.** These delays and voltages were taken at **20.70 V**,
+below v5b's 21.6 V and near the bottom of the §12 clean window. At 43–51 mV/V the cells read higher
+on a fuller pack — roughly +150 to +200 mV on cell 1 at 24 V, putting it near 4.85 V against the
+5.000 V full scale. Not clipping, but cell 1 wants watching at the top of the pack range.
+
+**Details.** All 22 cells validated against the firmware's own `compute_pulse_duties` /
+`pulse_duties_valid`: every delay an exact multiple of the 8 ns PWM grid, both duties inside 16 bits
+with sample strictly after drive, delays strictly increasing and `threshold_v` strictly descending.
+The 10 µs band's last cell keeps its 96 ns (157 counts) of margin. The file was written without a
+trailing newline to match the `pimd_delaycal` export convention its siblings use, since
+`profile_sha8` hashes the literal file bytes.
+
+**Next step: build the corpus against this profile.** `profile_sha8` **48de8676** is the pin —
+the running session that produced the air numbers above was stamped `8894f0b9`, the pre-lock bytes,
+so **the profile must be reloaded in the tool before recording** or the corpus rows will carry a
+sha8 that no longer matches the file and the `(profile_name, profile_sha8)` guard in
+`pimd_features` will separate them (§10). (2026-08-13)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.6)
