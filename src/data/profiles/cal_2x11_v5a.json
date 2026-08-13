@@ -1,0 +1,67 @@
+{
+  "name": "cal_2x11_v5a",
+  "notes": "13/826 version 4a - re-calibrated in light of thermal changes due to new cooling arrangements\n\nNo sweep this session \u2014 delays as imported or edited by hand. Saved 2026-08-13 15:40:32, delaycal v1.49. Sweep parameters: start 4.00 \u00b5s, coarse step 0.8 \u00b5s, fine step 40 ns, max delay 200.0 \u00b5s, averages N=32, signal detect 5.0 V. Auto Nudge parameters: threshold 1.30 mV, step 800 ns, soak 5 s, max iter 20, parallel, std dev N=8. Conditions since connect: pack 22.42\u219219.66 V (min 19.66), board 21.5\u219248.0 \u00b0C (max 48.0). Geometry: 2 bands \u00d7 11 thresholds = 22 cells; thresholds 5 \u2192 0.5 V. Carried forward from cal_2x11_v5: cal_2x11_v5 \u2014 2 bands x 11 cells, DERIVED ON PAPER from cal_3x10_v5, 2026-08-11. NOT swept and NOT yet bench-verified: this is a starting point for hand-adjustment in pimd_delaycal Manual Nudge, not a measured profile. No cell has a measured mean behind it except where it was carried over unchanged from cal_3x10_v5 (marked CARRIED below).\n\nWHY 2 BANDS. The 50 us band is dropped. On the classviz sample-delay-band profiles its centre point sits essentially on the straight line between the 100 us and 10 us bands, so it costs a band boundary's settle budget (DESIGN \u00a78, the dominant per-sweep cost) for information the other two already carry. 2 x 11 = 22 cells against 3 x 10 = 30, and one fewer band boundary, so the sweep rate should rise well above the 12.45 Hz of cal_3x10_v5 \u2014 UNMEASURED, verify on the bench.\n\nWHY 11 CELLS. cal_3x10_v5 spent 4 cells before the null, 1 in it, 5 after. This spends 6 before, 1 in it, 4 after \u2014 two more in the early amplitude-anchored region where polarity separates the families, one fewer on the pedestal where three interpolated points were carrying much the same decay-rate information.\n\nCELL PLAN (1-based, as placed).\n  1  2.4 V     CARRIED   measured 2396 / 2401 mV (100 / 10 us bands)\n  2  ~1.1 V    NEW       the geometric midpoint of cells 1 and 3 (sqrt(2396*498) = 1092 mV; sqrt(2401*499) = 1095 mV). Placed by log-linear interpolation between the two measured neighbours \u2014 the decay is log-linear to within 3 % across that span (0.701 vs 0.767-0.792 per us on the 100 us band).\n  3  0.5 V     CARRIED   measured 498 / 499 mV\n  4  250 mV    CARRIED   measured 248 / 249 mV\n  5  125 mV    CARRIED   measured 124 / 124 mV\n  6  ~85 / ~92 mV  NEW   mid-descent into the null. Anchored in TIME, at the midpoint between cell 5 and the null minimum, NOT amplitude-matched across bands \u2014 it cannot be, because the null depth is band-dependent (59 vs 69 mV). Expect roughly the geometric mean of its neighbours: ~85 mV on the 100 us band, ~92 mV on the 10 us. Read it as a fill-depth cell, like cells 7 and 8.\n  7  the NULL MINIMUM  CARRIED   measured 59 / 69 mV \u2014 deepest on the 100 us band, shallowest on the 10 us\n  8  rising out of the null, about 90 mV  CARRIED   measured 91 / 90 mV\n  9,10  GEOMETRIC ladder interpolated between cell 8 and cell 11; constant ratio 1.7834 / 1.2152 per band, all on the 8 ns grid. Two interior points where cal_3x10_v5 had three. The ~110 mV air pedestal is reached by cell 9, so these carry decay RATE, not amplitude.\n  11 the band's longest delay: 120.0 / 29.0 us  CARRIED. Only the 10 us band is at the hardware limit (29.095 us, 95 ns of margin before the 16-bit PWM duty overflows); the 100 us band sits well short of its 219.091 us limit and could be extended now that a band has been freed.\n\nSPACING. Adding cells 2 and 6 makes the pre-null region nearly uniform in time \u2014 gaps of 1.11 / 1.13 / 0.88 / 0.90 / 1.06 / 1.05 us on the 100 us band and 1.08 / 1.09 / 0.86 / 0.92 / 0.91 / 0.90 us on the 10 us band, against gaps of 2.24 and 2.10 us either side of a tight 0.9 us cluster in cal_3x10_v5. That is the point of the change: even resolution across the whole volt-scale descent instead of a cluster with two holes.\n\nCROSS-BAND MATCHING holds for cells 1-5 only. Those are the amplitude anchors, matched ACROSS both bands to the same voltages, so cell index n means the same point on the decay in either band. Cells 6-8 are null-region cells and are band-dependent by construction; cells 9-11 are time-anchored.\n\nDUTY / HEATING. 31.25 % (100 us @ 3125 Hz) and 25 % (10 us @ 25 kHz), mean 28.1 % against 27.1 % for the three-band plan \u2014 dropping the 50 us band raises the average duty by ~4 % relative, so per-sweep dissipation is slightly higher even though the sweep is shorter. Watch board temperature on the first long run.\n\nALL 22 CELLS VALIDATED OFFLINE: every delay is an exact multiple of the 8 ns PWM grid and every (drive_duty, sample_duty) pair fits in 16 bits with sample strictly after drive.\n\nCONDITIONS ASSUMED: the carried-over delays are cal_3x10_v5's, tuned at pack 21.89 V (22 % SoC, the LOW end of the DESIGN \u00a712 clean window) and board 70.3 \u00b0C, in air, fw v4.35, delaycal v1.48. Amplitude-anchored delays move with pack state (43-51 mV/V, \u00a712) and with board temperature, so cells 1-5 will not sit on those voltages at full charge or on a cold board, and the two interpolated cells inherit that same corner.\n\nthreshold_v is a PLACEHOLDER ORDERING KEY only \u2014 a 5.0 -> 0.5 V countdown in 0.45 V steps, 11 values, chosen only so it descends strictly and stays inside the 5.000 V full scale. It is not the voltage at these delays (the expected values are listed above) and must not be mined as one; pimd_shape and pimd_corpus_check use it solely to sort cells by -threshold_v, and pimd_delaycal keys on (freq_hz, pulse_us, threshold_v).",
+  "averages": 32,
+  "bands": [
+    {
+      "freq_hz": 3125,
+      "pulse_us": 100.0,
+      "delays_us": [
+        11.016,
+        12.192,
+        13.256,
+        14.152,
+        15.064,
+        15.872,
+        16.92,
+        21.16,
+        37.736,
+        67.296,
+        120.0
+      ],
+      "threshold_v": [
+        5.0,
+        4.55,
+        4.1,
+        3.65,
+        3.2,
+        2.75,
+        2.3,
+        1.85,
+        1.4,
+        0.95,
+        0.5
+      ]
+    },
+    {
+      "freq_hz": 25000,
+      "pulse_us": 10.0,
+      "delays_us": [
+        8.016,
+        9.152,
+        10.176,
+        11.04,
+        11.96,
+        12.896,
+        13.8,
+        16.16,
+        19.64,
+        23.864,
+        29.0
+      ],
+      "threshold_v": [
+        5.0,
+        4.55,
+        4.1,
+        3.65,
+        3.2,
+        2.75,
+        2.3,
+        1.85,
+        1.4,
+        0.95,
+        0.5
+      ]
+    }
+  ]
+}
