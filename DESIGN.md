@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD) 
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.79 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v15 · shape v1 · target_check v4 · corpus_check v1.10 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5a` (2026-08-13, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.79 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v15 · shape v1 · target_check v4 · corpus_check v1.10 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5d` (2026-08-13, 2 × 11 = 22 cells, `profile_sha8` **fc7519cd**, **locked and fully measured — no corpus yet**). Bump this line on every edit.
 **Last bench update:** 2026-08-13 (40 mm extractor validated — 97.6 min of pulsing over four sessions, 104 618 sweeps, zero flagged rows)
-**Doc rev:** 2.6 (2026-08-13) tool versions refreshed (classviz v1.79, features v15, corpus_check v1.10); operating profile re-pointed to `cal_2x11_v5a` after the extractor thermal re-cut of §10's cells 1–5. No new measured facts (2.5)
+**Doc rev:** 2.7 (2026-08-13) operating profile re-pointed to `cal_2x11_v5d` — §10's table replaced with the locked, fully measured 22-cell ladder and its five bench-read anchors; 17.23 qualified with per-cell supply sensitivity on the steep anchors, and the unsupported 43–51 mV/V pack figure withdrawn from both 17.23 and the profile's notes. No firmware or tool version changed (2.6)
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -386,28 +386,20 @@ profile**.
 count does *not* imply comparability — comparability rests entirely on the
 `(profile_name, profile_sha8)` guard in `pimd_features`, **which must not be relaxed**.
 
-### Operating profile — `cal_2x11_v5a` (2026-08-13)
+### Operating profile — `cal_2x11_v5d` (2026-08-13)
 
-#### cal_2x11_v5a — Cell / Zone / Delay Range / Anchor Table
+#### cal_2x11_v5d — Cell / Zone / Delay / Anchor Table
 
-Geometry derived on paper 2026-08-11 as `cal_2x11_v5`; **cells 1–5 re-cut on the bench
-2026-08-13 as `cal_2x11_v5a`**, `profile_sha8` **7730b4e3**. 2 bands × 11 cells (22 cells total).
-The sole profile in use — no other geometry is current; v5 is superseded and retained only for
-reading recordings made under it.
+`profile_sha8` **fc7519cd**. 2 bands × 11 cells (22 cells total), `averages` 32. **The sole profile
+in use and the only file in `src/data/profiles/`** — v5, v5a and v5b were removed from the working
+tree on 2026-08-13 and live in git history. **Locked, and every voltage in the table below is a
+bench reading, not a target.** No corpus has been recorded against it yet.
 
-**Why v5a exists:** v5's delays were cut at board 70.3 °C, which the permanent 40 mm extractor
-can no longer reach (it plateaus near 47.8 °C), so on the cooler board the 100 µs band sat
-15–25 % above its amplitude anchors. Re-cutting put them back: **+0.8 / +2.6 / +3.3 / +4.4 /
-+7.9 %** against +14.8 / +24.9 / +21.1 / +22.6 / +21.8 % before, and cross-band matching on
-cells 1–5 from 16 % mismatch to **0.4–5.3 %**. Cells 6–11 did not move on either band.
-
-**Sweep rate: 17.85 Hz** (56.0 ms/sweep) *(measured 2026-08-13, fw v4.37, four sessions at
-17.83–17.88 Hz)*, against 12.45 Hz for the retired `cal_3x10_v5` — **+43 %**. *(Supersedes 16.13 Hz,
-measured 2026-08-12 on fw v4.35; the rise is firmware, not the profile or the fan.)* Sweep rate and
-the run-length figures below were measured on v5 and carry to v5a unchanged — the re-cut moved five
-delays, not the geometry, the band count or the averaging depth. Those figures are: **3.1 h bench-run
-on 2026-08-12, zero flagged rows in 63 813 uninterrupted sweeps**, plus the 2026-08-13 extractor
-validation below.
+**Sweep rate: 17.86 Hz** *(measured 2026-08-13, fw v4.37)*, against 12.45 Hz for the retired
+`cal_3x10_v5` — **+43 %**. Unchanged across the v5a → v5b → v5d re-cuts, as expected: those moved
+delays, never the band count, cell count or averaging depth. The run-length figures likewise carry
+forward and are: **3.1 h bench-run on 2026-08-12, zero flagged rows in 63 813 uninterrupted
+sweeps**, plus the 2026-08-13 extractor validation below.
 
 **Runs at 3.125 kHz on the 100 µs band, and requires the cooling fan running.** Without the fan,
 this band trips the +15 V regulator (U1) on a ~42 s cycle. The fan is powered from the rig's own
@@ -416,28 +408,46 @@ board pulses and the fan does not. **Validated 2026-08-13**: 104 618 sweeps over
 flagged rows, including a cold start at 24.48 V (worst U1 corner); the one run that ended did so on
 the 19.0 V pack floor, not on heat.
 
-| Cell | Zone | Delay range (μs, 100 μs band → 10 μs band) | Anchor type |
-|---|---|---|---|
-| 1 | Early | 11.016 → 8.016 | Amplitude-anchored — 2.4 V |
-| 2 | Early | 12.192 → 9.152 | Amplitude-anchored — ~1.1 V (log-linear interpolated midpoint of cells 1 & 3) |
-| 3 | Early | 13.256 → 10.176 | Amplitude-anchored — 0.5 V |
-| 4 | Early | 14.152 → 11.040 | Amplitude-anchored — 250 mV |
-| 5 | Early | 15.064 → 11.960 | Amplitude-anchored — 125 mV |
-| 6 | Mid descent | 15.872 → 12.896 | Time-anchored, band-dependent — midpoint between cell 5 and null minimum |
-| 7 | Peak min | 16.920 → 13.800 | Null minimum (band-dependent depth) |
-| 8 | Rising | 21.160 → 16.160 | Rising out of null (band-dependent) |
-| 9 | Late | 37.736 → 19.640 | Geometric ladder step 1 of 2 (ratio 1.7834 / 1.2152) — reaches ~110 mV air pedestal |
-| 10 | Late | 67.296 → 23.864 | Geometric ladder step 2 of 2 — decay rate, not amplitude |
-| 11 | Late | 120.000 → 29.000 | Band's longest delay (10 μs band at hardware limit, 96 ns margin) |
+| Cell | Zone | Delay µs (100 µs → 10 µs) | Anchor | Measured mV (100 µs / 10 µs) | Cross-band |
+|---|---|---|---|---|---|
+| 1 | Early | 9.456 → 6.496 | Amplitude — **4.700 V** | 4680.0 / 4696.0 | 0.34 % |
+| 2 | Early | 11.392 → 8.376 | Amplitude — **1.900 V** | 1874.3 / 1898.5 | 1.28 % |
+| 3 | Early | 12.136 → 9.088 | Amplitude — **1.150 V** | 1133.2 / 1151.0 | 1.56 % |
+| 4 | Early | 13.248 → 10.176 | Amplitude — **0.500 V** | 498.9 / 499.4 | 0.09 % |
+| 5 | Early | 15.088 → 11.960 | Amplitude — **0.125 V** | 123.0 / 124.2 | 0.91 % |
+| 6 | Mid descent | 15.872 → 12.896 | Time-anchored, band-dependent | 79.0 / 77.9 | 1.32 % |
+| 7 | Peak min | 16.920 → 13.800 | Null minimum (band-dependent depth) | 62.5 / 69.9 | 11.32 % |
+| 8 | Rising | 21.160 → 16.160 | Rising out of null | 91.8 / 92.0 | 0.24 % |
+| 9 | Late | 37.736 → 19.640 | Time-anchored — decay rate, not amplitude | 111.8 / 108.0 | 3.45 % |
+| 10 | Late | 67.296 → 23.864 | Time-anchored — decay rate, not amplitude | 112.3 / 109.9 | 2.15 % |
+| 11 | Late | 120.000 → 29.000 | Band's longest delay (10 µs band at hardware limit, 96 ns margin) | 112.0 / 111.0 | 0.93 % |
+
+**Measured in air** *(2026-08-13, 1 666 sweeps over 93 s at steady state, zero flagged rows, pack
+20.17 V, board 49.4 °C)*. Air std dev is 0.07–0.88 mV per cell on the 100 µs band and 0.05–0.23 mV
+on the 10 µs. The cut sits near the **bottom** of the §12 clean window, so the anchors read higher
+on a fuller pack — see **17.23**, and note its 2026-08-13 qualifier: the steep early anchors are far
+more supply-sensitive than the grid mean. Cell 1 at 4.680 V is 94 % of the 5.000 V full scale and
+wants watching at the top of the pack range.
 
 **Zone breakdown:** 5 early / 1 mid descent / 1 peak min / 1 rising / 3 late — 11 cells total per band.
 
-**Cross-band matching:** holds for cells 1–5 only (amplitude anchors). Cells 6–8 are null-region, band-dependent by construction. Cells 9–11 are time-anchored.
+**Spacing is deliberately uneven.** Gaps across the amplitude anchors are 1.936 / 0.744 / 1.112 /
+1.840 µs on the 100 µs band and 1.880 / 0.712 / 1.088 / 1.784 µs on the 10 µs — tight through the
+knee where the target response turns over, wide either side. Even spacing has no claim here: the
+decay is **not log-linear above ~2 V** *(measured 2026-08-13, both bands)*, so equal voltage ratios
+are not equal time steps.
+
+**Cross-band matching:** holds for cells 1–5 only (amplitude anchors), and is within 1.6 % on all
+five. Cells 6–8 are null-region, band-dependent by construction — cell 7's 11.3 % is the null depth
+differing by band, not a defect. Cells 9–11 are time-anchored.
 
 **The null is sampled deliberately at its minimum** (cell 7) 
 
-**`threshold_v` is a PLACEHOLDER ORDERING KEY, not a voltage.** 
-**Do not mine that column**.
+**`threshold_v` has MIXED MEANING in this profile.** Cells 1–5 carry the **real measured
+amplitudes** (4.700 / 1.900 / 1.150 / 0.500 / 0.125 V) and are what `pimd_delaycal` keys its nudge
+targets on. Cells 6–11 are **placeholder ordering keys only** (100 / 90 / 80 / 70 / 60 / 50 mV),
+chosen solely to keep the column strictly descending. **Do not mine cells 6–11 as voltages** — the
+null minimum measures 62.5 / 69.9 mV, not 90.
 
 ---
 
@@ -582,7 +592,7 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `src/pimd_features.py` | **v15** — session-CSV → training-corpus builder (offline CLI). Registry join, **hard geometry guard: one `(profile_name, profile_sha8)` per corpus build**. Parses the dump's `# pack_v:` / `# soak:` / `# stall:` / `# capture:` / `# mark:` comment tracks; `pack_v_at()` interpolates a voltage per capture. |
 | `src/pimd_target_check.py` | **v4** — target-registry loader/validator (CLI + library). `DEFAULT_REGISTRY_PATH` here is the single source of truth for registry location. `-f` is required — there is no default path. |
 | `src/pimd_corpus_check.py` | **v1.10** — corpus-level acceptance checker. Shape distance-invariance, split-half SNR, repeat consistency, falloff fit. One flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. |
-| `src/data/profiles/` | **v5a** `cal_2x11_v5a.json` is the operating profile — the only one in use (`profile_sha8` 7730b4e3). Runs at 3.125 kHz; **requires the cooling fan**, which is on the rig's own switch (§10, hardware-rev line). `cal_2x11_v5.json` is its superseded predecessor, retained because recordings carry its sha — do not run it. |
+| `src/data/profiles/` | **v5d** `cal_2x11_v5d.json` is the operating profile and the **only file in the directory** (`profile_sha8` fc7519cd). Runs at 3.125 kHz; **requires the cooling fan**, which is on the rig's own switch (§10, hardware-rev line). `cal_2x11_v5`, `v5a` and `v5b` were removed from the working tree on 2026-08-13 and live in git history — restore from there if a recording made under one ever needs its geometry re-read. |
 | `src/data/targets/targets_v3.csv` | Human-authored target registry, **current**, 27 objects — `pimd_target_check`'s `DEFAULT_REGISTRY_PATH` and what `pimd_classviz` / `pimd_features` use. Human-owned: tooling reads and validates only, never writes. `targets_v1.csv` is retained for reading the 2026-07-23 corpus. ⚠ `targets_v4.csv` is also tracked and is what **`pimd_rawlog` alone** reads (23 rows, different field set); despite the name it is **not** a successor to v3. |
 | `src/data/corpora/` | Signature corpora (`gui_signatures_*.csv`).  |
 | `src/data/sessions/` | Raw Mode 2 session dumps — self-describing CSV with embedded profile JSON, per-column map, marks and comment tracks; plus rawlog's verbatim `.txt`. Written automatically whenever the stream runs, ~220 KB/min. Untracked and **not reconstructable after the fact.** |
@@ -675,7 +685,7 @@ A32                   → one raw boxcar average (R record), idle/Mode 1 only
 | 17.16 | **31.25 kHz is a bad rep rate** — an entire band unusable at 31.25 kHz / 9 µs, restored by moving to 25 kHz with the pulse unchanged. Noise followed the rep rate, not the decay alignment. | all |
 | 17.21 | **Family is an orientation coordinate, not a material one.** The early-band sign splits by *placement*: 90.9 % accurate transverse, 53.8 % axial. The **late**-band sign — iron-bearing vs non-ferrous — is the robust axis at **97.2 % ungated**. | prev-epoch |
 | 17.22 | **The signature is rank 2 in orientation** and the Pasion–Oldenburg two-basis mixing law is confirmed on oblique captures, so orientation becomes a fitted parameter rather than a confound. | prev-epoch |
-| 17.23 | **Pack voltage does NOT materially scale the decay** *(corrected 2026-08-12)*. With U1 healthy and the fan fitted, supply sensitivity is **~1 mV/V grid mean** and the operating point moves **−0.8 % over a 2.1 V pack swing** (§3, §12). | current |
+| 17.23 | **Pack voltage does NOT materially scale the decay** *(corrected 2026-08-12)*. With U1 healthy and the fan fitted, supply sensitivity is **~1 mV/V grid mean** and the operating point moves **−0.8 % over a 2.1 V pack swing** (§3, §12). *(Qualified 2026-08-13: that figure is a **grid mean**, and individual cells depart from it by an order of magnitude. `cal_2x11_v5d` cell 1 moved **10.9 mV/V** on the 100 µs band and 4.5 mV/V on the 10 µs between two air windows at 20.70 → 20.17 V. The grid mean is the right number for whole-signature scaling; it is the **wrong** number for asking whether an individual amplitude anchor still sits on its voltage — §10's anchors do move with the pack. **A figure of 43–51 mV/V citing §12 circulated in profile `notes` from `cal_2x11_v5a` onward; it is withdrawn** — §12 never carried it and no measurement here supports it.)* | current |
 | 17.24 | **Forced-air cooling sets the noise floor and the warm-up, and a fixed mount sets repeatability** *(measured 2026-08-13)*. Moving from a loose 38 mm blow-on fan to a permanent 40 mm case extractor took detrended 32-sweep σ from **50.9 → 37.7 µV** at *overlapping* pack voltage, cut run-to-run scatter **6.4 → 2.2 µV**, and changed warm-up from a two-stage soak to a clean single exponential (**10 → ~6 min**). Cooling is a first-order measurement variable, not a thermal-protection detail. | current |
 
 ---

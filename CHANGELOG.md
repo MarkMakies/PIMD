@@ -1,3 +1,34 @@
+### src/data/profiles/cal_2x11_v5d.json — v5d — the 43–51 mV/V pack figure withdrawn; sha8 fc7519cd
+
+**What changed.** Notes text only — delays and `threshold_v` untouched. `profile_sha8`
+**c42a5f1e → fc7519cd**.
+
+**Why.** The notes claimed *"Amplitude moves 43–51 mV/V with pack state (DESIGN section 12)"* and
+sized the full-pack headroom warning off it. **DESIGN §12 does not carry that figure and never
+did.** §12, §3 and fact 17.23 say the opposite — supply sensitivity is **~1 mV/V grid mean**,
+−0.8 % over a 2.1 V swing, marked *corrected 2026-08-12*. The 43–51 number was inherited verbatim
+from `cal_2x11_v5a`'s notes and propagated through v5b and v5d without being checked against the
+document it cited.
+
+**What replaces it.** The measured pair already in these entries: cell 1 moved **10.9 mV/V** on the
+100 µs band and **4.5 mV/V** on the 10 µs between air windows at 20.70 → 20.17 V. That is not in
+conflict with 17.23 — ~1 mV/V is a *grid mean*, and the steep early anchors depart from it by an
+order of magnitude — so 17.23 gains a qualifier rather than a correction, and the profile now cites
+**17.23, not §12**.
+
+**Consequence for the headroom warning.** At 10.9 mV/V, extrapolating 20.17 V → 24 V puts cell 1
+near **4.72 V** against the 5.000 V full scale, not the ~4.85 V the withdrawn figure implied —
+roughly 130 mV more margin. The notes flag that as indicative only: it extrapolates 3.8 V from a
+0.53 V measured span across which board temperature also moved 49.0 → 49.4 °C. Cell 1 still wants
+checking on a genuinely full pack.
+
+**Where the old figure went.** Withdrawn in DESIGN 17.23 by name, so it cannot quietly return via
+another profile's notes. (2026-08-13)
+
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-13 (Doc-rev 2.7)
+
 ### src/data/profiles/cal_2x11_v5b.json — v5b — top amplitude anchor raised to 4.7 V, ladder re-cut and bench-locked
 
 **What changed.** A new profile derived from `cal_2x11_v5a`, same geometry (2 bands × 11 cells,
@@ -248,7 +279,6 @@ profile's `notes` are now the only surviving record of them. **Note that DESIGN 
 `cal_2x11_v5a` as the operating profile** — it is regenerated from this changelog by the human
 consolidation pass (§18) and has not been re-run since v5b. (2026-08-13)
 
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.6)
 
