@@ -1,3 +1,42 @@
+### src/pimd_classviz.py — v1.76 — Band Mean vs Time splits into early (blue) / late (red) at a selectable sd index
+
+**What changed.** The Analysis tab's *Band Mean vs Time* strip gained a second mode. Off (the
+default, and unchanged in every respect) it is the single black all-cell average it has always
+been. On, it draws **two** curves of the same quantity taken over two halves of the delay ladder —
+**early cells blue, late cells red** — divided after the sd index in a new spin box. The spin box
+is 1-based and reads "last early cell": at 5 on `cal_2x11_v5`, blue is sd 1–5 and red is sd 6–11.
+Both bands stay averaged into each curve, exactly as the unsplit curve averages them; the split is
+over cells only. A legend beside the control names the two colours and their sd ranges, and the
+spin box's tooltip gives the delay spans either side of the divider (per band, not averaged — the
+two bands' ladders are different times at the same index).
+
+**Why.** The single average sums the two ends of the ladder that carry *opposite* information.
+Early cells split the families by **polarity** and late cells by **decay rate** (DESIGN §2, §13) —
+so a target that pushes the early cells one way and the late cells the other is precisely the case
+the all-cell mean cancels to nothing. Splitting at the operator's chosen sd makes the
+non-ferrous/ferrous divergence visible as two traces pulling apart in time, on the chart that is
+already being watched during a capture cycle. Default divider 5 is `cal_2x11_v5`'s
+amplitude-anchored early zone (DESIGN §10's zone breakdown), i.e. the boundary the profile was
+designed around rather than an arbitrary midpoint.
+
+**Details.** Each curve is normalized independently, so Auto subtracts each curve's own window
+mean — the same rule `_normalize_group` already applied to the single curve, which makes the read
+the *shape* of the two excursions against each other rather than their DC offset; a Manual ref
+subtracts one shared value from both and keeps the offset. The divider is clamped to
+`1..n_cells-1` so neither side can come out empty, and the range is rebuilt on every profile
+change. The remembered value follows the Family Plane's v1.49 band-pair rule: a clamp under a
+narrower profile is display-only and never overwrites the operator's choice, and it is the
+preference — not the possibly-clamped spin box — that `classviz_settings.json` persists
+(`analysis_strip_split`, `analysis_strip_split_sd`). Corpus-template overlay lines on this strip
+follow the mode too: one reference line per curve drawn, over the same cells, since an all-cell
+average is a reference for neither half once the strip is split.
+
+No acquisition, protocol, profile or recorded-data path is touched — this is display only, and the
+unsplit mode's numbers are bit-identical to v1.75's. Bench-verified offscreen against a synthetic
+frame stream: opposite-sign early/late ramps that cancel to a flat line unsplit come apart to
+−39.0 / +48.8 mV split, dividers at both extremes draw two finite curves, and a wide→narrow→wide
+profile round-trip restores the divider. (2026-08-13)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.5)

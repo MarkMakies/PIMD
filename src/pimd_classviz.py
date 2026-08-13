@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.75
+# PIMD Signature Visualiser (ClassViz) v1.76
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
@@ -22,6 +22,8 @@
 #           temperature v4.33+; board_temp_dC = -32768 means NO READING)
 #
 # History (full detail in CHANGELOG.md):
+#   v1.76 Band Mean vs Time can split into early (blue) / late (red) cell
+#         groups at a selectable sd index
 #   v1.75 pack gauge reads runtime-fraction SoC + live H:MM remaining from the
 #         shared pimd_pack.py; the data-quality zone captions are retired
 #   v1.74 FIX Load & Run never armed the soak/stall run state -- every soak line
@@ -152,9 +154,16 @@ import pimd_pack           # noqa: E402 — pack SoC / time-remaining maths (no 
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.75'
+APP_VERSION = '1.76'
 
 REDRAW_MS   = 33    # ~30 Hz
+
+# Band Mean vs Time split colours (v1.76): early cells blue, late cells red.
+# Fixed, not per-target -- this strip's two curves are the SAME quantity over
+# two halves of the delay ladder, so the pair has to read as one axis, and the
+# colours are named in the legend under the chart.
+STRIP_EARLY_COLOR = (26, 95, 208)    # blue  — early cells (polarity zone)
+STRIP_LATE_COLOR  = (200, 32, 32)    # red   — late cells (decay-rate zone)
 
 # How long to wait for the firmware's response to a D (dynamic profile) command
 # before giving up and refusing to start the stream (v1.73). The firmware always
@@ -902,6 +911,18 @@ class MainWindow(QMainWindow):
         self._analysis_strip_manual_ref = 0.0
         self._analysis_strip_scale_auto = True
         self._analysis_strip_manual_halfrange = 5.0
+        # Strip split (v1.76): off = the historical single all-cell average;
+        # on = two curves, early cells (blue) and late cells (red), divided
+        # after sd index _analysis_strip_split_sd (1-based, "last early cell").
+        # Default 5 is cal_2x11_v5's amplitude-anchored early zone (DESIGN
+        # §10) -- the divider the profile was designed around, not a guess.
+        # _pref mirrors the Family Plane's band-pair memory (v1.49): the
+        # spinbox is only as wide as the LIVE profile, so a value restored
+        # under a narrower startup profile must not overwrite the operator's
+        # choice. See _rebuild_analysis_strip_split().
+        self._analysis_strip_split = False
+        self._analysis_strip_split_sd = 5
+        self._analysis_strip_split_pref = None
 
         # Analysis tab — per-group Auto/Manual normalize+scale (heatmap/8-grid/9-grid)
         self._analysis_hm_norm_auto      = True
@@ -1233,6 +1254,7 @@ class MainWindow(QMainWindow):
             self._apply_g8_scale()
             self._apply_g9_scale()
             self._analysis_strip_reset_ts = 0.0
+            self._rebuild_analysis_strip_split()   # divider is in cells; n_cells just changed
             self._reset_sig_capture_state()   # old raw arrays would mismatch the new n_channels
             self._refresh_analysis_overlays()  # tail-calls _shape_redraw_static()
         self.header_label.setText('Profile {0} — {1} ({2} bands × {3} cells)'.format(
@@ -3292,6 +3314,13 @@ class MainWindow(QMainWindow):
         self.analysis_strip_refline = self.analysis_strip_plot.addLine(
             y=0.0, pen=pg.mkPen((150, 150, 150), width=1))
         self.analysis_strip_curve = self.analysis_strip_plot.plot([], [], pen=pg.mkPen('k', width=1))
+        # Split mode's pair. Both exist from build so the mode is a data
+        # swap, not a rebuild -- toggling it mid-run can't disturb the
+        # template overlay lines already on this plot.
+        self.analysis_strip_curve_early = self.analysis_strip_plot.plot(
+            [], [], pen=pg.mkPen(STRIP_EARLY_COLOR, width=1))
+        self.analysis_strip_curve_late = self.analysis_strip_plot.plot(
+            [], [], pen=pg.mkPen(STRIP_LATE_COLOR, width=1))
         self.analysis_strip_template_lines = {}
         v.addWidget(self.analysis_strip_glw)
         return box
@@ -3334,6 +3363,95 @@ class MainWindow(QMainWindow):
         row_b.addWidget(pb_reset)
         row_b.addStretch(1)
         v.addLayout(row_b)
+
+        row_c = QHBoxLayout()
+        self.cb_strip_split = QCheckBox('Split early/late')
+        self.cb_strip_split.setChecked(self._analysis_strip_split)
+        self.cb_strip_split.setToolTip(
+            'Off: one curve, the average over every cell.\n'
+            'On: two curves — the same average taken over the early cells and '
+            'the late cells separately, split after the sd index below.')
+        self.cb_strip_split.toggled.connect(self._on_strip_split_toggled)
+        row_c.addWidget(self.cb_strip_split)
+        row_c.addWidget(QLabel('at sd:'))
+        self.sp_strip_split_sd = QSpinBox()
+        self.sp_strip_split_sd.setRange(1, 1)     # widened by _rebuild_analysis_strip_split()
+        self.sp_strip_split_sd.setValue(self._analysis_strip_split_sd)
+        self.sp_strip_split_sd.setEnabled(self._analysis_strip_split)
+        self.sp_strip_split_sd.valueChanged.connect(self._on_strip_split_sd_changed)
+        row_c.addWidget(self.sp_strip_split_sd)
+        self.lbl_strip_split = QLabel('')
+        row_c.addWidget(self.lbl_strip_split)
+        row_c.addStretch(1)
+        v.addLayout(row_c)
+        self._rebuild_analysis_strip_split()
+
+    def _rebuild_analysis_strip_split(self):
+        """Resize the split spinbox to the live profile's cell count and
+        re-apply the remembered divider against it. Called on build and on
+        every profile change, the same pattern as _rebuild_shape_axes().
+
+        The range stops at n_cells-1 because both sides must be non-empty:
+        a divider at the last cell is a single curve with extra steps.
+        Clamping here is display-only -- _analysis_strip_split_pref is left
+        alone, so a wider profile restores the operator's choice (v1.49)."""
+        if not hasattr(self, 'sp_strip_split_sd'):
+            return
+        hi = max(1, self._n_cells - 1)
+        sp = self.sp_strip_split_sd
+        sp.blockSignals(True)
+        sp.setRange(1, hi)
+        want = self._analysis_strip_split_pref or self._analysis_strip_split_sd
+        sp.setValue(min(max(int(want), 1), hi))
+        sp.blockSignals(False)
+        self._analysis_strip_split_sd = sp.value()
+        self._update_strip_split_label()
+
+    def _strip_split_sd(self):
+        """The divider as a cell COUNT for slicing: cells [0:k] are early,
+        [k:] are late. Clamped so neither side can come out empty."""
+        return min(max(self._analysis_strip_split_sd, 1), max(1, self._n_cells - 1))
+
+    def _update_strip_split_label(self):
+        """Legend + the delays the divider actually falls between. It is a
+        label rather than a plot legend because the strip is a short panel
+        and its chrome already costs more of it than the trace does."""
+        if not hasattr(self, 'lbl_strip_split'):
+            return
+        if not self._analysis_strip_split:
+            self.lbl_strip_split.setText(
+                '<span style="color:#606060">one curve, all {0} cells</span>'.format(
+                    self._n_cells))
+            self.sp_strip_split_sd.setToolTip('')
+            return
+        k = self._strip_split_sd()
+        self.lbl_strip_split.setText(
+            '<span style="color:rgb{0}"><b>early sd 1–{1}</b></span> · '
+            '<span style="color:rgb{2}"><b>late sd {3}–{4}</b></span>'.format(
+                STRIP_EARLY_COLOR, k, STRIP_LATE_COLOR, k + 1, self._n_cells))
+        # Delay ranges are per band, so the divider is a pair of spans, not
+        # one time -- show both sides rather than an average that is true of
+        # neither band.
+        lo_a, hi_a = self._cell_delay_range_us[k - 1]
+        lo_b, hi_b = self._cell_delay_range_us[k]
+        self.sp_strip_split_sd.setToolTip(
+            'Last early cell is sd {0} ({1:.2f}–{2:.2f} µs across bands);\n'
+            'first late cell is sd {3} ({4:.2f}–{5:.2f} µs).'.format(
+                k, lo_a, hi_a, k + 1, lo_b, hi_b))
+
+    def _on_strip_split_toggled(self, checked):
+        self._analysis_strip_split = checked
+        self.sp_strip_split_sd.setEnabled(checked)
+        self._update_strip_split_label()
+        self._refresh_analysis_overlays()   # template reference lines follow the split
+
+    def _on_strip_split_sd_changed(self, val):
+        self._analysis_strip_split_sd = val
+        # An operator edit is the new preference (v1.49): a clamp under a
+        # narrow profile must not be mistaken for one.
+        self._analysis_strip_split_pref = val
+        self._update_strip_split_label()
+        self._refresh_analysis_overlays()
 
     def _on_analysis_strip_reset(self):
         self._analysis_strip_reset_ts = time.time()
@@ -3485,21 +3603,61 @@ class MainWindow(QMainWindow):
         """One chart: the whole matrix's average delta_mV (all bands, all
         cells) vs time -- derived from self._rolling_buf on the fly rather
         than a dedicated buffer; Reset just moves the cutoff timestamp
-        forward."""
+        forward.
+
+        Split mode (v1.76) draws the same average over TWO cell groups
+        instead of one -- early cells blue, late cells red, divided after
+        the sd index in the control row. It exists because the single
+        all-cell average sums the two halves of the ladder that carry
+        OPPOSITE information: early cells split the families by polarity,
+        late cells by decay rate (DESIGN §2, §13). A target that moves the
+        two ends in opposite directions is exactly what averaging them
+        together erases, so the split is the discrimination view, not a
+        cosmetic one.
+
+        Each curve is normalized independently, i.e. Auto subtracts each
+        curve's own window mean (the same rule _normalize_group already
+        applies to the single curve) -- so what is read here is the SHAPE
+        of the two excursions against each other, not their DC offset.
+        Manual ref subtracts one shared value from both and keeps it."""
         mean, _ = self._get_current_baseline()
         if mean is None or not self._rolling_buf:
             return
+        curves = (self.analysis_strip_curve, self.analysis_strip_curve_early,
+                  self.analysis_strip_curve_late)
         ts_all  = np.fromiter((ts for ts, _ in self._rolling_buf), dtype=float)
         mask = ts_all >= self._analysis_strip_reset_ts
         if not mask.any():
-            self.analysis_strip_curve.setData([], [])
+            for curve in curves:
+                curve.setData([], [])
             return
         raw_all = np.array([arr for ts, arr in self._rolling_buf if ts >= self._analysis_strip_reset_ts],
                            dtype=float)
         t_sel = ts_all[mask]
-        y = (raw_all.mean(axis=1) - mean.mean()) / 1000.0
-        y = self._normalize_group(y, self._analysis_strip_norm_auto, self._analysis_strip_manual_ref)
-        self.analysis_strip_curve.setData(t_sel - t_sel[0], y)
+        t = t_sel - t_sel[0]
+
+        if not self._analysis_strip_split:
+            y = (raw_all.mean(axis=1) - mean.mean()) / 1000.0
+            y = self._normalize_group(y, self._analysis_strip_norm_auto,
+                                       self._analysis_strip_manual_ref)
+            self.analysis_strip_curve.setData(t, y)
+            self.analysis_strip_curve_early.setData([], [])
+            self.analysis_strip_curve_late.setData([], [])
+            return
+
+        # Raw profile-channel order is band-major (band*n_cells + cell), so a
+        # reshape puts the sd index on the last axis -- no reindex needed, and
+        # the split is over cells while both bands stay averaged in, exactly
+        # as the unsplit curve averages them.
+        k = self._strip_split_sd()
+        raw_nxn = raw_all.reshape(len(t_sel), self._n_bands, self._n_cells)
+        self.analysis_strip_curve.setData([], [])
+        for curve, sl in ((self.analysis_strip_curve_early, slice(None, k)),
+                          (self.analysis_strip_curve_late, slice(k, None))):
+            y = (raw_nxn[:, :, sl].mean(axis=(1, 2)) - mean[:, sl].mean()) / 1000.0
+            y = self._normalize_group(y, self._analysis_strip_norm_auto,
+                                       self._analysis_strip_manual_ref)
+            curve.setData(t, y)
 
     # -- Controls handlers ----------------------------------------------------
 
@@ -3768,8 +3926,9 @@ class MainWindow(QMainWindow):
             for curve in self.analysis_g9_template_curves[j].values():
                 plot.removeItem(curve)
             self.analysis_g9_template_curves[j] = {}
-        for line in self.analysis_strip_template_lines.values():
-            self.analysis_strip_plot.removeItem(line)
+        for lines in self.analysis_strip_template_lines.values():
+            for line in lines:
+                self.analysis_strip_plot.removeItem(line)
         self.analysis_strip_template_lines = {}
 
         for key in self._checked_template_keys():
@@ -3806,13 +3965,23 @@ class MainWindow(QMainWindow):
                 self.analysis_g9_template_curves[j][key] = plot.plot(
                     self._pulse_us_sorted, y, pen=pen)
 
-            # Strip overlay: the template's raw overall average (no time
-            # axis on a static capture, so this is a plain reference line,
-            # not passed through the strip's time-based normalize control).
-            val = float(tmatrix.mean())
-            line = pg.InfiniteLine(pos=val, angle=0, pen=pen)
-            self.analysis_strip_plot.addItem(line)
-            self.analysis_strip_template_lines[key] = line
+            # Strip overlay: the template's raw average (no time axis on a
+            # static capture, so this is a plain reference line, not passed
+            # through the strip's time-based normalize control). It follows
+            # the strip's split (v1.76) -- one line per curve drawn, taken
+            # over the same cells, since an all-cell average is a reference
+            # for neither half once the strip is split.
+            if self._analysis_strip_split:
+                k = self._strip_split_sd()
+                vals = [float(tmatrix[:, :k].mean()), float(tmatrix[:, k:].mean())]
+            else:
+                vals = [float(tmatrix.mean())]
+            lines = []
+            for val in vals:
+                line = pg.InfiniteLine(pos=val, angle=0, pen=pen)
+                self.analysis_strip_plot.addItem(line)
+                lines.append(line)
+            self.analysis_strip_template_lines[key] = lines
 
         # Shape Space draws from the same store and the same checked set, so
         # it refreshes on exactly the same events (load, (un)check, clear,
@@ -8866,6 +9035,17 @@ class MainWindow(QMainWindow):
             self.cb_strip_scale_auto.setChecked(bool(s.get('analysis_strip_scale_auto', True)))
             self.sp_strip_scale_manual.setValue(float(s.get('analysis_strip_scale_manual', 5.0)))
 
+            # The stored divider is the PREFERENCE and is written back as one
+            # (v1.49): setValue() above clamps to whatever profile happens to
+            # be live at startup, and letting that clamp become the preference
+            # is how a wider profile's choice gets silently lost. Set the pref
+            # from the file, then let _rebuild_analysis_strip_split() decide
+            # what this profile can actually show.
+            self.cb_strip_split.setChecked(bool(s.get('analysis_strip_split', False)))
+            self._analysis_strip_split_pref = int(
+                s.get('analysis_strip_split_sd', self._analysis_strip_split_sd))
+            self._rebuild_analysis_strip_split()
+
             self.sp_sig_capture_n.setValue(int(s.get('sig_capture_n', SIG_CAPTURE_N_DEFAULT)))
             self.sp_sig_settle_mv.setValue(float(s.get('sig_settle_mv', 1.0)))
             self.sp_sig_detect_mv.setValue(float(s.get('sig_detect_mv', 0.5)))
@@ -8999,6 +9179,10 @@ class MainWindow(QMainWindow):
             'analysis_strip_norm_manual':  self.sp_strip_norm_manual.value(),
             'analysis_strip_scale_auto':   self.cb_strip_scale_auto.isChecked(),
             'analysis_strip_scale_manual': self.sp_strip_scale_manual.value(),
+            'analysis_strip_split':        self.cb_strip_split.isChecked(),
+            # The remembered divider, not the (possibly clamped) spinbox.
+            'analysis_strip_split_sd':     (self._analysis_strip_split_pref
+                                             or self.sp_strip_split_sd.value()),
 
             'sig_capture_n': self.sp_sig_capture_n.value(),
             'sig_settle_mv': self.sp_sig_settle_mv.value(),
