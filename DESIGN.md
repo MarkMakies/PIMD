@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD) 
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.75 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v14 · shape v1 · target_check v4 · corpus_check v1.9 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5` (2026-08-11, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.79 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v15 · shape v1 · target_check v4 · corpus_check v1.10 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5a` (2026-08-13, 2 × 11 = 22 cells, **not locked, no corpus**). Bump this line on every edit.
 **Last bench update:** 2026-08-13 (40 mm extractor validated — 97.6 min of pulsing over four sessions, 104 618 sweeps, zero flagged rows)
-**Doc rev:** 2.5 (2026-08-13) permanent 40 mm extractor validated and toroids removed; §3's noise floor, warm-up and fan-mount entries restated from measurement; §13's pedestal corrected to ~110 mV (2.4)
+**Doc rev:** 2.6 (2026-08-13) tool versions refreshed (classviz v1.79, features v15, corpus_check v1.10); operating profile re-pointed to `cal_2x11_v5a` after the extractor thermal re-cut of §10's cells 1–5. No new measured facts (2.5)
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -386,17 +386,28 @@ profile**.
 count does *not* imply comparability — comparability rests entirely on the
 `(profile_name, profile_sha8)` guard in `pimd_features`, **which must not be relaxed**.
 
-### Operating profile — `cal_2x11_v5` (2026-08-11)
+### Operating profile — `cal_2x11_v5a` (2026-08-13)
 
-#### cal_2x11_v5 — Cell / Zone / Delay Range / Anchor Table
+#### cal_2x11_v5a — Cell / Zone / Delay Range / Anchor Table
 
-Derived on paper, 2026-08-11. 2 bands × 11 cells (22 cells total). **Not swept**, but bench-run for
-3.1 h on 2026-08-12 with zero flagged rows in 63 813 uninterrupted sweeps.
-The sole profile in use — no other geometry is current.
+Geometry derived on paper 2026-08-11 as `cal_2x11_v5`; **cells 1–5 re-cut on the bench
+2026-08-13 as `cal_2x11_v5a`**, `profile_sha8` **7730b4e3**. 2 bands × 11 cells (22 cells total).
+The sole profile in use — no other geometry is current; v5 is superseded and retained only for
+reading recordings made under it.
+
+**Why v5a exists:** v5's delays were cut at board 70.3 °C, which the permanent 40 mm extractor
+can no longer reach (it plateaus near 47.8 °C), so on the cooler board the 100 µs band sat
+15–25 % above its amplitude anchors. Re-cutting put them back: **+0.8 / +2.6 / +3.3 / +4.4 /
++7.9 %** against +14.8 / +24.9 / +21.1 / +22.6 / +21.8 % before, and cross-band matching on
+cells 1–5 from 16 % mismatch to **0.4–5.3 %**. Cells 6–11 did not move on either band.
 
 **Sweep rate: 17.85 Hz** (56.0 ms/sweep) *(measured 2026-08-13, fw v4.37, four sessions at
 17.83–17.88 Hz)*, against 12.45 Hz for the retired `cal_3x10_v5` — **+43 %**. *(Supersedes 16.13 Hz,
-measured 2026-08-12 on fw v4.35; the rise is firmware, not the profile or the fan.)*
+measured 2026-08-12 on fw v4.35; the rise is firmware, not the profile or the fan.)* Sweep rate and
+the run-length figures below were measured on v5 and carry to v5a unchanged — the re-cut moved five
+delays, not the geometry, the band count or the averaging depth. Those figures are: **3.1 h bench-run
+on 2026-08-12, zero flagged rows in 63 813 uninterrupted sweeps**, plus the 2026-08-13 extractor
+validation below.
 
 **Runs at 3.125 kHz on the 100 µs band, and requires the cooling fan running.** Without the fan,
 this band trips the +15 V regulator (U1) on a ~42 s cycle. The fan is powered from the rig's own
@@ -407,17 +418,17 @@ the 19.0 V pack floor, not on heat.
 
 | Cell | Zone | Delay range (μs, 100 μs band → 10 μs band) | Anchor type |
 |---|---|---|---|
-| 1 | Early | 10.792 → 8.040 | Amplitude-anchored — 2.4 V |
-| 2 | Early | 11.904 → 9.120 | Amplitude-anchored — ~1.1 V (log-linear interpolated midpoint of cells 1 & 3) |
-| 3 | Early | 13.032 → 10.208 | Amplitude-anchored — 0.5 V |
-| 4 | Early | 13.912 → 11.064 | Amplitude-anchored — 250 mV |
-| 5 | Early | 14.816 → 11.984 | Amplitude-anchored — 125 mV |
+| 1 | Early | 11.016 → 8.016 | Amplitude-anchored — 2.4 V |
+| 2 | Early | 12.192 → 9.152 | Amplitude-anchored — ~1.1 V (log-linear interpolated midpoint of cells 1 & 3) |
+| 3 | Early | 13.256 → 10.176 | Amplitude-anchored — 0.5 V |
+| 4 | Early | 14.152 → 11.040 | Amplitude-anchored — 250 mV |
+| 5 | Early | 15.064 → 11.960 | Amplitude-anchored — 125 mV |
 | 6 | Mid descent | 15.872 → 12.896 | Time-anchored, band-dependent — midpoint between cell 5 and null minimum |
 | 7 | Peak min | 16.920 → 13.800 | Null minimum (band-dependent depth) |
 | 8 | Rising | 21.160 → 16.160 | Rising out of null (band-dependent) |
 | 9 | Late | 37.736 → 19.640 | Geometric ladder step 1 of 2 (ratio 1.7834 / 1.2152) — reaches ~110 mV air pedestal |
 | 10 | Late | 67.296 → 23.864 | Geometric ladder step 2 of 2 — decay rate, not amplitude |
-| 11 | Late | 120.000 → 29.000 | Band's longest delay (10 μs band at hardware limit, 95 ns margin) |
+| 11 | Late | 120.000 → 29.000 | Band's longest delay (10 μs band at hardware limit, 96 ns margin) |
 
 **Zone breakdown:** 5 early / 1 mid descent / 1 peak min / 1 rising / 3 late — 11 cells total per band.
 
@@ -563,15 +574,15 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `mcu/pimd_mcu.py` | RP2040 MicroPython firmware (**v4.37**) — both modes, all profiles, the RAM-only dynamic profile (index 5), pack sense and board temperature. MicroPython **pure-Python only**. |
 | `mcu/main.py` | One-line board launcher: `import pimd_mcu` |
 | `src/pimd_gui.py` | **v4.18** — Mode 1 filtered-telemetry GUI. Pack SoC / board-temperature gauges; session logs to `data/sessions/gui_<ts>.csv`. |
-| `src/pimd_classviz.py` | **v1.75** — Mode 2 signature visualiser and the **corpus-capture workbench**. Four tabs (Heatmap / Stats / Analysis / Family Plane). Loads and runs saved profiles as RAM-only dynamic profiles — **`Load & Run` waits for `D OK`** before selecting or streaming, so a refused profile can never be mis-labelled in the session header (§8). **Marks ADC-railed cells**: a standing `⚠ RAIL: N cells` label in the top bar, a red *Latest* cell with tooltip, and a session mark on each new entry — the value is deliberately **not** filtered or substituted, because a rail is a profile defect to fix at the delay ladder. Auto-logs a self-describing session dump whenever the stream runs; registry-backed structured capture writing `src/data/corpora/`; pack/temperature telemetry written to the dump automatically. Profile *authoring* is not here — it is in delaycal. |
+| `src/pimd_classviz.py` | **v1.79** — Mode 2 signature visualiser and the **corpus-capture workbench**. Four tabs (Heatmap / Stats / Analysis / Family Plane). Loads and runs saved profiles as RAM-only dynamic profiles — **`Load & Run` waits for `D OK`** before selecting or streaming, so a refused profile can never be mis-labelled in the session header (§8). **Marks ADC-railed cells**: a standing `⚠ RAIL: N cells` label in the top bar, a red *Latest* cell with tooltip, and a session mark on each new entry — the value is deliberately **not** filtered or substituted, because a rail is a profile defect to fix at the delay ladder. Auto-logs a self-describing session dump whenever the stream runs; registry-backed structured capture writing `src/data/corpora/`; pack/temperature telemetry written to the dump automatically. Profile *authoring* is not here — it is in delaycal. |
 | `src/pimd_delaycal.py` | **v1.49** — delay-calibration sweeper and the only profile author. Coarse+fine two-phase sweep per (freq, pulse) pair, threshold-crossing delays snapped to the 8 ns grid, thermal soak monitoring, auto-nudge, Compare Profiles tab, pack/temperature gauges and a conditions span recorded into every exported profile's notes.  |
 | `src/pimd_rawlog.py` | **v1.17** — deliberately dumb raw logger: loads a profile, streams it, writes every firmware line **verbatim** to `data/sessions/rawlog_<ts>.txt`. No tables, no derived values, so it cannot develop display-layer defects.  |
 | `src/pimd_shape.py` | **v1** — shared signature-geometry maths (pure NumPy, **no Qt**). `unit_shape` / `amp_l2` / `snr`, `band_means`, `band_range_mean`, `crossing_us`, `decay_persistence`, `family`. Geometry always passed explicitly; bands and thresholds resolved **by value**, never by stored index. `family` (sign) and `decay_persistence` (magnitude) are read together and neither overrules the other. |
 | `src/pimd_pack.py` | **v1** — shared pack fuel-gauge maths (pure stdlib, **no Qt**), imported by all four GUIs so they cannot disagree about the same pack. SoC is the fraction of usable pulsing runtime left, from a curve of *loaded* volts → minutes-to-trip, zeroed on `PACK_TRIP_MV` so moving the firmware floor re-zeros the gauge from one constant; only the curve's **shape** reaches the percentage. `PackTracker` fits the discharge rate live over a trailing window for an `H:MM` time-remaining figure, and drops history on a pack swap, a pack-absent/return or a disconnect. `--recal <session csv…>` rebuilds the curve from `# pack_v:` tracks. **The shipped curve is the retired pack's** — regenerate after one continuous run-down. |
-| `src/pimd_features.py` | **v14** — session-CSV → training-corpus builder (offline CLI). Registry join, **hard geometry guard: one `(profile_name, profile_sha8)` per corpus build**. Parses the dump's `# pack_v:` / `# soak:` / `# stall:` / `# capture:` / `# mark:` comment tracks; `pack_v_at()` interpolates a voltage per capture. |
+| `src/pimd_features.py` | **v15** — session-CSV → training-corpus builder (offline CLI). Registry join, **hard geometry guard: one `(profile_name, profile_sha8)` per corpus build**. Parses the dump's `# pack_v:` / `# soak:` / `# stall:` / `# capture:` / `# mark:` comment tracks; `pack_v_at()` interpolates a voltage per capture. |
 | `src/pimd_target_check.py` | **v4** — target-registry loader/validator (CLI + library). `DEFAULT_REGISTRY_PATH` here is the single source of truth for registry location. `-f` is required — there is no default path. |
-| `src/pimd_corpus_check.py` | **v1.9** — corpus-level acceptance checker. Shape distance-invariance, split-half SNR, repeat consistency, falloff fit. One flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. |
-| `src/data/profiles/` | **v5** `cal_2x11_v5.json` is the operating profile — the only one in use. Runs at 3.125 kHz; **requires the cooling fan**, which is on the rig's own switch (§10, hardware-rev line). |
+| `src/pimd_corpus_check.py` | **v1.10** — corpus-level acceptance checker. Shape distance-invariance, split-half SNR, repeat consistency, falloff fit. One flat PASS/AMBER/FAIL/SKIP table, exit 1 on any FAIL, so it can gate a capture day. |
+| `src/data/profiles/` | **v5a** `cal_2x11_v5a.json` is the operating profile — the only one in use (`profile_sha8` 7730b4e3). Runs at 3.125 kHz; **requires the cooling fan**, which is on the rig's own switch (§10, hardware-rev line). `cal_2x11_v5.json` is its superseded predecessor, retained because recordings carry its sha — do not run it. |
 | `src/data/targets/targets_v3.csv` | Human-authored target registry, **current**, 27 objects — `pimd_target_check`'s `DEFAULT_REGISTRY_PATH` and what `pimd_classviz` / `pimd_features` use. Human-owned: tooling reads and validates only, never writes. `targets_v1.csv` is retained for reading the 2026-07-23 corpus. ⚠ `targets_v4.csv` is also tracked and is what **`pimd_rawlog` alone** reads (23 rows, different field set); despite the name it is **not** a successor to v3. |
 | `src/data/corpora/` | Signature corpora (`gui_signatures_*.csv`).  |
 | `src/data/sessions/` | Raw Mode 2 session dumps — self-describing CSV with embedded profile JSON, per-column map, marks and comment tracks; plus rawlog's verbatim `.txt`. Written automatically whenever the stream runs, ~220 KB/min. Untracked and **not reconstructable after the fact.** |

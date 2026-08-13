@@ -1,3 +1,36 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-13 (Doc-rev 2.6)
+
+### src/data/profiles/cal_2x11_v5a.json — v5a — 100 µs band anchors re-cut on the extractor rig
+
+**What changed.** A re-cut of `cal_2x11_v5`'s amplitude-anchored early cells. On the 100 µs
+band cells 1–5 move later — 10.792 → 11.016, 11.904 → 12.192, 13.032 → 13.256,
+13.912 → 14.152, 14.816 → 15.064 µs — and on the 10 µs band they move by ±0.03 µs
+(8.040 → 8.016, 9.120 → 9.152, 10.208 → 10.176, 11.064 → 11.040, 11.984 → 11.960 µs), which
+was already on target. **Cells 6–11 are untouched on both bands**, geometry is unchanged at
+2 bands × 11 cells, and `averages` stays 32. `cal_2x11_v5.json` is retained, not deleted.
+
+**Why.** v5's carried delays were cut at board 70.3 °C — a temperature the permanent 40 mm
+extractor can no longer reach, since it plateaus near 47.8 °C. On the cooler board the 100 µs
+band sat 15–25 % above its amplitude anchors and could not be waited back into place: the
+anchors are voltages on the decay, and the decay itself moved. Re-cutting the delays is the
+only way to put cell *n* back on the voltage it is defined as.
+
+**Result, measured in air after the re-cut.** 100 µs band anchors landed at
++0.8 / +2.6 / +3.3 / +4.4 / +7.9 % against +14.8 / +24.9 / +21.1 / +22.6 / +21.8 % before.
+Cross-band matching on cells 1–5 — the profile's stated invariant, that cell index *n* is the
+same point on the decay in either band — went from 16 % mismatch to 0.4–5.3 %.
+
+**Details.** All 22 cells were validated against the firmware's own `compute_pulse_duties` /
+`pulse_duties_valid`: every delay an exact multiple of the 8 ns PWM grid, both duties inside
+16 bits with sample strictly after drive, delays monotonic and `threshold_v` strictly
+descending. The 10 µs band's last cell keeps its 96 ns of margin, unchanged from v5. The
+profile's `notes` field still carries v5's "DERIVED ON PAPER / NOT swept" preamble forward
+verbatim, which no longer describes this file — not corrected here. `profile_sha8` is
+**7730b4e3**, already stamped into recorded session dumps and corpus rows, which is why the
+file has to be in version control for those recordings to mean anything. (2026-08-13)
+
 ### src/pimd_classviz.py — v1.79 — warm-up countdown by the temperature gauge, temp colour steps, and the last two Analysis splitters persist
 
 **What changed.** Three operator-facing items on the capture strip and the Analysis tab.
@@ -201,8 +234,6 @@ unsplit mode's numbers are bit-identical to v1.75's. Bench-verified offscreen ag
 frame stream: opposite-sign early/late ramps that cancel to a flat line unsplit come apart to
 −39.0 / +48.8 mV split, dividers at both extremes draw two finite curves, and a wide→narrow→wide
 profile round-trip restores the divider. (2026-08-13)
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.5)
 
