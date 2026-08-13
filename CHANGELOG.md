@@ -1,3 +1,152 @@
+### findings — 2026-08-13 — the 40 mm extractor validated on the bench: noise −26 %, warm-up 10 → 6 min, U1 safe at 3.125 kHz
+
+**Four sessions, one code path, `cal_2x11_v5` (`43617fed`) throughout.** Three cold-start runs on
+the extractor (`111223`, `115209`, `125730`, fw 4.37) against the 2026-08-12 38 mm blow-on baseline
+(`100209`, fw 4.35). The statistic is the one §3 already quotes — **32-sweep σ per cell** — and the
+method is validated rather than assumed: re-running it on the baseline reproduces §3's documented
+ppm figures **to the digit**, ch0 → **93.8 ppm** and ch11 → **37.9 ppm** against §3's "93 vs 38".
+So §3's ppm figures are *raw* 32-sweep σ, and everything below is the same statistic. σ is also
+reported **detrended** (σ about a least-squares line within each 32-sweep block), which removes
+in-window thermal drift and is the metric used for comparisons, because a settled rig and a warming
+rig are otherwise not comparable.
+
+**Noise — the fan improved the floor by ~26 %, and this one is not pack-confounded.** Detrended σ,
+null/pedestal cells, warm-up excluded, 2.5-min buckets:
+
+| condition | n | pack range | σ (µV) | sd | sem |
+|---|---|---|---|---|---|
+| 38 mm blow-on + USB toroid (08-12) | 30 | 21.10–23.32 V | 50.9 | 6.4 | 1.2 |
+| 40 mm extractor + USB toroid | 7 | 19.61–20.93 V | 44.9 | 4.7 | 1.8 |
+| 40 mm extractor, USB toroid out | 15 | 21.96–22.97 V | **37.7** | 2.2 | 0.6 |
+| 40 mm, both toroids out, power cable −27 cm | 5 | 21.26–21.72 V | 42.4 | 1.8 | 0.8 |
+
+Row 3 against row 1 is **−13.3 ± 1.3 µV** over **overlapping** pack ranges (row 3's window sits
+inside row 1's), so it is not a pack-state artefact; the toroid-matched pair (rows 1 vs 2) still
+favours the extractor by **6.0 ± 2.1 µV** despite being taken 2 V lower on the pack. **Bucket
+scatter fell 6.4 → 2.2 µV**, so the rig is ~3× more repeatable run-to-run, which matters more for
+capture work than the mean. The commutating-motor / conducted-path objection raised when the 38 mm
+fan went in is answered: the pack-fed extractor did not raise the floor.
+
+**Warm-up is now ~6 min and a clean single exponential, against §3's 10 min.** The extractor fits
+**τ = 1.15 min (r² = 0.982)** and **τ = 0.90 min (r² = 0.988)** on two independent cold starts,
+within 0.2 % at **5.6** and **3.8 min**. The 38 mm baseline was **two-stage** — a fast drop then a
+slow soak — fitting a single exponential badly (r² = 0.52 over the first 20 min) and still drifting
+at 20–25 min. That shape change is what the extractor did: continuous bulk exchange suppresses the
+slow case-soak stage. **Repeatability of the settled operating point is the striking number** — band-0
+settles at **523.9** and **523.6 mV** across two runs, **0.06 % apart**, against the 38 mm rig where
+a fan nudge was worth **3.7 %**. That is the permanent mount retiring §3's measurement-critical
+variable, quantified: ~60× tighter.
+
+**Thermal.** Zero flagged rows in **104 618 sweeps** across 27.3 + 47.0 + 23.3 min at 3.125 kHz,
+including a run started at **24.48 V on a cold 22.2 °C board** — the worst U1 corner. The 27.3 min
+run ended on the **19.0 V pack floor**, not on heat, and rested back **+2.17 V** (§12 records
++2.04 V, consistent). Sweep rate **17.83–17.88 Hz** against the baseline's 15.61 Hz — but that is
+**fw 4.37 vs 4.35, not the fan**, and it is also above §10's recorded 16.1 Hz, so §10's figure wants
+a re-measure. DS18B20 plateaus **47.8 °C** (extractor) vs **39.8 °C** (blow-on).
+
+⚠ **The toroid experiment is NOT decidable from these runs, and the earlier reading of it was
+wrong.** The USB toroid was removed before `115209` and the power toroid removed plus the power
+cable shortened 27 cm before `125730`. Taken at face value the table says removing the USB toroid
+cut σ by 7.2 µV — but **each condition occupied a disjoint pack band** (19.6–20.9 / 21.3–21.7 /
+22.0–23.0 V, no overlap between any two), so the hardware change is perfectly collinear with pack
+voltage and the two cannot be separated. An attempt to break the confound from within-session σ-vs-pack
+trends failed because those trends **contradict each other** across the four sessions
+(r = +0.61, −0.53, +0.64, −0.78) — bucket σ is too noisy to establish a pack law in either
+direction, which also means **§3's "noise does not rise as the pack falls" is neither confirmed nor
+contradicted here; flagged, not settled.** What *is* safe: every toroid-out measurement is at or
+below every toroid-in measurement, so **nothing indicates either toroid was doing useful work** —
+but "removing it improved things" is not established. **To settle it, each condition must sweep the
+same pack window** — run each from full charge to the 19.0 V floor (~45 min each) and compare at
+matched voltage. Today's runs stopped at 20.95 V and never overlapped. Note also that `125730`
+changes **two** things at once (power toroid *and* cable length), so even with matched packs those
+two would still need splitting. (2026-08-13)
+
+---
+
+### hardware — the cooling fan is now permanent: a 40 mm 24 V extractor in the case lid, switched and fused
+
+**A 40 mm 24 VDC fan has been fitted permanently to the case**, mounted above the FET, the
+regulators and the load resistor, and running as an **extractor — it sucks, drawing air out over the
+cluster** rather than impinging on U1's tab the way the temporary part did. It is **powered directly
+from the pack through a switch and a fuse, and nothing else** — no regulation, same unregulated
+pack feed as before. This supersedes the 25 V 38 mm fan fitted 2026-08-11, which was a loose part
+blowing onto U1 from 50 mm. *(If both fans are in fact present rather than the 40 mm replacing the
+38 mm, only this paragraph needs correcting — everything below holds either way.)*
+
+**The measurement win is the mount, not the airflow.** The 2026-08-12 sweep found that nudging the
+fan off the U1/FET cluster moved **band 0 by +3.7 %** — a smooth ~2.5 min thermal exponential that
+fully reversed when the fan was put back, and the explanation for the unexplained band-mean rise
+logged at 15:12. That made **fan position a measurement-critical mechanical variable** whose value
+outweighed the entire pack discharge range, and it was carried in `DESIGN.md` §3 as a standing
+warning. A case-fixed mount retires the variable: the geometry is now a property of the build
+instead of where a loose fan was last left. This is the single largest repeatability gain in the
+entry, and it is worth more than any thermal difference between the two fans.
+
+**The switch does not create a fan-off state — it is the rig's own switch.** The fan runs whenever
+the switch is on, i.e. whenever the detector is powered; **there is no operating state in which the
+board pulses and the fan does not** *(operator, 2026-08-13, stated as final)*. The 38 mm fan's
+"pack connected ⇒ fan running" interlock is therefore **preserved, not weakened** — the fan is
+simply energised by the supply switch instead of by connecting the pack. The fuse additionally gives
+the fan feed a fault path it never had. The 2026-08-11 operating rule stands unchanged and is now
+structural rather than procedural: the 100 µs band at 3.125 kHz requires the fan, and the fan cannot
+be absent while the band is running. §12's **620 streaming-minutes** figure still needs its
+re-measure to state whether the fan was running, since the fan remains a continuous 1–2 W pack load
+for the whole of any powered session.
+
+⚠ **Four gates were raised here. Three were closed the same day by bench measurement — see the
+findings entry above for the numbers and method; the status below is the summary.**
+
+1. ✅ **RESOLVED — the extractor is thermally sufficient at 3.125 kHz.** Three cold-start runs on
+   2026-08-13 streamed `cal_2x11_v5` for **27.3, 47.0 and 23.3 min** with **zero flagged rows in
+   104 618 sweeps** and no rail collapse. One of them started at **24.48 V on a fresh pack from a
+   cold board (22.2 °C)** — the worst U1 corner this gate asked for, full pack and maximum
+   regulator drop, walked from cold. The 27.3 min run ended on the **19.0 V pack floor**
+   (`PACK_VOLTAGE_TRIP_MV`), not on heat. 3.125 kHz is no longer provisional on this build. *(Still
+   not done, and still worth doing while a lid is off: a thermocouple or IR read on U1's tab. The
+   evidence here is "U1 never tripped", which is the outcome that matters but is not a die
+   temperature.)*
+2. ✅ **CONFIRMED, exactly as predicted — and the numbers are now on record.** The DS18B20 plateaus
+   at **47.8 °C** on the extractor against **39.8 °C** on the 38 mm blow-on, from comparable cold
+   starts. It reads ~8 °C *hotter* while the signal settles *faster and lower*, because the sensor
+   sits on the load resistor and has lost the old fan's direct impingement. **Board temperatures
+   either side of 2026-08-13 are different quantities and must not be compared.** It remains blind
+   to the regulator die.
+3. ✅ **RESOLVED for the fan — the noise floor improved, it did not regress.** Detrended 32-sweep σ
+   on the null/pedestal cells, warm-up excluded: **50.9 ± 1.2 µV** on the 38 mm rig (pack
+   21.10–23.32 V) against **37.7 ± 0.6 µV** on the extractor (pack 21.96–22.97 V) — a
+   **−13.3 ± 1.3 µV** improvement measured over *overlapping* pack ranges, so it is not a pack-state
+   artefact. The toroid-matched pair favours the extractor by **6.0 ± 2.1 µV** despite being taken
+   2 V lower on the pack. Bucket-to-bucket scatter also fell from **6.4 to 2.2 µV**, i.e. the rig
+   is ~3× more repeatable. The commutating-motor objection was real and is now answered by
+   measurement rather than argument.
+   **The fan-on/fan-off capture is withdrawn, not outstanding** — the fan is powered from the rig's
+   own switch, so a fan-off streaming state does not exist to capture *(operator, 2026-08-13,
+   stated as final)*. §14.8's separate gate is untouched by any of this.
+4. **The enclosure is now vented by construction.** §12 describes U1's dissipation as a problem
+   specifically *"inside a sealed shielded enclosure"*; a permanent case-mounted extractor makes the
+   vents permanent too. What that costs the shielding is a mechanical/EMI question **not determined
+   here**, and it now applies to the shipped build rather than to a temporary bench arrangement.
+
+**On the 24 V rating against the pack window.** The pack-tracking argument carries over unchanged
+and still points the right way — U1's heat is `(V_pack − 15) × I`, worst at a full pack, and fan
+speed rises with pack voltage over the same span, so the weakest cooling coincides with the lightest
+load. At the **19.0 V** floor the fan sees ~79 % of its 24 V nameplate, still clear of the ~60 %
+where a DC fan stalls; at a full 6S pack (~25.2 V) it runs slightly **above** nameplate, which is
+ordinarily harmless for a DC fan but is worth stating rather than discovering. Favourable, and still
+not by design.
+
+**Doc follow-up for the next consolidation pass** *(not applied here — `DESIGN.md` is not edited
+directly)*: the **hardware-rev line** should replace "38 mm forced-air fan on the U1/FET cluster —
+mandatory, fitted 2026-08-11, used in all cases" with the 40 mm case-mounted extractor and this
+date; **§3**'s "The fan mount is measurement-critical" warning should be rewritten as *resolved by
+the permanent mount* while keeping the 3.7 % figure as the evidence for why fan cooling moves the
+operating point at all; **§3**'s noise-floor, warm-up and board-temperature figures all need
+restating from the findings entry above (65 µV → ~38 µV, 10 min → ~6 min, and the DS18B20 plateau);
+and **§10 / §15**'s "requires the cooling fan running" notes should record that the fan is on the
+rig's own switch, so the requirement is structural and not an operator step. (2026-08-13)
+
+---
+
 ### DESIGN.md — Doc-rev 2.4 — §13's pedestal corrected to the measured ~110 mV
 
 `DESIGN.md` contradicted itself on the tail pedestal: §10's cell 9 read "~110 mV air pedestal"
