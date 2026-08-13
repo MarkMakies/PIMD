@@ -1,9 +1,9 @@
 # Pulse Induction Metal Detector (PIMD) 
 
 **Author:** Mark Makies (Australia) · **Licence:** CC BY-SA 4.0
-**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.79 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v15 · shape v1 · target_check v4 · corpus_check v1.10 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5d` (2026-08-13, 2 × 11 = 22 cells, `profile_sha8` **fc7519cd**, **locked and fully measured — no corpus yet**). Bump this line on every edit.
+**Hardware rev:** 6.04 + shielded enclosure (2026-07-13) + 6S Li-ion supply (2026-07-24) + pack-voltage sense & DS18B20 board temperature (2026-08-07) + **RX front-end +97 mV bias (2026-08-10)** + **U1 L7815CV replaced 2026-08-10 (failed; like-for-like on a larger heatsink)** + **6S pack replaced 2026-08-13 (new balanced cells, same ICR18650-26C arrangement)** + **40 mm 24 V case-mounted extractor fan over the FET / regulator / load-resistor cluster — permanent, pack-fed through the rig's own switch and a fuse, fitted 2026-08-13; supersedes the 38 mm blow-on fan** + **USB and power toroids removed, power cable shortened 27 cm (2026-08-13)** + **C18 2200 µF 35 V fitted 2026-08-14 (was 4700 µF 25 V — voltage derating, not capacitance; C19 assessed and left at 4700 µF 25 V)** · **Firmware:** v4.37 · **PC tools:** gui v4.18 · classviz v1.79 · delaycal v1.49 · rawlog v1.17 · pack v1 · features v15 · shape v1 · target_check v4 · corpus_check v1.10 · **Coil:** v4 · **Operating profile:** `cal_2x11_v5d` (2026-08-13, 2 × 11 = 22 cells, `profile_sha8` **fc7519cd**, **locked and fully measured — no corpus yet**). Bump this line on every edit.
 **Last bench update:** 2026-08-13 (40 mm extractor validated — 97.6 min of pulsing over four sessions, 104 618 sweeps, zero flagged rows)
-**Doc rev:** 2.8 (2026-08-14) §14 pruned by the builder from seven open problems to three — thermal drift, the vented enclosure, the undecided toroids and classviz's `streamed_s` are all closed as not outstanding (see `CHANGELOG.md` for why each went, and do not re-raise them from the old text). The three that remain — Q1 duty headroom, C18, the schematic/build mismatch — are unchanged and renumbered 1–3, with the §14.2/§14.4 cross-refs in §6, §7 and §15 re-pointed to §14.1/§14.3. No firmware or tool version changed (2.7)
+**Doc rev:** 2.9 (2026-08-14) mini consolidation pass (§18), scoped to the C18 refit. **§14.2 (C18 under-rated) is closed** — the 2200 µF 35 V part is fitted, and its "candidate contributor to the 2026-08-10 U1 failure" line is withdrawn as never evidence-backed (`CHANGELOG.md` carries the withdrawal and a better-supported explanation; do not revive it). The schematic-mismatch item renumbers to **§14.2** and gains a third instance for C18, so it is no longer confined to the RX front end; §7 and §15's `§14.3` cross-refs follow it. §14 is down to **two** open problems. Also new in `CHANGELOG.md`, deliberately not promoted here because it is calculated rather than measured: **TX inductance has never been measured**, and the C18/C19 sizing rests on an inferred ≈200 µH. No firmware or tool version changed (2.8)
 
 > This file is self-contained: a new reader — human or AI agent — should be able to pick up the
 > project cold from here alone. Empirically measured values are marked *(measured)*; everything
@@ -184,13 +184,13 @@ scope, not by formula.
 
 ```
 RX coil ─┬─ R1 ─ GND                   (shunt = damping; AS BUILT 1.5k ‖ 10k = 1304Ω,
-         │                              schematic v6.04 still draws a single 1.3k — §14.3)
+         │                              schematic v6.04 still draws a single 1.3k — §14.2)
          └─ R9 4.7k ──┬─ D2 1N4732 (4.7V zener) ─┐  (positive clamp)
                       │  D3 1N5819 (Schottky) ───┘  (negative clamp)
                       └─ 47R ─┬─► U3A LT6203 +input, pin 3 (single +12V supply)
                               │
     U5 pin 7 (5V-REF) ─[240k 1% metal film]─┘   +97 mV bias — fitted 2026-08-10, NOT on the
-                                                schematic (§14.3)
+                                                schematic (§14.2)
 ```
 
 - **R1 (shunt) is the RX damping resistor**, which also cleans up TX via mutual coupling.
@@ -537,15 +537,13 @@ and was withdrawn on 2026-08-13.
    note; Q1 (IRF610) is being pushed past its noted SOA. A higher-rated replacement is probably
    warranted.
 
-2. **C18 under-rated.** 4700 µF **25 V** on a rail that reaches 25.2 V on a fresh pack. 35 V
-   replacement identified, not fitted. **It sits on the `+20V` rail feeding the regulator that
-   failed on 2026-08-10** (§12), so it is a candidate contributor to that failure rather than an
-   independent tidy-up — untested either way, since no post-mortem was done.
-
-3. **The schematic no longer matches the build in two places, both at the RX front end.**
-   *(a)* **The 240 k bias resistor from 5V-REF to U3A pin 3 is not drawn at all.**  
+2. **The schematic no longer matches the build in three places.**
+   *(a)* **The 240 k bias resistor from 5V-REF to U3A pin 3 is not drawn at all** (RX front end).  
    *(b)* **R1 is two resistors in parallel — 1.5 kΩ ∥ 10 kΩ, 1304 Ω effective — the schematic
-   still shows a single 1.3 kΩ.**
+   still shows a single 1.3 kΩ** (RX front end).  
+   *(c)* **C18 is 2200 µF 35 V as built; the schematic still shows 4700 µF 25 V** (power section,
+   refitted 2026-08-14). Note C19 **is** correct as drawn at 4700 µF 25 V and was left alone on
+   purpose — it is the pulse reservoir, so changing it would move the `cal_2x11_v5d` anchors.
 
 ---
 
@@ -581,7 +579,7 @@ in `CHANGELOG.md` and in each file's own header lineage.
 | `CLAUDE.md` | AI-agent working brief — how to behave in this repo. Not project facts. |
 
 **Key reference images** (all in `References/images/`): `schematic-v604.jpg` and
-`schematic-v604-sheet2.jpg` (rev 6.04 — **does not show the bias resistor**, §14.3) ·
+`schematic-v604-sheet2.jpg` (rev 6.04 — **does not show the bias resistor**, §14.2) ·
 **`bias_mod_delay_plot_20260810.png`** (the current front end: three bands, air / brass / steel with
 the §7 fits overlaid) · `6S-pack-discharge-curve.jpg` (§12) · `GUI-steady-state-256-1024.jpg` (the
 SoC reference capture) · `warmup-with-8ns-steps.jpg` (why delays snap to the 8 ns grid).

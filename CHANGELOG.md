@@ -1,3 +1,56 @@
+<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
+
+## Archive — consolidated 2026-08-14 (Doc-rev 2.9)
+
+### hardware/power — C18 4700 µF 25 V → 2200 µF 35 V; C19 assessed and deliberately unchanged
+
+**What changed.** C18, the bulk electrolytic on the raw `+20V` pack rail (after SW3 / F1 / D4,
+upstream of U1), is now a **2200 µF 35 V** part in the same package. It was 4700 µF **25 V**, and a
+fresh 6S pack is 25.2 V, so it ran at ~100 % of its voltage rating from the moment a charged pack
+went in. **The defect was the voltage rating, not the capacitance** — the swap fixes derating
+(25.2/35 = 72 %, where an electrolytic should live) and the halved capacitance costs almost
+nothing. This closes the C18 open problem that was DESIGN §14.2 (the number is now the
+schematic-mismatch item, which gains C18 as its third instance).
+
+**Why the capacitance loss does not matter here.** C18 does not supply the coil; C19 does, from the
+regulated `+15V` side. C18 only feeds U1. Halving it costs roughly **107 mV** of extra dip per pulse
+on `+20V`, against a pack that already sags **850 mV at full charge rising to 2.43 V at the trip**
+(§12) — a rounding error on the dominant term. Even at the 19.0 V floor the regulator input stays
+~1.7 V above the ~17.2 V it needs.
+
+**Why C19 stays at 4700 µF 25 V, having been assessed in the same pass.** Two reasons, and the
+second is the binding one. It is already correctly derated — a 25 V part on a 15 V rail, 60 % — so
+it has no defect to fix. And **C19 is the pulse reservoir, so it is part of the drive**: the 100 µs
+band at 3.125 kHz draws ~235 µC per pulse, which droops C19 by ~50 mV at 4700 µF and would droop it
+~107 mV at 2200 µF. Both sit inside the conventional 1 %-of-rail rule, so the change was available
+on the arithmetic — but changing the reservoir changes the drive current waveform, and therefore
+every bench-measured anchor in the locked `cal_2x11_v5d` table. That means a re-cut and a new
+`profile_sha8`, which is not a thing to do immediately before a corpus campaign. **Left alone
+deliberately, not by omission.**
+
+**A better explanation of the 2026-08-10 U1 failure, found while sizing this.** U1's dissipation
+scales with input voltage, and the 100 µs band's average draw is ~0.73 A: **~3.6 W at 20 V in,
+~7.5 W at 25.2 V in.** A freshly charged pack roughly doubles U1's heat load versus one near the
+floor. That is consistent with §12's ≈2.5 W → ≈4.6 W figure, and it makes the failure a direct
+consequence of the 6S decision raising V_in rather than anything to do with C18. **The C18-as-
+contributor line in the old §14.2 was never evidence-backed** — it rested only on C18 being on the
+same rail and independently known to be over-derated, in a paragraph that already said no
+post-mortem was done. It is withdrawn with the section, and should not be revived: the causal path
+was always weak, since an over-volted input electrolytic fails by venting or shorting (which takes
+F1) rather than by killing the regulator downstream of it. The worst corner this identifies —
+cold start on a full pack — is already covered by §10's 2026-08-13 extractor validation, 104 618
+sweeps with zero flagged rows including a cold start at 24.48 V.
+
+**Caveat, and it carries all the numbers above: TX inductance has never been measured.** It is
+recorded nowhere in the repo (§5 gives geometry, turns, length and DC resistance only). **L ≈ 200 µH**
+is *inferred*, two ways that agree: solving the L/R ramp against the schematic's own bench
+annotation ("10 kHz, 40 µs pulses, 500 mA from bench supply at 20 V" = 50 µC per pulse) gives
+~200 µH, and the coil geometry alone (10 turns, 17.6 m, equivalent radius 0.28 m) gives ~250 µH.
+Within ~20 % of each other, which is enough to size a capacitor and not enough to call a
+measurement. Every current, charge, droop and dissipation figure in this entry scales with it. **One
+direct inductance measurement on the TX coil would put all of it on firm ground, and it is logged
+here as the open measurement it is.** (2026-08-14)
+
 ### DESIGN.md — Doc-rev 2.8 — §14 pruned to the three problems that are still open
 
 **What changed.** Human-directed edit to §14, made by the builder: seven open problems become
@@ -72,8 +125,6 @@ the defect was confined to the header a reader sees first. The v1.77–v1.79 edi
 History line and left the title behind. Corrected now rather than after the corpus exists, so the
 first `cal_2x11_v5d` capture day starts against a file whose header and constant agree.
 (2026-08-13)
-
-<!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.7)
 
