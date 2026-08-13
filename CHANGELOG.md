@@ -25,6 +25,19 @@ checking on a genuinely full pack.
 **Where the old figure went.** Withdrawn in DESIGN 17.23 by name, so it cannot quietly return via
 another profile's notes. (2026-08-13)
 
+### src/pimd_classviz.py — v1.79 — header title line corrected to v1.79
+
+**What changed.** The header title line read `v1.76` while `APP_VERSION` was already `'1.79'` and the
+History block correctly listed v1.77, v1.78 and v1.79. Title line only — no code, no behaviour
+change, so no version bump: this brings the header into line with the version the file already is.
+
+**Why.** Found in a pre-corpus-sweep repo audit. `APP_VERSION` is what stamps `tool_version` into
+the session dump and therefore into every corpus row, so nothing recorded was ever mis-labelled —
+the defect was confined to the header a reader sees first. The v1.77–v1.79 edits each added their
+History line and left the title behind. Corrected now rather than after the corpus exists, so the
+first `cal_2x11_v5d` capture day starts against a file whose header and constant agree.
+(2026-08-13)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.7)

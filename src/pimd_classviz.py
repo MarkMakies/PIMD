@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Signature Visualiser (ClassViz) v1.76
+# PIMD Signature Visualiser (ClassViz) v1.79
 # — Mode 2 adaptive profile viewer
 # Runs on Ubuntu desktop / laptop, standalone PyQt6 app (no .ui file)
 #
