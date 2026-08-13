@@ -198,6 +198,56 @@ voltages**. That is how `cal_2x11_v5d`'s measured table was produced — from a 
 board 49.0 °C, not from delaycal's own readout — and it is the likely reason classviz figures and
 delaycal figures for the same cells do not match exactly. (2026-08-13)
 
+### src/data/profiles/cal_2x11_v5d.json — v5d — cell 4 re-cut bench-confirmed; all cells measured; sha8 c42a5f1e
+
+**What changed.** Notes text only — **the delays and `threshold_v` are byte-identical to
+`6339c35e`**. The two predicted numbers for cell 4 are replaced with the measured ones, the whole
+air table is re-taken at steady state against the re-cut geometry, and the profile is no longer
+carrying any unmeasured value. `profile_sha8` moves **6339c35e → c42a5f1e**.
+
+**Cell 4 confirmed.** Predicted 500.1 / 500.9 mV at 0.15 % cross-band; **measured 498.9 / 499.4 mV
+at 0.09 %**. Prediction error −1.2 / −1.5 mV (−0.24 % / −0.30 %), both low and consistent with the
+pack having fallen 20.70 → 20.17 V between the two measurements. Against the 3.16 % it was
+hand-placed at, **cell 4 is now the tightest-matched anchor in the profile** — better than
+predicted.
+
+**Measured in air at steady state** — 1 666 sweeps over 93 s, zero flagged rows, pack 20.17 V,
+board 49.4 °C (`session_20260813_200336`, fw v4.37, classviz v1.79):
+
+| cell | thr | 100 µs | 10 µs | cross-band |
+|---|---|---|---|---|
+| 1 | 4.700 V | 4680.0 mV | 4696.0 mV | 0.34 % |
+| 2 | 1.900 V | 1874.3 | 1898.5 | 1.28 % |
+| 3 | 1.150 V | 1133.2 | 1151.0 | 1.56 % |
+| 4 | 0.500 V | 498.9 | 499.4 | **0.09 %** |
+| 5 | 0.125 V | 123.0 | 124.2 | 0.91 % |
+| 6 | ord | 79.0 | 77.9 | 1.32 % |
+| 7 | ord | 62.5 | 69.9 | 11.32 % (null minimum, band-dependent by design) |
+| 8–11 | ord | 91.8 / 111.8 / 112.3 / 112.0 | 92.0 / 108.0 / 109.9 / 111.0 | 0.24–3.45 % |
+
+Air std dev 0.07–0.88 mV per cell on the 100 µs band and 0.05–0.23 mV on the 10 µs.
+
+**Pack sensitivity, two measurements.** The same cells at pack 20.70 V / board 49.0 °C read
+4685.8 / 4698.4 mV on cell 1 against 4680.0 / 4696.0 mV at 20.17 V / 49.4 °C. Both cuts sit near
+the **bottom** of the §12 clean window; on a fuller pack the cells read higher (43–51 mV/V), putting
+cell 1 near 4.85 V at 24 V against the 5.000 V full scale.
+
+**Three hashes, no corpus behind any of them.** The file has carried 48de8676 (cell 4 hand-placed,
+nothing recorded), 6339c35e (cell 4 re-cut, notes carrying the predictions — the two air validation
+sessions are stamped with this one) and now c42a5f1e. Since only the notes text moved between the
+last two, anything recorded under 6339c35e is *physically* comparable to anything recorded now, but
+the `(profile_name, profile_sha8)` guard cannot know that and will group them separately (§10).
+**Reload the profile before recording the corpus.**
+
+**Housekeeping.** Superseded profiles `cal_2x11_v5`, `cal_2x11_v5a` and `cal_2x11_v5b` are removed
+from the working tree — `cal_2x11_v5d` is the only profile in `src/data/profiles/`. They remain in
+git history and can be restored if an old recording ever needs its geometry re-read. All session
+dumps in `src/data/sessions/` were cleared at the same time; that directory is gitignored, so those
+raw recordings are gone rather than archived, and the measured tables in this file and in the
+profile's `notes` are now the only surviving record of them. **Note that DESIGN §10 still names
+`cal_2x11_v5a` as the operating profile** — it is regenerated from this changelog by the human
+consolidation pass (§18) and has not been re-run since v5b. (2026-08-13)
+
 <!-- Add new entries above this line. Format: ### <file> — v<N> — <short title> -->
 
 ## Archive — consolidated 2026-08-13 (Doc-rev 2.6)
