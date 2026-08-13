@@ -1,3 +1,168 @@
+### src/pimd_classviz.py — v1.79 — warm-up countdown by the temperature gauge, temp colour steps, and the last two Analysis splitters persist
+
+**What changed.** Three operator-facing items on the capture strip and the Analysis tab.
+
+*Warm-up countdown.* The board-temperature gauge gained a caption row carrying `warm in M:SS` —
+the time left before effective soak reaches `WARMUP_SETTLE_S` — mirroring the battery gauge's
+`volts · time left` caption directly opposite it. It fills only while streaming with time still
+to serve and clears once served, so it costs nothing on the strip for the rest of the session.
+Driven from `_rate_timer` at 1 Hz, which is the resolution the text needs; `_redraw`'s 30 Hz
+would repaint the same second thirty times.
+
+*Gauge geometry.* `BarGauge` now mirrors `BatteryGauge`'s metrics exactly — 170×52 instead of
+170×24, the same body rect (giving up the same width the battery spends on its nub, so the two
+outlines are one rectangle in two places), the same 11 pt bold reading, the same 15 px caption
+row. Previously the two gauges sat side by side sharing neither height nor centre line, and the
+temperature read two points smaller than the pack percentage.
+
+*Temperature colour steps.* `BarGauge` gained an optional `thresholds` list — the bar takes the
+colour of the highest threshold the reading has reached — and the temp gauge is built with
+yellow at `TEMP_WARN_C` 50 °C and red at `TEMP_CRIT_C` 60 °C, keeping its normal blue below 50.
+
+*Telemetry age.* The sensor-age label reads `telemetry 50 s ago` rather than a bare `50 s ago`,
+which alongside two gauges and a countdown read as the age of whichever one you looked at last.
+
+*Splitter persistence.* `analysis_main_split_sizes` and `analysis_right_split_sizes` now save
+and restore alongside the `left`/`row1` pair that already did.
+
+**Why.** The countdown and the gauge answer two different questions that were easy to confuse.
+Temperature says how hot the board is; it does **not** say whether the rig is ready, because
+DESIGN §3 is explicit that the DS18B20 reaches its final reading well before the signal settles
+— on 2026-08-13 the board sat at 43–46 °C while band 0 was still drifting for a further ~3 min.
+Putting the countdown beside the gauge is what makes that distinction visible at the moment of
+capture. 50 °C is "hotter than this rig normally runs" and worth a look rather than an alarm:
+the extractor plateaus the board near 47.8 °C. On the splitters, `main_split` is the vertical
+divider that sets the heatmap panel's **width** — `left_split` only sets its height — so it was
+the one divider on the tab whose position was discarded on every launch.
+
+**Details.** The threshold colours are given as hex, **not** as the `_HL_YELLOW`/`_HL_RED`
+constants they match. Those are Qt *stylesheet* strings — `'rgb(246,  97,  81)'` — and neither
+parses as a `QColor`: it returns an invalid colour and the bar paints **black** with the dark
+reading text unreadable on top. Caught by rendering the gauge and looking at it rather than by
+reading the value back; both the yellow and the red step were affected. `BatteryGauge` already
+used the `'#f66151'` hex form for the same red, for the same reason.
+
+Both new time readouts reduce to whole seconds before splitting into `M:SS`; formatting the raw
+float rendered 359.99 s as "5:60", and the same slip was fixed in v1.77's Soak span, which showed
+59.9 s as "0:60". An earlier revision of the countdown was a standalone `QLabel` with a filled
+yellow background; it was dropped for the caption because a colour block on that strip shouted
+over the reading it was qualifying and collided with the age label. That version also guarded its
+show/hide on `isVisible()`, which reports False whenever the Analysis tab is merely not the
+current tab — a guarded hide would have been skipped in the background and the label would have
+appeared on switching to the tab. The caption has no such state: it is derived from the current
+soak every tick, so it also returns on its own if a new streaming run restarts the soak.
+
+`pimd_gui.py` has its own copy of `BarGauge` and is deliberately not touched, so its temperature
+gauge keeps the old geometry and no colour steps. Splitter restore reuses the existing
+child-count length guard. Verified against a driven window: both gauges report 170×52 at the same
+y, the colour ladder steps exactly at 50.0 and 60.0 and renders correctly at each, the caption
+fills and clears across the start/stall/stop states, and a dragged main/right divider round-trips
+through save and reload unchanged. (2026-08-13)
+
+### src/pimd_classviz.py — v1.78 — FIX '# capture:' lines never carried their window spans
+
+**What changed.** `# capture:` lines now actually contain the `tgt=` / `air_before=` / `air_after=`
+frame-window spans they were designed to carry. The bounds are snapshotted into the stats dict
+when the signature is computed (`_sig_window_spans()`) and passed to `_append_capture()`, instead
+of being read off `self._sig_target` / `_sig_air_before` / `_sig_air_after` at write time.
+
+**Why.** Those three slots are already `None` when Save runs. `_sig_finish_air_trail()` drops them
+the instant the stats exist — deliberately, so the readout and Save gating go inert while the
+Save/Ignore decision is pending — and Save happens after that. So v1.68's `span()` helper always
+saw `None`, its `if s:` guard skipped every field, and the line went out as bare
+`capture_id/session/n_central`. Silent, because a spanless line is also the legitimate output
+when nothing is recording. **Every session dump on disk is affected**, and `pimd_features` v13's
+exact corpus-row → frame-window join — the entire point of the line — has had nothing to bind to
+since the day it was written. The v1.68 comment at the call site asserting the buffers were
+"still populated" was describing an ordering that was never true on this path.
+
+Found while reconstructing which frames a capture came from: a band-0 excursion in
+`session_20260813_155623` was initially read as a cooling artefact and turned out to be the
+spanner on the coil (correlation r=0.9996 against its own recorded delta vector). The spans would
+have made that unambiguous immediately; `captured_at` is stamped at save time, ~18–19 s after the
+target window closes, which is exactly the confusion the line exists to prevent.
+
+**Details.** Full window bounds, first to last frame, unchanged in format and unit (PC epoch
+seconds, the same clock as `pc_wallclock`) — so `pimd_features._parse_capture_content` reads them
+with no change, verified round-trip. The reduced slice is the central 60 % and stays recoverable
+from `n_central` on the same line. `windows` is additive in the stats dict and every consumer
+reads named keys, so nothing else sees it. Verified against a driven capture cycle with the slots
+explicitly cleared first: both-anchor captures write all three spans, single-anchor captures write
+`tgt`+`air_before` only, and an absent/empty `windows` still writes the line without spans — the
+mark and capture_id are never lost. The geometry-mismatch path returns an error dict with no
+`windows` and is `.get()`-safe. (2026-08-13)
+
+### src/pimd_classviz.py — v1.77 — captures record board temperature and soak; the readout warns while the board is still warming
+
+**What changed.** Every signature saved to a corpus now carries three more columns:
+`temp_c` (the DS18B20 reading at capture time), `streamed_s` and `stalled_s` (how long this
+classviz session had been streaming, and how much of that the firmware was silent). Both corpus
+write paths pass them. The signature readout gained a **Soak** span on the same green/amber
+ladder as the existing quality fields, showing effective soak as `M:SS` and appending
+"warming" below the DESIGN §3 warm-up window (`WARMUP_SETTLE_S`, 360 s); a tooltip explains
+what the number is. It is a warning only — the capture still saves.
+
+**Why.** The corpus recorded the covariate DESIGN §3 calls weak (`pack_v`, ~1 mV/V) and
+discarded the one it calls dominant — thermal drift, ~10× supply, with §17.11/§17.14 showing the
+operating point moving with board temperature while pack voltage barely registers. classviz has
+written `temp_c=` on every `# pack_v:` session-dump line since v1.72, but it never reached a
+corpus row, so an offline review had to cross-reference the dump by timestamp to recover the one
+variable most likely to explain a capture. Soak is carried alongside because §3 is explicit that
+the DS18B20 settles well before the *signal* does and "is not a readiness indicator": the sensor
+reading alone cannot separate a warm capture from a cold one, and warm-up from cold is ~6 min.
+
+**Details.** `streamed_s` and `stalled_s` are stored as a pair and never as their difference,
+following the rule already stated at `_soak_fields()` — `streamed_s` alone counts a silent
+source as streamed, which is DESIGN §14.7 (70 minutes of zero data logged as streamed after the
+2026-08-12 lockout). The new `_effective_soak_s()` takes the difference, clamped at 0, and the
+warm-up gate reads *that*, not the raw run clock: a 70-minute all-stalled session correctly
+reports 0 s and shows "warming". `_board_temp_c_value()` returns None rather than 0.0 when the
+sensor is silent, mirroring `_pack_v_value()`, so a blank column stays distinguishable from a
+freezing board. `_scan_editable_signature_file()`'s v1.67 bounds guard became an `opt()` helper
+covering all four optional trailing fields, so the 25-column v1 corpus and the 27-column v3 and
+20260813 corpora all still open — verified, 66 / 188 / 2 signatures, no IndexError. Appending to
+one of those files still writes that file's own column count (`_corpus_fields_for_path`,
+unchanged), so no corpus goes ragged; only newly created files get the 30-column schema.
+Nothing in the acquisition, protocol or reduction path is touched. (2026-08-13)
+
+### src/pimd_features.py — v15 — temp_c / streamed_s / stalled_s corpus columns
+
+**What changed.** `CORPUS_HEADER_FIELDS` gains `temp_c`, `streamed_s`, `stalled_s`, appended
+after `tilt_deg`; `build_rows()` and `build_wide_row()` take them as additive keyword arguments
+defaulting to None and write blank rather than 0; `WIDE_TAIL_FIELDS` matches. The schema
+docstring documents what each column is — and what it is not. The reduction, segmentation and
+`pack_v_at()` paths are deliberately untouched: there is no `temp_c_at()` interpolator, and the
+session-dump → corpus route is unchanged.
+
+**Why.** Schema-owner half of the classviz v1.77 change above; see there for the measurement
+argument.
+
+**Details.** `tilt_deg`'s "MUST stay last" comment was wrong the moment three fields followed
+it, so the rule is restated as what it actually is — append-only, with every optional trailing
+read bounds-guarded, the guard being index-based rather than last-field-based and so
+indifferent to how many columns follow. The docstring is explicit that `temp_c` is a sensor
+reading and not board thermal state (the DS18B20 sits on the load resistor, is blind to the
+regulator die, and §3 records 1.8 % spread on band 0 at the same indicated temperature), and
+that its absolute scale is epoch-bound — it reads ~8 °C hotter since the 2026-08-13 extractor,
+so readings either side of that date are different quantities. The `# pack_v:` line's
+documented form was also corrected: it has carried a `temp_c=` field since classviz v1.72 and
+the docstring still showed the v1.66 three-field form. (2026-08-13)
+
+### src/pimd_corpus_check.py — v1.10 — the three v15 columns are optional on read
+
+**What changed.** `OPTIONAL_FIELDS` gains `temp_c`, `streamed_s`, `stalled_s`. Nothing else —
+no check, pass band or threshold is altered.
+
+**Why.** `CORPUS_FIELDS` *is* `pimd_features.CORPUS_HEADER_FIELDS` and `REQUIRED_FIELDS` is the
+set difference against `OPTIONAL_FIELDS`, so growing the schema without this line would have
+made three columns mandatory and rendered every corpus on disk unloadable on sight. This is a
+keep-it-working companion to features v15, not new work on the checker — whose thresholds
+remain epoch-bound to the 2026-07-23 corpus and are knowingly left alone.
+
+**Details.** Verified inert: output on all three corpora on disk is byte-identical to v1.9's,
+including the v3 corpus's 229 undiagnosed FAILs. A file written with the v15 schema loads and
+exits 0. (2026-08-13)
+
 ### src/pimd_classviz.py — v1.76 — Band Mean vs Time splits into early (blue) / late (red) at a selectable sd index
 
 **What changed.** The Analysis tab's *Band Mean vs Time* strip gained a second mode. Off (the

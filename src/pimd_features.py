@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2022-2026 Mark Makies
 ###############################################################################
-# PIMD Feature Extractor (pimd_features.py) v14
+# PIMD Feature Extractor (pimd_features.py) v15
 # — offline session-CSV / gui_signatures-CSV -> training-corpus CSV converter
 # Runs on Ubuntu desktop / laptop, standalone CLI script (no GUI, no Qt)
 #
@@ -15,6 +15,7 @@
 # the exact column list.
 #
 # History (full detail in CHANGELOG.md):
+#   v15 temp_c / streamed_s / stalled_s corpus columns — thermal state per capture
 #   v14 TOOL_VERSION constant re-synced with header (was stuck at v11 since v12)
 #   v13 '# capture:' session-dump lines parsed — exact corpus-row -> frame-window join
 #   v12 tilt_deg column — oblique orientation capture; optional, last in the field list
@@ -83,6 +84,36 @@ gui_signatures_*.csv, one row per (capture, cell)):
                       session-dump track does (age_s, v10). When classviz writes
                       this column directly it stamps whatever was in the field at
                       capture time, however old that reading was.
+  temp_c           -- DS18B20 board temperature at capture time, degrees C, or blank
+                      when the sensor gave no reading (v15). OPTIONAL on read, same
+                      contract and for the same reason as pack_v.
+                      This is the DOMINANT drift term: DESIGN §3 puts thermal at
+                      ~10x supply, and §17.11/§17.14 have the operating point moving
+                      with it while pack voltage barely registers (~1 mV/V). Until
+                      v15 the corpus recorded only the weak one.
+                      Read it as a sensor reading, NOT as board thermal state: the
+                      DS18B20 sits on the load resistor, is blind to the regulator
+                      die, and §3 records 1.8 % spread on band 0 at the SAME
+                      indicated temperature. Its absolute scale is also epoch-bound
+                      -- it reads ~8 C hotter since the 2026-08-13 extractor fan, so
+                      readings either side of that date are different quantities.
+  streamed_s       -- seconds this classviz session had been streaming when the
+                      capture was taken (v15). OPTIONAL on read.
+  stalled_s        -- seconds of that time the firmware was NOT emitting (v15).
+                      OPTIONAL on read.
+                      The PAIR is the soak figure; effective soak = streamed_s -
+                      stalled_s, exactly as in the '# soak:' track below, and for
+                      the same reason -- streamed_s alone counts a silent source as
+                      streamed (DESIGN §14.7: 70 min of zero data logged as
+                      streamed). Never store the difference alone: a reader must be
+                      able to tell a clean 10-minute soak from a 70-minute stall.
+                      Why record soak when temp_c is right there: §3 is explicit
+                      that the DS18B20 settles well before the SIGNAL does and "is
+                      not a readiness indicator", so temperature alone cannot
+                      separate a warm capture from a cold one. Warm-up from cold is
+                      ~6 min. Caveat: streamed_s accumulates across runs within a
+                      session and does not know the rig cooled during a gap, so it
+                      is a proxy corroborated by temp_c, not a measurement.
 
 JOINED_CORPUS_HEADER = CORPUS_HEADER plus, from a registry join on target_id
 (blank for 'air'; pimd_features.py's own --out corpus build only):
@@ -91,10 +122,14 @@ JOINED_CORPUS_HEADER = CORPUS_HEADER plus, from a registry join on target_id
 
 Session-dump comment lines this module parses (classviz writes them; both the
 header block and mid-stream are read, in file order):
-  # pack_v: <iso>, <volts>[, age_s=<n|unknown>]   operator-entered pack voltage.
-                      age_s is seconds since the value was last TYPED, so it says
-                      whether the number is a fresh meter reading. The 2-field
-                      form (classviz v1.64/v1.65) is still accepted.
+  # pack_v: <iso>, <volts>[, age_s=<n|unknown>][, temp_c=<c|none>]
+                      pack voltage, from firmware telemetry since classviz v1.72.
+                      age_s is seconds since the value was reported, so it says
+                      whether the number is fresh. The 2-field form (classviz
+                      v1.64/v1.65) is still accepted. temp_c (v1.72) is read off
+                      this track by the key=value tail scan; this module keeps it
+                      only for the corpus column, and does NOT interpolate it the
+                      way pack_v_at() does for voltage.
   # soak:   <iso>, streamed_s=<n>, stalled_s=<n>, idle_before_s=<n|unknown>,
             event=<what>                          run/idle history (v1.66).
                       Effective soak = streamed_s - stalled_s. idle_before_s is
@@ -131,7 +166,7 @@ import pimd_target_check
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Stamped into every corpus row's tool_version, so this is output, not a label:
 # it sat at v11 through the v12/v13 edits and mislabelled anything built by them.
-TOOL_VERSION = 'pimd_features.py v14'
+TOOL_VERSION = 'pimd_features.py v15'
 
 AIR_THRESHOLD_MV_DEFAULT         = 0.25   # mean|delta| below this -> "air"
 SETTLE_S_DEFAULT                 = 2.0    # marks path: trim after each mark for hand-transient settling
@@ -158,11 +193,23 @@ CORPUS_HEADER_FIELDS = [
     'pack_v',
     # v12. Tilt of dim_a away from the coil normal, degrees, or blank when not
     # recorded. Same optional-on-read contract as pack_v, and for the same
-    # reason -- every corpus on disk predates it. MUST stay last: classviz's
-    # _scan_editable_signature_file() indexes positionally off this list while
-    # reading files that do not have the column, so appending is safe and
-    # inserting is not.
+    # reason -- every corpus on disk predates it.
     'tilt_deg',
+    # v15. Thermal state at capture time: the sensor reading, and how long the
+    # rig had been running when it was taken. See the module docstring for what
+    # each one is and is not, and why the soak pair is stored as a pair.
+    #
+    # APPEND-ONLY, NEVER INSERT -- the rule 'tilt_deg' used to carry as "MUST
+    # stay last", restated now that three fields follow it. classviz's
+    # _scan_editable_signature_file() builds its index map from THIS list while
+    # reading rows from a FILE that may be narrower, so every optional trailing
+    # field must be read through the bounds guard established there in v1.67
+    # (`first[idx[f]] if len(first) > idx[f] else ''`). That guard is
+    # index-based, not last-field-based, so it keeps working however many
+    # columns follow -- but only for fields appended at the end.
+    'temp_c',
+    'streamed_s',
+    'stalled_s',
 ]
 CORPUS_HEADER = ','.join(CORPUS_HEADER_FIELDS)
 
@@ -177,7 +224,7 @@ WIDE_METADATA_FIELDS = ['session', 'capture_id', 'captured_at', 'target_id', 'sh
                          'medium', 'repeat_idx', 'notes', 'tilt_deg']
 WIDE_SCALAR_FIELDS = ['plateau_amp_mV', 'splithalf_floor', 'quality']
 WIDE_TAIL_FIELDS = ['amp_mean_abs_mV', 'profile_name', 'profile_sha8', 'fw_version',
-                     'tool_version', 'supply', 'pack_v']
+                     'tool_version', 'supply', 'pack_v', 'temp_c', 'streamed_s', 'stalled_s']
 
 
 def warn(session_path, message):
@@ -1023,7 +1070,8 @@ def format_tilt(x):
 
 def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV, plateau_amp_mV,
                splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
-               fw_version, tool_version, supply, session_path, pack_v=None):
+               fw_version, tool_version, supply, session_path, pack_v=None,
+               temp_c=None, streamed_s=None, stalled_s=None):
     """One dict per cell, keyed by CORPUS_HEADER_FIELDS -- unjoined (no
     registry columns). This is the exact row shape pimd_classviz.py writes
     directly to gui_signatures_*.csv; pimd_features.py's own --out corpus
@@ -1031,7 +1079,12 @@ def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV,
     fields()), so both callers share this one implementation.
 
     pack_v (v9) is the pack voltage at capture time, or None when not measured
-    -- keyword with a default so it is additive for every existing caller."""
+    -- keyword with a default so it is additive for every existing caller.
+
+    temp_c / streamed_s / stalled_s (v15) are the thermal state at capture
+    time, on the same additive-keyword contract. All three write blank rather
+    than 0 when None: a missing sensor reading and a genuine 0 are different
+    statements, and 0.0 C or a 0 s soak both read as measurements."""
     if plateau.target_id is None:
         raise ValueError('build_rows() called on an unresolved plateau (target_id=None) -- '
                           'callers must skip these, see plateau_display_label()')
@@ -1052,13 +1105,17 @@ def build_rows(session_stem, capture_id, captured_at, plateau, colmap, delta_mV,
             'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',
             'fw_version': fw_version or 'unknown', 'tool_version': tool_version, 'supply': supply,
             'pack_v': '' if pack_v is None else format_value(pack_v),
+            'temp_c': '' if temp_c is None else format_value(temp_c),
+            'streamed_s': '' if streamed_s is None else '{0:.0f}'.format(streamed_s),
+            'stalled_s': '' if stalled_s is None else '{0:.0f}'.format(stalled_s),
         })
     return rows
 
 
 def build_wide_row(session_stem, capture_id, captured_at, plateau, delta_mV, plateau_amp_mV,
                     splithalf_floor, quality, amp_mean_abs_mV, profile_name, profile_sha8,
-                    fw_version, tool_version, supply, pack_v=None):
+                    fw_version, tool_version, supply, pack_v=None,
+                    temp_c=None, streamed_s=None, stalled_s=None):
     """One dict per plateau (not per cell): same metadata as build_rows() plus
     the full delta_mV vector as c00..cNN. Built from the exact values already
     computed for the long rows -- never recomputed -- so long and wide can't
@@ -1076,6 +1133,9 @@ def build_wide_row(session_stem, capture_id, captured_at, plateau, delta_mV, pla
         'profile_name': profile_name or '', 'profile_sha8': profile_sha8 or '',
         'fw_version': fw_version or 'unknown', 'tool_version': tool_version, 'supply': supply,
         'pack_v': '' if pack_v is None else format_value(pack_v),
+        'temp_c': '' if temp_c is None else format_value(temp_c),
+        'streamed_s': '' if streamed_s is None else '{0:.0f}'.format(streamed_s),
+        'stalled_s': '' if stalled_s is None else '{0:.0f}'.format(stalled_s),
     }
     for i, v in enumerate(delta_mV):
         row['c{0:02d}'.format(i)] = format_value(v)

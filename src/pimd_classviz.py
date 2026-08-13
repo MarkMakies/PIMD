@@ -22,6 +22,12 @@
 #           temperature v4.33+; board_temp_dC = -32768 means NO READING)
 #
 # History (full detail in CHANGELOG.md):
+#   v1.79 warm-up countdown beside the temperature gauge; temp gauge goes
+#         yellow at 50 °C / red at 60 °C; Analysis main + right splits persist
+#   v1.78 FIX '# capture:' lines never carried their tgt/air window spans --
+#         the raw slots were already cleared when Save ran
+#   v1.77 captures record temp_c / streamed_s / stalled_s; readout warns while
+#         the board is inside the warm-up transient
 #   v1.76 Band Mean vs Time can split into early (blue) / late (red) cell
 #         groups at a selectable sd index
 #   v1.75 pack gauge reads runtime-fraction SoC + live H:MM remaining from the
@@ -154,7 +160,7 @@ import pimd_pack           # noqa: E402 — pack SoC / time-remaining maths (no 
 import pimd_shape          # noqa: E402 — Shape Space tab feature maths (no Qt in that module)
 import pimd_target_check        # noqa: E402 — target registry, shared with pimd_features
 
-APP_VERSION = '1.76'
+APP_VERSION = '1.79'
 
 REDRAW_MS   = 33    # ~30 Hz
 
@@ -336,6 +342,17 @@ SHAPE_TRAIL_MAX     = 500   # deque cap; the spinbox slices the last N of it
 # locked reference has already accumulated ~1 mV/cell, the same order as a weak
 # target, so a lock older than this is worth re-arming before trusting.
 SHAPE_AIR_AMBER_S   = 60.0
+# Effective soak (streamed - stalled) below which a capture is inside the
+# warm-up transient and the readout says so. DESIGN §3: from cold the band-0
+# mean settles as a single exponential, tau ~1.15/0.90 min, within 0.2 % at
+# 5.6/3.8 min, and the guidance is "allow 6 min" on the 40 mm extractor.
+#
+# A WARNING, never a block: a deliberate cold-start study is a real experiment,
+# and streamed_s/stalled_s go into the corpus row either way, so a capture
+# taken early stays identifiable offline whatever the operator decides here.
+# The DS18B20 cannot do this job -- §3 is explicit that it reaches its final
+# reading well before the signal settles and "is not a readiness indicator".
+WARMUP_SETTLE_S = 360.0
 # Air-buffer frames. Deliberately much shorter than the Analysis tab's
 # capture-window default (120): that window is for a stationary corpus capture
 # bracketed by air on BOTH sides, where length buys noise. A rolling reference
@@ -411,6 +428,27 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # --------------------------------------------------------------------------
 
 TEMP_GAUGE_MAX_C = 80.0         # board-temp gauge full scale
+# Board-temp gauge colour steps (v1.79). The extractor plateaus the board at
+# ~47.8 °C (DESIGN §3), so 50 is "hotter than this rig normally runs" and worth
+# a look, not an alarm. These are DS18B20 numbers and the sensor sits on the
+# load resistor, blind to the regulator die -- read them as a trend on one
+# sensor, not as a component temperature. Note the reading is also epoch-bound:
+# it runs ~8 °C hotter since the 2026-08-13 extractor than on the old blow-on
+# fan, so these steps are calibrated to the CURRENT rig.
+TEMP_WARN_C = 50.0
+TEMP_CRIT_C = 60.0
+# Hex, NOT the _HL_* constants they match. Those are Qt STYLESHEET strings
+# ('rgb(246,  97,  81)') and the double spaces in them are legal CSS but do not
+# parse as a QColor -- QColor() returns an invalid colour and the bar paints
+# BLACK, with the dark reading text unreadable on top of it. BatteryGauge
+# already uses the '#f66151' hex form for the same red, for the same reason.
+TEMP_WARN_COLOUR = '#f9f06b'    # == _HL_YELLOW
+TEMP_CRIT_COLOUR = '#f66151'    # == _HL_RED
+# Warm-up caption colour. Amber TEXT rather than a filled highlight: this sits
+# in the temp gauge's caption row, opposite the battery's quiet grey
+# 'volts · time left', and a colour block there would shout over the reading it
+# is qualifying. Dark enough to stay legible on the light strip background.
+WARMUP_CAPTION_COLOUR = '#9c6500'
 TEMP_INVALID_MAX_DC = -10_000   # board_temp_dC at or below this is the firmware's
                                 # "no reading" sentinel (fw v4.33 sends -32768).
                                 # Threshold, not equality -- see pimd_gui.py.
@@ -499,48 +537,93 @@ class BatteryGauge(QWidget):
 
 
 class BarGauge(QWidget):
-    """Plain horizontal bar gauge with its reading printed inside — used for
-    board temperature."""
+    """Horizontal bar gauge with its reading printed inside and an optional
+    caption underneath — used for board temperature.
 
-    def __init__(self, vmax, fmt, colour='#a8c8e8', parent=None):
+    Geometry deliberately mirrors BatteryGauge's, cap_h and all (v1.79), minus
+    the battery nub: same widget height, same body rect, same fonts, same
+    caption row. The two sit side by side on the capture strip, where any
+    difference between them reads as misalignment rather than as design -- at
+    170x24 against the battery's 170x52 they shared neither height nor centre
+    line."""
+
+    CAPTION_H = 15          # must match BatteryGauge.paintEvent's cap_h
+
+    def __init__(self, vmax, fmt, colour='#a8c8e8', thresholds=None, parent=None):
+        """`thresholds` is [(value, colour), ...]: the bar takes the colour of
+        the HIGHEST threshold the reading has reached, and keeps `colour` below
+        all of them (v1.79). Sorted on the way in so the caller may list them
+        in any order."""
         super().__init__(parent)
-        self.setMinimumSize(170, 24)
-        self.setMaximumHeight(24)
+        self.setMinimumSize(170, 52)
+        self.setMaximumHeight(52)
         self._vmax = vmax
         self._fmt = fmt
         self._colour = colour
+        self._thresholds = sorted(thresholds or [])
         self._value = None
+        self._caption = ''
+        self._caption_colour = None
 
     def set_value(self, value):
         self._value = value
         self.update()
 
+    def set_caption(self, text, colour=None):
+        """Caption line under the bar; '' leaves the row blank. `colour` is a
+        CSS colour string, or None for the palette's normal text. Repaints only
+        on a real change -- this is driven from a 1 Hz timer that mostly has
+        nothing new to say."""
+        if (text, colour) != (self._caption, self._caption_colour):
+            self._caption, self._caption_colour = text, colour
+            self.update()
+
+    def _bar_colour(self):
+        colour = self._colour
+        for limit, hot in self._thresholds:
+            if self._value >= limit:
+                colour = hot
+        return colour
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        body = QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0)
+        w, h = self.width(), self.height()
+        cap_h = self.CAPTION_H
+        # w - 9.5 gives up exactly the width the battery spends on its nub, so
+        # the two outlines are the same rectangle in the same place.
+        body = QRectF(1.5, 1.5, w - 9.5, h - cap_h - 4)
         p.setPen(QPen(QColor('#5e5c64'), 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(body, 3.0, 3.0)
 
-        inner = body.adjusted(2.5, 2.5, -2.5, -2.5)
+        inner = body.adjusted(3.0, 3.0, -3.0, -3.0)
         if self._value is None:
             text = '—'
         else:
             frac = max(0.0, min(1.0, self._value / self._vmax))
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(self._colour))
+            p.setBrush(QColor(self._bar_colour()))
             p.drawRect(QRectF(inner.left(), inner.top(),
                               inner.width() * frac, inner.height()))
             text = self._fmt.format(self._value)
 
         font = QFont()
-        font.setPointSize(9)
+        font.setPointSize(11)
         font.setBold(True)
         p.setFont(font)
         p.setPen(QColor('#241f31') if self._value is not None
                  else self.palette().windowText().color())
         p.drawText(body, Qt.AlignmentFlag.AlignCenter, text)
+
+        if self._caption:
+            font.setPointSize(8)
+            font.setBold(False)
+            p.setFont(font)
+            p.setPen(QColor(self._caption_colour) if self._caption_colour
+                     else self.palette().windowText().color())
+            p.drawText(QRectF(0, h - cap_h, w, cap_h),
+                       Qt.AlignmentFlag.AlignCenter, self._caption)
 
 
 def _default_profile():
@@ -1849,12 +1932,19 @@ class MainWindow(QMainWindow):
         # still trades it back for grid height, and analysis_row1_split_sizes
         # persists whatever you choose.
         right_split.setSizes([320, 210, 210])
+        self.analysis_right_split = right_split
 
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.setHandleWidth(4)
         main_split.addWidget(left_split)
         main_split.addWidget(right_split)
         main_split.setSizes([560, 1440])
+        # v1.79: these two are persisted like the other pair. main_split is the
+        # vertical divider that sets the heatmap's WIDTH (left_split only sets
+        # its height), so without it a resized heatmap panel came back at 560 px
+        # every launch -- the one divider on this tab whose position was always
+        # discarded.
+        self.analysis_main_split = main_split
         layout.addWidget(main_split, stretch=1)
 
         return w
@@ -2429,18 +2519,33 @@ class MainWindow(QMainWindow):
         # takes both off the operator, because the firmware has been reporting
         # pack volts and board temperature on the wire the whole time. Same
         # gauges as pimd_gui.py, so the two apps read identically.
+        # v1.79: the two gauges are the same size now (BarGauge mirrors
+        # BatteryGauge's geometry) and the age label is centred against them
+        # rather than sitting on the row's baseline, which put it level with the
+        # gauges' caption row instead of their reading.
         row_c = QHBoxLayout()
+        row_c.setSpacing(8)
         self.gauge_pack = BatteryGauge()
         row_c.addWidget(self.gauge_pack)
 
-        self.gauge_temp = BarGauge(TEMP_GAUGE_MAX_C, '{0:.1f} °C')
+        self.gauge_temp = BarGauge(TEMP_GAUGE_MAX_C, '{0:.1f} °C',
+                                    thresholds=[(TEMP_WARN_C, TEMP_WARN_COLOUR),
+                                                (TEMP_CRIT_C, TEMP_CRIT_COLOUR)])
         self.gauge_temp.setToolTip(
             'Board temperature from the firmware (P/V telemetry).\n'
             'DS18B20 1-Wire sensor on GP6, factory-calibrated to ±0.5 °C\n'
             '(fw v4.33+); reported to 0.1 °C and refreshed every 30 s.\n'
             'Shows — when the sensor is absent, unresponsive or CRC-failing.\n'
             "Logged alongside the voltage on each '# pack_v:' line (temp_c=),\n"
-            'which is what a warm-up-versus-battery question actually needs.')
+            'which is what a warm-up-versus-battery question actually needs.\n'
+            'Bar turns yellow at {0:.0f} °C and red at {1:.0f} °C; this rig\n'
+            'normally plateaus near 48 °C.\n'
+            'The caption counts down the DESIGN §3 warm-up ({2:.0f} min of\n'
+            'effective soak = streamed − stalled) and clears once served --\n'
+            'temperature alone cannot say whether the rig is READY, because\n'
+            'the DS18B20 settles well before the signal does. Captures are\n'
+            'never blocked; streamed_s/stalled_s go into every corpus row.'.format(
+                TEMP_WARN_C, TEMP_CRIT_C, WARMUP_SETTLE_S / 60.0))
         row_c.addWidget(self.gauge_temp)
 
         self.lbl_sensor_age = QLabel('')
@@ -2449,7 +2554,7 @@ class MainWindow(QMainWindow):
             'unsolicited every ~60 s while connected, so anything older than\n'
             '{0:.0f} s means the board has gone quiet, not that it is slow.'.format(
                 SENSOR_STALE_S))
-        row_c.addWidget(self.lbl_sensor_age)
+        row_c.addWidget(self.lbl_sensor_age, alignment=Qt.AlignmentFlag.AlignVCenter)
         row_c.addStretch(1)
         v.addLayout(row_c)
 
@@ -4766,7 +4871,35 @@ class MainWindow(QMainWindow):
         return dict(delta_mV=delta_mV, plateau_amp_mV=plateau_amp_mV, amp_mean_abs_mV=amp_mean_abs_mV,
                     splithalf_floor=splithalf_floor, quality=quality, n_central=n_central,
                     used_air_after=self._sig_air_after is not None,
-                    out_of_range=(center_t < anchor_ts[0] or center_t > anchor_ts[-1]))
+                    out_of_range=(center_t < anchor_ts[0] or center_t > anchor_ts[-1]),
+                    windows=self._sig_window_spans())
+
+    def _sig_window_spans(self):
+        """{'tgt': (t0, t1), 'air_before': ..., 'air_after': ...} in PC epoch
+        seconds, for the three raw slots that are populated right now (v1.78).
+
+        Taken HERE, at compute time, because _sig_finish_air_trail() drops all
+        three slots the moment the stats exist -- deliberately, so the readout
+        and Save gating go inert once the decision is pending. Save runs after
+        that, so reading the slots from _append_capture() (as v1.68 did) always
+        saw None and silently wrote a capture line with no spans on it at all:
+        every dump on disk before v1.78 has bare 'capture_id/session/n_central'
+        lines, and pimd_features v13's exact frame-window join has had nothing
+        to bind to since the day it was written.
+
+        Full window bounds, first to last frame, which is what v1.68's span()
+        computed and what features' parser expects. The reduced slice is the
+        central 60 % of it -- recoverable from n_central on the same line via
+        pimd_features.central_frames(), so recording the outer bounds loses
+        nothing and keeps the format unchanged."""
+        spans = {}
+        for key, entry in (('tgt', self._sig_target),
+                            ('air_before', self._sig_air_before),
+                            ('air_after', self._sig_air_after)):
+            if entry and len(entry['t_seconds']):
+                t = entry['t_seconds']
+                spans[key] = (float(t[0]), float(t[-1]))
+        return spans
 
     def _update_sig_readout(self):
         self._sig_last_stats = self._compute_sig_stats()
@@ -4824,15 +4957,38 @@ class MainWindow(QMainWindow):
             quality = stats['quality']
             quality_col = _HL_GREEN if quality == 'ok' else _HL_YELLOW
 
+            # v1.77: soak sits on the same colour ladder as everything else
+            # here, so "is this a good capture?" stays one glance. It is the
+            # only span that is about the RIG rather than the signal, and it is
+            # the one DESIGN §3 says the operator cannot get from the
+            # temperature gauge.
+            soak_s = self._effective_soak_s()
+            cold = soak_s < WARMUP_SETTLE_S
+            # Whole seconds first -- see _update_warmup_countdown() for why a
+            # raw float here renders 59.9 s as "0:60".
+            soak_i = int(soak_s)
+            soak_txt = '{0:d}:{1:02d}'.format(soak_i // 60, soak_i % 60)
+            if cold:
+                soak_txt += ' warming'
+
             note = '' if stats['used_air_after'] else '  (single air anchor — flat baseline)'
             self.lbl_sig_readout.setText(
-                'Amp(L2): {0}  Mean|Δ|: {1}  Splithalf: {2}  SNR: {3}  Quality: {4}{5}'.format(
+                'Amp(L2): {0}  Mean|Δ|: {1}  Splithalf: {2}  SNR: {3}  Quality: {4}  '
+                'Soak: {5}{6}'.format(
                     self._hl_span('{0:.3f}mV'.format(amp), amp_col),
                     self._hl_span('{0:.3f}mV'.format(mean_abs), mean_col),
                     self._hl_span('{0:.3f}mV'.format(splithalf), noise_col),
                     self._hl_span('{0:.1f}'.format(snr), noise_col),
                     self._hl_span(quality, quality_col),
+                    self._hl_span(soak_txt, _HL_YELLOW if cold else _HL_GREEN),
                     note))
+            self.lbl_sig_readout.setToolTip(
+                'Soak = streamed − stalled = {0:.0f} s actually pulsing this session.\n'
+                'Under {1:.0f} min the board is still inside the DESIGN §3 warm-up '
+                'transient and the operating point is still moving; captures are '
+                'still saved, and streamed_s/stalled_s are recorded in the corpus '
+                'row so an early one stays identifiable offline.'.format(
+                    soak_s, WARMUP_SETTLE_S / 60.0))
             # Spans carry the colour now -- a label-wide stylesheet would
             # paint the gaps between them too.
             self.lbl_sig_readout.setStyleSheet('')
@@ -4939,6 +5095,13 @@ class MainWindow(QMainWindow):
         since notes/short_name can carry quoted commas."""
         fields = pimd_features.CORPUS_HEADER_FIELDS
         idx = {name: i for i, name in enumerate(fields)}
+
+        def opt(parts, name):
+            """One optional trailing column, '' when this file is too narrow to
+            have it. See the v1.67/v1.77 note at the call site."""
+            i = idx[name]
+            return parts[i] if len(parts) > i else ''
+
         groups, order = {}, []
         with open(path, newline='') as f:
             reader = csv.reader(line for line in f if not line.startswith('#'))
@@ -4977,8 +5140,15 @@ class MainWindow(QMainWindow):
                 # list while `first` comes from the FILE, and every corpus
                 # written before features v12 is one column short. An
                 # unguarded read would IndexError on opening any of them.
-                tilt_deg=(first[idx['tilt_deg']]
-                          if len(first) > idx['tilt_deg'] else ''),
+                #
+                # v1.77: three more optional trailing fields, the same guard,
+                # and now a helper rather than three more copies of it -- the
+                # count of files this has to tolerate only grows. Every corpus
+                # on disk today predates all four of these columns.
+                tilt_deg=opt(first, 'tilt_deg'),
+                temp_c=opt(first, 'temp_c'),
+                streamed_s=opt(first, 'streamed_s'),
+                stalled_s=opt(first, 'stalled_s'),
             )
         return sigs
 
@@ -5118,7 +5288,8 @@ class MainWindow(QMainWindow):
             stats['quality'], stats['amp_mean_abs_mV'], self._profile.get('name'), self._profile_sha8,
             self._parsed_fw_version(), 'pimd_classviz.py v{0}'.format(APP_VERSION),
             self.cb_supply.currentText(), self._editable_sig_path,
-            pack_v=self._pack_v_value())
+            pack_v=self._pack_v_value(), temp_c=self._board_temp_c_value(),
+            streamed_s=self._streamed_s(), stalled_s=self._stall_total_s)
         # v1.65: the FILE's columns, not the tool's -- appending 26-field rows
         # under a 25-column header is what growing CORPUS_HEADER_FIELDS would
         # otherwise have done to every corpus captured before features v9.
@@ -5133,11 +5304,14 @@ class MainWindow(QMainWindow):
         # covers the automated Training cycle too (which saves through here),
         # by design -- everything captured this session is on the charts, and
         # "Clear signatures" is the way back out.
-        # v1.68: label the frames this row came from, while the capture buffers
-        # are still populated -- _reload_editable_signature_list() below does not
-        # touch them, but the training path clears them a few lines further on.
+        # v1.68: label the frames this row came from. v1.78: the window spans
+        # come from `stats`, captured when the signature was computed -- the raw
+        # buffers were dropped at that same moment, so reading them here (as
+        # v1.68 did) got None and wrote a spanless line. `stats` is the only
+        # thing that outlives the decision, which is why it holds them now.
         self._sig_save_marks(target_id, placement, capture_id,
-                             self._editable_sig_session_id, stats.get('n_central'))
+                             self._editable_sig_session_id, stats.get('n_central'),
+                             windows=stats.get('windows'))
         self._sig_autocheck_keys.add((self._editable_sig_session_id, capture_id))
         self._reload_editable_signature_list()
         if self._analysis_training_active:
@@ -7451,7 +7625,8 @@ class MainWindow(QMainWindow):
             stats['quality'], stats['amp_mean_abs_mV'], self._profile.get('name'),
             self._profile_sha8, self._parsed_fw_version(),
             'pimd_classviz.py v{0}'.format(APP_VERSION), self.cb_supply.currentText(), path,
-            pack_v=self._pack_v_value())
+            pack_v=self._pack_v_value(), temp_c=self._board_temp_c_value(),
+            streamed_s=self._streamed_s(), stalled_s=self._stall_total_s)
         try:
             # v1.65: same schema-follows-the-file rule as the corpus save path.
             # A new file gets the current header; an existing one keeps its own.
@@ -8361,6 +8536,57 @@ class MainWindow(QMainWindow):
         return ('temp_c=none' if self._board_temp_dC is None
                 else 'temp_c={0:.1f}'.format(self._board_temp_dC / 10.0))
 
+    def _update_warmup_countdown(self):
+        """Tick the warm-up countdown beside the temperature gauge (v1.79).
+
+        Shown only while there is something to count: the rig must be streaming
+        (a soak clock that is not running is not counting down to anything) and
+        the soak must still be short of WARMUP_SETTLE_S. Once served it hides
+        and stays hidden for the rest of the run -- and comes back on its own if
+        a new streaming run restarts the soak, because visibility is derived
+        from the current value every tick rather than latched.
+
+        Driven from _rate_timer at 1 Hz, which is the resolution the text needs;
+        _redraw's 30 Hz would repaint the same second thirty times."""
+        if not hasattr(self, 'gauge_temp'):
+            return   # mid-build: the rate timer can fire before the row exists
+        # ceil to whole seconds BEFORE splitting: 359.9999 s floor-divides to
+        # 5 min with a 59.9999 s remainder, which '%02.0f' rounds to "5:60".
+        remaining = int(math.ceil(WARMUP_SETTLE_S - self._effective_soak_s()))
+        if self._stream_run_start_wall is None or remaining <= 0:
+            self.gauge_temp.set_caption('')       # served, or nothing to count
+            return
+        self.gauge_temp.set_caption(
+            'warm in {0:d}:{1:02d}'.format(remaining // 60, remaining % 60),
+            WARMUP_CAPTION_COLOUR)
+
+    def _board_temp_c_value(self):
+        """Board temperature in degrees C, or None when the DS18B20 has not
+        reported one -- the corpus-column counterpart of _temp_c_field()'s
+        session-dump fragment (v1.77).
+
+        None rather than 0.0, for _pack_v_value()'s reason: a blank column says
+        "no reading", and 0.0 C would read as a measurement of a freezing board.
+        The firmware's own NO-READING sentinel is -32768 dC (DESIGN §9) and is
+        already resolved to None upstream, so it cannot reach a corpus row as a
+        temperature of -3276.8 C."""
+        return None if self._board_temp_dC is None else self._board_temp_dC / 10.0
+
+    def _effective_soak_s(self):
+        """streamed_s - stalled_s: seconds the rig has actually been pulsing
+        this session (v1.77).
+
+        The difference is the honest figure and the reason both halves are
+        carried separately into the corpus rather than this one number --
+        streamed_s alone counts a silent source as streamed (DESIGN §14.7: 70
+        minutes of zero data logged as streamed after the 2026-08-12 lockout).
+
+        Clamped at 0: _stall_total_s is accumulated independently of the run
+        clock, so an unlucky interleave can briefly make it the larger of the
+        two, and a negative soak is not a state the warm-up gate should have to
+        reason about."""
+        return max(0.0, self._streamed_s() - self._stall_total_s)
+
     def _append_pack_v(self):
         """One '# pack_v: <iso>, <volts>, age_s=<n|unknown>, temp_c=<c|none>'
         line, mid-stream. Same cheap write+flush on the open handle as
@@ -8394,7 +8620,9 @@ class MainWindow(QMainWindow):
             self.lbl_sensor_age.setText('no telemetry yet')
             self.lbl_sensor_age.setStyleSheet(self.MY_YELLOW)
             return
-        self.lbl_sensor_age.setText('{0:.0f} s ago'.format(age_s))
+        # Name the thing being aged (v1.79): '50 s ago' next to two gauges and a
+        # warm-up countdown reads as the age of whichever one you looked at last.
+        self.lbl_sensor_age.setText('telemetry {0:.0f} s ago'.format(age_s))
         if age_s >= SENSOR_STALE_S:
             self.lbl_sensor_age.setStyleSheet(self.MY_YELLOW)
             self.statusBar().showMessage(
@@ -8569,7 +8797,7 @@ class MainWindow(QMainWindow):
         self._session_file.write('# mark_target: {0}, {1}'.format(ts, buf.getvalue()))
         self._session_file.flush()
 
-    def _append_capture(self, capture_id, session_id, n_central):
+    def _append_capture(self, capture_id, session_id, n_central, windows=None):
         """Append one '# capture:' line recording WHICH FRAMES a just-saved
         signature was computed from (v1.68).
 
@@ -8586,26 +8814,28 @@ class MainWindow(QMainWindow):
         not re-derived, so this cannot drift from what was actually reduced.
 
         Safe when the air-after slot is empty (single-anchor captures) and when
-        nothing is recording -- both are normal states, see _sig_save_marks()."""
-        def span(entry):
-            if not entry or not len(entry['t_seconds']):
-                return None
-            t = entry['t_seconds']
-            return '{0:.3f}:{1:.3f}'.format(float(t[0]), float(t[-1]))
+        nothing is recording -- both are normal states, see _sig_save_marks().
+
+        v1.78: `windows` is passed IN, from the stats dict, rather than read off
+        self._sig_* here. Those slots are already None by the time Save runs --
+        _sig_finish_air_trail() drops them the instant the stats exist -- so the
+        v1.68 version of this function silently wrote a spanless line every
+        time. See _sig_window_spans() for the full account. An absent or empty
+        `windows` still writes the line, minus the spans: the mark and the
+        capture_id are the part that must never be lost."""
         bits = ['capture_id={0}'.format(capture_id), 'session={0}'.format(session_id)]
         if n_central is not None:
             bits.append('n_central={0}'.format(int(n_central)))
-        for key, entry in (('tgt', self._sig_target),
-                            ('air_before', self._sig_air_before),
-                            ('air_after', self._sig_air_after)):
-            s = span(entry)
-            if s:
-                bits.append('{0}={1}'.format(key, s))
+        for key in ('tgt', 'air_before', 'air_after'):
+            span = (windows or {}).get(key)
+            if span:
+                bits.append('{0}={1:.3f}:{2:.3f}'.format(key, span[0], span[1]))
         ts = datetime.fromtimestamp(time.time()).isoformat()
         self._session_file.write('# capture: {0}, {1}\n'.format(ts, ', '.join(bits)))
         self._session_file.flush()
 
-    def _sig_save_marks(self, target_id, placement, capture_id, session_id, n_central):
+    def _sig_save_marks(self, target_id, placement, capture_id, session_id, n_central,
+                        windows=None):
         """Stamp the running session dump with the ground truth for a signature
         that has just been saved to the corpus (v1.68).
 
@@ -8626,7 +8856,7 @@ class MainWindow(QMainWindow):
             self._append_mark('air' if target_id == 'air' else '{0} @{1}'.format(
                 target_id, pimd_features.format_distance(placement['distance_mm'])))
             self._append_mark_target(target_id, placement)
-            self._append_capture(capture_id, session_id, n_central)
+            self._append_capture(capture_id, session_id, n_central, windows)
         except (OSError, ValueError) as exc:
             # The corpus row is already written and is the product; losing the
             # dump annotation must not lose the capture with it.
@@ -8888,6 +9118,8 @@ class MainWindow(QMainWindow):
         self._fps_last_calc_wall   = now
         self._fps_last_frame_count = self._frame_count
 
+        self._update_warmup_countdown()
+
         burst = self._serial_max_batch
         self._serial_max_batch = 0
 
@@ -9073,6 +9305,17 @@ class MainWindow(QMainWindow):
             if isinstance(row1_sizes, list) and len(row1_sizes) == self.analysis_row1_split.count():
                 self.analysis_row1_split.setSizes([int(x) for x in row1_sizes])
 
+            # Analysis main split (left column | right column) — the vertical
+            # divider that sets the heatmap's width — and the right column's
+            # row heights. Same length guard as the pair above (v1.79).
+            main_sizes = s.get('analysis_main_split_sizes')
+            if isinstance(main_sizes, list) and len(main_sizes) == self.analysis_main_split.count():
+                self.analysis_main_split.setSizes([int(x) for x in main_sizes])
+
+            right_sizes = s.get('analysis_right_split_sizes')
+            if isinstance(right_sizes, list) and len(right_sizes) == self.analysis_right_split.count():
+                self.analysis_right_split.setSizes([int(x) for x in right_sizes])
+
             # Stats-tab Std colour thresholds.
             self.sp_std_lower.setValue(float(s.get('std_lower', 0.50)))
             self.sp_std_upper.setValue(float(s.get('std_upper', 1.00)))
@@ -9209,6 +9452,8 @@ class MainWindow(QMainWindow):
 
             'analysis_left_split_sizes': self.analysis_left_split.sizes(),
             'analysis_row1_split_sizes': self.analysis_row1_split.sizes(),
+            'analysis_main_split_sizes': self.analysis_main_split.sizes(),
+            'analysis_right_split_sizes': self.analysis_right_split.sizes(),
 
             'shape_x':       self.cb_shape_x.currentData(),
             'shape_y':       self.cb_shape_y.currentData(),

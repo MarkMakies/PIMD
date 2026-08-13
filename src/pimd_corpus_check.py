@@ -2,7 +2,7 @@
 """
 pimd_corpus_check.py — corpus-level acceptance checks for a PIMD signature corpus.
 
-Version: 1.9
+Version: 1.10
 
 Reads the v1.32+ target-registry corpus schema (the CORPUS_HEADER schema that
 pimd_classviz.py's Training capture and pimd_features.py's corpus builder both
@@ -120,7 +120,12 @@ CORPUS_FIELDS = pimd_features.CORPUS_HEADER_FIELDS
 # Additive schema growth belongs here rather than in a migration.
 # `tilt_deg` (features v12) is optional for the same reason, and additionally is
 # blank on every capture that is not an oblique one.
-OPTIONAL_FIELDS = {'pack_v', 'tilt_deg'}
+# `temp_c`/`streamed_s`/`stalled_s` (features v15) likewise: every corpus written
+# before them lacks the columns outright, and they are blank whenever the sensor
+# was silent or nothing was streaming. Nothing in this checker reads them yet --
+# they are listed here so REQUIRED_FIELDS does not grow and make three columns
+# mandatory, which would make both corpora on disk unloadable on sight.
+OPTIONAL_FIELDS = {'pack_v', 'tilt_deg', 'temp_c', 'streamed_s', 'stalled_s'}
 REQUIRED_FIELDS = set(CORPUS_FIELDS) - OPTIONAL_FIELDS
 
 
